@@ -446,6 +446,32 @@ def ensure_trading_runtime(selected_exchange: str):
     return trading_bot
 
 
+def get_session_trading_bot_safe(selected_exchange: str, *, force_init: bool = False):
+    """
+    Garante um TradingBot válido na sessão e evita NoneType em chamadas de mercado.
+    Tenta alinhar exchange/timeframe com o runtime selecionado; se falhar, aplica fallback leve.
+    """
+    trading_bot = st.session_state.get("trading_bot")
+    should_bootstrap = (
+        force_init
+        or trading_bot is None
+        or st.session_state.get("current_exchange") != selected_exchange
+    )
+    if not should_bootstrap:
+        return trading_bot
+
+    try:
+        return ensure_trading_runtime(selected_exchange)
+    except Exception as exc:
+        logger.warning("Falha ao inicializar runtime de trading (%s). Aplicando fallback.", selected_exchange, exc_info=True)
+        try:
+            return get_or_init_trading_bot()
+        except Exception:
+            logger.warning("Fallback de TradingBot também falhou.", exc_info=True)
+            st.session_state.trading_bot = None
+            return None
+
+
 @st.cache_data(ttl=30, show_spinner=False)
 def get_cached_ai_model_metadata():
     model_path = Path(ProductionConfig.AI_MODEL_PATH)
@@ -2069,6 +2095,11 @@ def render_multiuser_workspace_tab():
             - cada usuário enxerga apenas as próprias contas
             - credenciais ficam protegidas no vault
             - risco, permissões e governança são acompanhados por conta
+
+            Como entrar pela primeira vez:
+            - um admin cria seu acesso em `Admin > Acessos`
+            - você recebe `login` e `senha inicial`
+            - faz login na barra lateral em `Workspace Multiusuário`
             """
         )
         return
@@ -2614,6 +2645,11 @@ def main():
     st.sidebar.info("🔹 Sem limite de requisições API - Dados streaming 24/7")
 
     initialize_dashboard_session_state()
+    runtime_bootstrap_error = ""
+    runtime_trading_bot = get_session_trading_bot_safe(selected_exchange, force_init=True)
+    if runtime_trading_bot is None:
+        runtime_bootstrap_error = "Runtime de mercado indisponível no momento."
+
     if ProductionConfig.ENABLE_DASHBOARD_BACKGROUND_BOT:
         logger.warning("ENABLE_DASHBOARD_BACKGROUND_BOT foi definido, mas o modo recomendado e executar o bot por start_telegram_bot.py")
 
@@ -2655,10 +2691,9 @@ def main():
     show_live_sidebar_controls = sidebar_active_section in live_sidebar_sections
 
     if show_live_sidebar_controls:
-        try:
-            ensure_trading_runtime(selected_exchange)
-        except Exception as exc:
-            st.sidebar.error(f"Erro ao configurar {selected_exchange}: {str(exc)}")
+        if get_session_trading_bot_safe(selected_exchange) is None:
+            message = runtime_bootstrap_error or f"Erro ao configurar {selected_exchange}."
+            st.sidebar.error(message)
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("👤 Workspace Multiusuário")
@@ -2700,7 +2735,7 @@ def main():
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
         st.sidebar.caption(
-            "Acesso isolado por usuário. Cada conta enxerga apenas risco, credenciais e eventos próprios."
+            "Acesso isolado por usuário. Login/senha são criados pelo admin em Admin > Acessos."
         )
 
     # Continue with sidebar configuration
@@ -2922,10 +2957,14 @@ def main():
                 try:
                     st.session_state.last_update = None
                     st.session_state.current_data = None
-                    new_data = st.session_state.trading_bot.get_market_data()
-                    if new_data is not None:
-                        st.session_state.current_data = new_data
-                        st.session_state.last_update = get_brazil_datetime_naive()
+                    runtime_bot = get_session_trading_bot_safe(selected_exchange)
+                    if runtime_bot is None:
+                        st.error("❌ Runtime de mercado indisponível. Tente novamente em alguns segundos.")
+                    else:
+                        new_data = runtime_bot.get_market_data()
+                        if new_data is not None:
+                            st.session_state.current_data = new_data
+                            st.session_state.last_update = get_brazil_datetime_naive()
 
                     st.success("✅ Dados atualizados!")
                     st.rerun()
@@ -3028,13 +3067,18 @@ def main():
     live_strategy_settings = None
     active_live_profile = None
     if show_live_sidebar_controls:
-        config_changed = st.session_state.trading_bot.update_config(
-            symbol=symbol,
-            timeframe=timeframe,
-            rsi_period=rsi_period,
-            rsi_min=rsi_min,
-            rsi_max=rsi_max
-        )
+        runtime_bot = get_session_trading_bot_safe(selected_exchange)
+        if runtime_bot is None:
+            st.sidebar.error("Runtime de mercado indisponível para atualizar parâmetros agora.")
+            config_changed = False
+        else:
+            config_changed = runtime_bot.update_config(
+                symbol=symbol,
+                timeframe=timeframe,
+                rsi_period=rsi_period,
+                rsi_min=rsi_min,
+                rsi_max=rsi_max
+            )
 
         if config_changed:
             logger.info(
@@ -3053,8 +3097,8 @@ def main():
             require_trend=require_trend,
         )
         active_live_profile = live_strategy_settings.get("active_profile")
-        if active_live_profile:
-            st.session_state.trading_bot.update_config(
+        if active_live_profile and runtime_bot is not None:
+            runtime_bot.update_config(
                 symbol=symbol,
                 timeframe=timeframe,
                 rsi_period=live_strategy_settings["rsi_period"],
@@ -3133,27 +3177,32 @@ def main():
             ws_key = f"{symbol}_{ws_timeframe}"
             stream_client = None
             stream_status = None
+            runtime_bot = get_session_trading_bot_safe(selected_exchange)
 
             if 'ws_auto_connected' not in st.session_state:
                 st.session_state.ws_auto_connected = False
             if 'ws_current_key' not in st.session_state:
                 st.session_state.ws_current_key = None
 
-            try:
-                stream_client = st.session_state.trading_bot._get_realtime_stream_client(
-                    symbol=symbol,
-                    timeframe=ws_timeframe,
-                )
-                stream_status = stream_client.get_current_status()
-                st.session_state.ws_auto_connected = True
-                if st.session_state.get('ws_current_key') != ws_key:
-                    st.session_state.ws_current_key = ws_key
-                    st.success(f"✅ Stream compartilhado pronto para {ws_display_symbol}")
-            except Exception as e:
+            if runtime_bot is None:
                 st.session_state.ws_auto_connected = False
-                stream_client = None
-                stream_status = None
-                st.error(f"❌ Erro ao inicializar stream compartilhado: {e}")
+                st.error("❌ Runtime de mercado indisponível para inicializar stream.")
+            else:
+                try:
+                    stream_client = runtime_bot._get_realtime_stream_client(
+                        symbol=symbol,
+                        timeframe=ws_timeframe,
+                    )
+                    stream_status = stream_client.get_current_status()
+                    st.session_state.ws_auto_connected = True
+                    if st.session_state.get('ws_current_key') != ws_key:
+                        st.session_state.ws_current_key = ws_key
+                        st.success(f"✅ Stream compartilhado pronto para {ws_display_symbol}")
+                except Exception as e:
+                    st.session_state.ws_auto_connected = False
+                    stream_client = None
+                    stream_status = None
+                    st.error(f"❌ Erro ao inicializar stream compartilhado: {e}")
             
             # Status e controles do WebSocket
             col1, col2, col3 = st.columns(3)
@@ -3184,18 +3233,21 @@ def main():
             with col3:
                 if st.button("🔄 Reconectar"):
                     try:
-                        st.session_state.trading_bot.reset_stream_client(
-                            symbol=symbol,
-                            timeframe=ws_timeframe,
-                        )
-                        stream_client = st.session_state.trading_bot._get_realtime_stream_client(
-                            symbol=symbol,
-                            timeframe=ws_timeframe,
-                        )
-                        stream_status = stream_client.get_current_status()
-                        st.session_state.ws_auto_connected = True
-                        st.session_state.ws_current_key = ws_key
-                        st.success("✅ WebSocket reconectado")
+                        if runtime_bot is None:
+                            st.warning("⚠️ Runtime de mercado indisponível para reconexão.")
+                        else:
+                            runtime_bot.reset_stream_client(
+                                symbol=symbol,
+                                timeframe=ws_timeframe,
+                            )
+                            stream_client = runtime_bot._get_realtime_stream_client(
+                                symbol=symbol,
+                                timeframe=ws_timeframe,
+                            )
+                            stream_status = stream_client.get_current_status()
+                            st.session_state.ws_auto_connected = True
+                            st.session_state.ws_current_key = ws_key
+                            st.success("✅ WebSocket reconectado")
                     except Exception as e:
                         st.session_state.ws_auto_connected = False
                         st.error(f"❌ Erro na reconexão: {e}")
@@ -3389,6 +3441,9 @@ def main():
             # Create overview table for all selected symbols
             overview_data = []
             current_time = now_brazil()
+            runtime_bot = get_session_trading_bot_safe(selected_exchange)
+            if runtime_bot is None:
+                st.warning("⚠️ Runtime de mercado indisponível para análise multi-símbolo neste momento.")
 
             for sym in selected_symbols:
                 # Initialize variables at the start of each iteration
@@ -3400,6 +3455,8 @@ def main():
                 data_last_update = None
 
                 try:
+                    if runtime_bot is None:
+                        continue
                     symbol_strategy_settings = get_effective_strategy_settings(
                         sym,
                         timeframe,
@@ -3433,18 +3490,18 @@ def main():
                         with st.spinner(f'📡 Atualizando {sym}...'):
                             try:
                                 # Use shared trading bot instance
-                                st.session_state.trading_bot.update_config(
+                                runtime_bot.update_config(
                                     symbol=sym,
                                     timeframe=timeframe,
                                     rsi_period=symbol_strategy_settings["rsi_period"],
                                     rsi_min=symbol_strategy_settings["rsi_min"],
                                     rsi_max=symbol_strategy_settings["rsi_max"],
                                 )
-                                sym_data = st.session_state.trading_bot.get_market_data(limit=200)
+                                sym_data = runtime_bot.get_market_data(limit=200)
 
                                 if sym_data is not None and not sym_data.empty:
                                     last_candle = sym_data.iloc[-1]
-                                    signal_pipeline = st.session_state.trading_bot.evaluate_signal_pipeline(
+                                    signal_pipeline = runtime_bot.evaluate_signal_pipeline(
                                         sym_data,
                                         min_confidence=min_confidence,
                                         timeframe=timeframe,
@@ -3786,11 +3843,12 @@ def main():
         st.session_state.last_update is None or 
         (get_brazil_datetime_naive() - st.session_state.last_update).total_seconds() > 60
     )
+    runtime_bot = get_session_trading_bot_safe(selected_exchange)
 
-    if should_update:
+    if should_update and runtime_bot is not None:
         try:
             with st.spinner('Carregando dados...'):
-                data = st.session_state.trading_bot.get_market_data()
+                data = runtime_bot.get_market_data()
                 if data is not None:
                     st.session_state.current_data = data
                     st.session_state.last_update = get_brazil_datetime_naive()
@@ -3804,10 +3862,12 @@ def main():
                 logger.warning("Falha de georrestrição Binance no carregamento inicial da dashboard: %s", error_text)
             else:
                 st.error(f"Erro ao carregar dados: {error_text}")
+    elif should_update and runtime_bot is None:
+        st.info("ℹ️ Runtime de mercado ainda inicializando. Aguarde alguns segundos.")
 
     # Store multi-symbol data (already initialized above)
 
-    if st.session_state.current_data is not None:
+    if st.session_state.current_data is not None and runtime_bot is not None:
         data = st.session_state.current_data
         last_candle = data.iloc[-1]
         data_is_fresh, data_age_seconds = _is_data_fresh(
@@ -3831,7 +3891,7 @@ def main():
         confirmation_evaluation = None
         entry_quality_evaluation = None
         hard_block_evaluation = None
-        signal_pipeline = st.session_state.trading_bot.evaluate_signal_pipeline(
+        signal_pipeline = runtime_bot.evaluate_signal_pipeline(
             data,
             min_confidence=min_confidence,
             timeframe=timeframe,
@@ -4026,7 +4086,7 @@ def main():
                 if risk_plan and risk_plan.get("allowed"):
                     fallback_signal_score = last_candle.get("signal_confidence")
                     if fallback_signal_score is None or pd.isna(fallback_signal_score):
-                        fallback_signal_score = st.session_state.trading_bot.get_signal_with_confidence(data).get(
+                        fallback_signal_score = runtime_bot.get_signal_with_confidence(data).get(
                             "confidence",
                             0.0,
                         )
@@ -4155,7 +4215,7 @@ def main():
             render_market_operational_summary(
                 symbol=symbol,
                 timeframe=timeframe,
-                rsi_period=st.session_state.trading_bot.rsi_period,
+                rsi_period=runtime_bot.rsi_period,
                 rsi_min=rsi_min,
                 rsi_max=rsi_max,
                 last_candle=last_candle,
@@ -4187,6 +4247,8 @@ def main():
                 require_volume=require_volume,
                 require_trend=require_trend,
             )
+    elif st.session_state.current_data is not None and runtime_bot is None:
+        st.warning("⚠️ Dados em cache existem, mas o runtime de mercado está indisponível para processar sinais.")
 
     if active_market_view == "futures":
         # Tab 2: Calculadoras
@@ -4317,13 +4379,17 @@ def main():
         if should_update_data:
             with st.spinner('🔄 Atualizando dados do mercado...'):
                 try:
-                    new_data = st.session_state.trading_bot.get_market_data()
-                    if new_data is not None:
-                        st.session_state.current_data = new_data
-                        st.session_state.last_update = current_time_check
-                        st.success("✅ Dados atualizados!")
+                    runtime_bot = get_session_trading_bot_safe(selected_exchange)
+                    if runtime_bot is None:
+                        st.info("ℹ️ Runtime de mercado indisponível para atualização automática no momento.")
                     else:
-                        st.warning("⚠️ Não foi possível atualizar os dados")
+                        new_data = runtime_bot.get_market_data()
+                        if new_data is not None:
+                            st.session_state.current_data = new_data
+                            st.session_state.last_update = current_time_check
+                            st.success("✅ Dados atualizados!")
+                        else:
+                            st.warning("⚠️ Não foi possível atualizar os dados")
                 except Exception as e:
                     error_text = str(e or "")
                     if "451" in error_text and "restricted location" in error_text.lower():
@@ -4728,7 +4794,6 @@ def main():
                     key="bt_period_preset",
                 )
 
-                from datetime import date
                 max_date = date.today()
 
                 if period_preset == "Última Semana":
@@ -7286,6 +7351,36 @@ def main():
             st.session_state.admin_authenticated = False
         if "admin_auth_error" not in st.session_state:
             st.session_state.admin_auth_error = ""
+        dashboard_access_total = 0
+        dashboard_access_error = ""
+        try:
+            dashboard_access_total = len(db.list_dashboard_user_access(limit=200))
+        except Exception as bootstrap_exc:
+            dashboard_access_error = str(bootstrap_exc)
+
+        with st.expander("🧭 Bootstrap do Workspace", expanded=not st.session_state.get("admin_authenticated")):
+            boot_col1, boot_col2, boot_col3 = st.columns(3)
+            with boot_col1:
+                st.metric("Senha Admin", "OK" if configured_admin_password else "PENDENTE")
+            with boot_col2:
+                st.metric("Sessão Admin", "ON" if st.session_state.get("admin_authenticated") else "OFF")
+            with boot_col3:
+                st.metric("Acessos Criados", int(dashboard_access_total))
+            if dashboard_access_error:
+                st.error(f"Não foi possível ler acessos da dashboard: {dashboard_access_error}")
+
+            st.markdown(
+                """
+                1. Defina `ADMIN_PANEL_PASSWORD` no ambiente e faça deploy.
+                2. Entre com essa senha no bloco de autenticação Admin abaixo.
+                3. Em `Visão Admin -> Acessos`, crie `user_id`, `login_name` e `senha inicial`.
+                4. O usuário entra na sidebar em `Workspace Multiusuário` com esse login/senha.
+                5. Em seguida, cadastre conta/risco/credenciais nas visões `Contas` e `Resumo`.
+                """
+            )
+            st.caption(
+                f"Regra de senha inicial: mínimo {int(ProductionConfig.DASHBOARD_MIN_PASSWORD_LENGTH)} caracteres."
+            )
 
         if not configured_admin_password:
             st.warning("⚠️ Configure ADMIN_PANEL_PASSWORD para liberar o painel admin.")
@@ -7318,6 +7413,7 @@ def main():
                 st.error(st.session_state.admin_auth_error)
             else:
                 st.info("🔐 Digite a senha de administrador para acessar o painel")
+                st.caption("Se a página parecer vazia, primeiro autentique com a senha de Admin.")
 
         if st.session_state.get("admin_authenticated") and configured_admin_password:
             st.success("✅ Acesso autorizado!")
@@ -7434,7 +7530,8 @@ def main():
                     )
                     st.dataframe(access_df, width="stretch", hide_index=True)
                 else:
-                    st.info("Nenhum acesso de usuário da dashboard provisionado ainda.")
+                    st.warning("Nenhum acesso de dashboard provisionado ainda. Crie o primeiro acesso no formulário abaixo.")
+                    st.caption("Depois disso o usuário já consegue fazer login no Workspace pela barra lateral.")
 
                 with st.form("dashboard_user_access_form"):
                     access_col1, access_col2, access_col3 = st.columns(3)
