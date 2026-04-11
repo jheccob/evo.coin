@@ -6,7 +6,8 @@ from typing import Iterable, Optional
 import pandas as pd
 
 from config import AppConfig
-from market import fetch_candles
+import config as runtime_config
+from market_data import fetch_candles
 from strategy import prepare_candle_features
 from trading_bot_websocket import StreamlinedTradingBot, WEBSOCKETS_AVAILABLE
 
@@ -36,7 +37,8 @@ class RestFallbackStreamClient:
 
     def get_market_data(self, limit: int = 200, timeout: float = 20.0, include_current_candle: bool = False):
         del timeout, include_current_candle
-        return fetch_candles(self.symbol, self.timeframe, limit=limit)
+        use_testnet = bool(getattr(runtime_config, "TESTNET", False))
+        return fetch_candles(self.symbol, self.timeframe, limit=limit, testnet=use_testnet)
 
 
 def _stream_key(symbol: str, timeframe: str) -> str:
@@ -196,5 +198,6 @@ def get_market_data(bot, limit: int = 200, symbol: Optional[str] = None, timefra
     try:
         df = client.get_market_data(limit=limit)
     except Exception:
-        df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit)
+        use_testnet = bool(getattr(runtime_config, "TESTNET", False))
+        df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit, testnet=use_testnet)
     return calculate_indicators(bot, df)

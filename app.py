@@ -2709,7 +2709,8 @@ def main():
         if st.sidebar.button("🧪 Testar WebSocket Binance"):
             with st.spinner("Testando WebSocket público da Binance Futures..."):
                 try:
-                    success, message = ExchangeConfig.test_connection('binance')
+                    use_testnet_runtime = str(os.getenv("TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
+                    success, message = ExchangeConfig.test_connection('binanceusdm', testnet=use_testnet_runtime)
 
                     if success:
                         st.sidebar.success("✅ WebSocket Público da Binance funcionando!")
@@ -2736,10 +2737,16 @@ def main():
 
                 try:
                     import requests
-                    requests.get("https://api.binance.com/api/v3/ping", timeout=5).raise_for_status()
-                    st.sidebar.success("✅ Binance API acessível")
+                    use_testnet_runtime = str(os.getenv("TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
+                    api_ping_url = (
+                        "https://testnet.binancefuture.com/fapi/v1/ping"
+                        if use_testnet_runtime
+                        else "https://fapi.binance.com/fapi/v1/ping"
+                    )
+                    requests.get(api_ping_url, timeout=5).raise_for_status()
+                    st.sidebar.success("✅ Binance Futures API acessível")
                 except Exception:
-                    st.sidebar.error("❌ Problema com Binance API")
+                    st.sidebar.error("❌ Problema com Binance Futures API")
 
                 try:
                     import requests
@@ -3788,7 +3795,15 @@ def main():
                     st.session_state.current_data = data
                     st.session_state.last_update = get_brazil_datetime_naive()
         except Exception as e:
-            st.error(f"Erro ao carregar dados: {str(e)}")
+            error_text = str(e or "")
+            if "451" in error_text and "restricted location" in error_text.lower():
+                st.warning(
+                    "⚠️ Ambiente do Railway bloqueado por região para alguns endpoints da Binance. "
+                    "A dashboard pode exibir dados limitados, enquanto o bot continua em TESTNET."
+                )
+                logger.warning("Falha de georrestrição Binance no carregamento inicial da dashboard: %s", error_text)
+            else:
+                st.error(f"Erro ao carregar dados: {error_text}")
 
     # Store multi-symbol data (already initialized above)
 
