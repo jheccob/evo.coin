@@ -2608,7 +2608,7 @@ def main():
     st.sidebar.subheader("🌎 Exchange")
 
     # Usar sempre Binance WebSocket público
-    selected_exchange = 'binance'
+    selected_exchange = 'binanceusdm'
     st.sidebar.success("✅ **Binance WebSocket Público** - Funcionando sem credenciais")
     st.sidebar.info("📡 Dados em tempo real via WebSocket público da Binance Futures")
     st.sidebar.info("🔹 Sem limite de requisições API - Dados streaming 24/7")
@@ -4173,35 +4173,7 @@ def main():
                 require_trend=require_trend,
             )
 
-    # Auto-refresh mechanism otimizado - cache inteligente
-    if auto_refresh:
-        # Cache mais agressivo para melhor performance
-        current_time_check = get_brazil_datetime_naive()
-        
-        # Usar cache de 90 segundos para reduzir chamadas API
-        cache_timeout = 90  # Aumentado de 30 para 90 segundos
-        
-        should_update_data = (
-            st.session_state.last_update is None or 
-            (current_time_check - st.session_state.last_update).total_seconds() > cache_timeout
-        )
-        
-        if should_update_data:
-            # Mostrar que está atualizando
-            with st.spinner('🔄 Atualizando dados do mercado...'):
-                try:
-                    # Buscar novos dados apenas quando necessário
-                    new_data = st.session_state.trading_bot.get_market_data()
-                    if new_data is not None:
-                        st.session_state.current_data = new_data
-                        st.session_state.last_update = current_time_check
-                        st.success("✅ Dados atualizados!")
-                    else:
-                        st.warning("⚠️ Não foi possível atualizar os dados")
-                        
-                except Exception as e:
-                    st.error(f"❌ Erro na atualização: {str(e)}")
-
+    if active_market_view == "futures":
         # Tab 2: Calculadoras
         with futures_tab2:
             st.markdown("### ⚖️ Calculadoras de Trading")
@@ -4219,10 +4191,12 @@ def main():
                     account_balance = st.number_input("Saldo da Conta ($)", value=10000.0, min_value=100.0)
                     risk_percent = st.slider("Risco por Trade (%)", 1, 10, 3)
                     leverage_calc = st.selectbox("Alavancagem Calc", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
-                    entry_price = st.number_input("Preço de Entrada ($)", value=float(st.session_state.current_data.iloc[-1]['close']) if st.session_state.current_data is not None else 1.0)
+                    entry_price = st.number_input(
+                        "Preço de Entrada ($)",
+                        value=float(st.session_state.current_data.iloc[-1]['close']) if st.session_state.current_data is not None else 1.0
+                    )
 
                 with col2:
-                    # Cálculos
                     risk_amount = account_balance * (risk_percent / 100)
                     position_size_usdt = risk_amount * leverage_calc
                     quantity = position_size_usdt / entry_price
@@ -4244,7 +4218,6 @@ def main():
                     position_side = st.radio("Lado da Posição", ["LONG", "SHORT"])
 
                 with col2:
-                    # Calcular liquidação (simplificado)
                     if position_side == "LONG":
                         liquidation_price = entry_price_liq * (1 - (0.9 / leverage_liq))
                         distance = ((entry_price_liq - liquidation_price) / entry_price_liq) * 100
@@ -4272,7 +4245,6 @@ def main():
                     position_size_pnl = st.number_input("Tamanho da Posição ($)", value=1000.0)
                     leverage_pnl = st.selectbox("Alavancagem PnL", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
 
-                    # Cenários de preço
                     st.markdown("**Cenários de Preço:**")
                     scenario_1 = st.number_input("Cenário 1 ($)", value=entry_price_pnl * 1.02)
                     scenario_2 = st.number_input("Cenário 2 ($)", value=entry_price_pnl * 1.05)
@@ -4280,11 +4252,9 @@ def main():
 
                 with col2:
                     st.markdown("**Resultados:**")
-
                     for i, price in enumerate([scenario_1, scenario_2, scenario_3], 1):
                         price_change_pct = ((price - entry_price_pnl) / entry_price_pnl)
                         pnl = position_size_pnl * price_change_pct * leverage_pnl
-
                         color = "🟢" if pnl > 0 else "🔴"
                         st.write(f"**Cenário {i}:** {color} ${pnl:+.2f} ({price_change_pct * leverage_pnl * 100:+.1f}%)")
 
@@ -4292,7 +4262,6 @@ def main():
         with futures_tab3:
             st.markdown("### 📊 Simulador Educacional de Cenários")
 
-            # Mock positions for educational demonstration only
             mock_positions = [
                 {
                     "Par": symbol,
@@ -4319,6 +4288,37 @@ def main():
                 st.warning("⚠️ Isto não representa posição real aberta nem paper trade salvo")
             else:
                 st.info("📭 Clique para gerar um cenário teórico com base na configuração atual")
+
+    # Auto-refresh mechanism otimizado - cache inteligente
+    if auto_refresh:
+        current_time_check = get_brazil_datetime_naive()
+        cache_timeout = 90
+
+        should_update_data = (
+            st.session_state.last_update is None or
+            (current_time_check - st.session_state.last_update).total_seconds() > cache_timeout
+        )
+
+        if should_update_data:
+            with st.spinner('🔄 Atualizando dados do mercado...'):
+                try:
+                    new_data = st.session_state.trading_bot.get_market_data()
+                    if new_data is not None:
+                        st.session_state.current_data = new_data
+                        st.session_state.last_update = current_time_check
+                        st.success("✅ Dados atualizados!")
+                    else:
+                        st.warning("⚠️ Não foi possível atualizar os dados")
+                except Exception as e:
+                    error_text = str(e or "")
+                    if "451" in error_text and "restricted location" in error_text.lower():
+                        st.warning(
+                            "⚠️ Ambiente do Railway bloqueado por região para alguns endpoints da Binance. "
+                            "O bot pode continuar em TESTNET enquanto a dashboard exibe dados limitados."
+                        )
+                        logger.warning("Falha de georrestrição Binance na atualização da dashboard: %s", error_text)
+                    else:
+                        st.error(f"❌ Erro na atualização: {error_text}")
 
     if active_dashboard_section == "bot":
         st.header("🤖 Central do Bot Trader")
