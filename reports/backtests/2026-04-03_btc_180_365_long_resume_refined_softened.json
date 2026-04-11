@@ -1,0 +1,98 @@
+[
+  {
+    "days": 180,
+    "start": "2025-10-05",
+    "end": "2026-04-03",
+    "total_return_pct": -4.07,
+    "final_balance": 9593.27,
+    "profit_factor": 0.54,
+    "max_drawdown": 6.08,
+    "total_trades": 49,
+    "win_rate": 40.82,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 48,
+        "win_rate": 41.67,
+        "profit_factor": 0.55,
+        "net_profit": -398.33,
+        "total_result_pct": -4.09,
+        "avg_result_pct": -0.09,
+        "winning_trades": 20,
+        "losing_trades": 28,
+        "avg_mfe_pct": 0.74,
+        "avg_mae_pct": 0.53
+      },
+      {
+        "market_pattern": "trend_pullback_short",
+        "total_trades": 1,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "net_profit": -8.4,
+        "total_result_pct": -0.25,
+        "avg_result_pct": -0.25,
+        "winning_trades": 0,
+        "losing_trades": 1,
+        "avg_mfe_pct": 2.46,
+        "avg_mae_pct": 0.45
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 19,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 0.78,
+      "avg_mae_pct": 0.53
+    }
+  },
+  {
+    "days": 365,
+    "start": "2025-04-03",
+    "end": "2026-04-03",
+    "total_return_pct": -9.5,
+    "final_balance": 9049.85,
+    "profit_factor": 0.42,
+    "max_drawdown": 10.06,
+    "total_trades": 89,
+    "win_rate": 34.83,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 88,
+        "win_rate": 35.23,
+        "profit_factor": 0.42,
+        "net_profit": -946.21,
+        "total_result_pct": -23.07,
+        "avg_result_pct": -0.26,
+        "winning_trades": 31,
+        "losing_trades": 57,
+        "avg_mfe_pct": 0.6,
+        "avg_mae_pct": 0.52
+      },
+      {
+        "market_pattern": "trend_pullback_short",
+        "total_trades": 1,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "net_profit": -3.94,
+        "total_result_pct": -0.25,
+        "avg_result_pct": -0.25,
+        "winning_trades": 0,
+        "losing_trades": 1,
+        "avg_mfe_pct": 2.46,
+        "avg_mae_pct": 0.45
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 26,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 0.62,
+      "avg_mae_pct": 0.52
+    }
+  }
+]

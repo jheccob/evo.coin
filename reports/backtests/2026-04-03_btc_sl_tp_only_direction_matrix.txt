@@ -1,0 +1,23 @@
+BTC/USDT futures | 15m -> 1h | modo estrito SL/TP only | IA desligada para diagnostico
+janela final: 2026-04-03 00:00:00
+
+30 dias
+- both: retorno -3.63% | PF 0.79 | DD 8.02% | trades 49 | WR 34.69% | longs -305.1847 | shorts -57.7961
+- long_only: retorno -3.42% | PF 0.71 | DD 7.32% | trades 29 | WR 31.03% | longs -341.5754 | shorts 0
+- short_only: retorno -1.03% | PF 0.89 | DD 4.01% | trades 20 | WR 40.0% | longs 0 | shorts -102.8931
+
+90 dias
+- both: retorno -5.49% | PF 0.85 | DD 10.03% | trades 96 | WR 34.38% | longs -534.9838 | shorts -13.5599
+- long_only: retorno -8.45% | PF 0.52 | DD 10.13% | trades 47 | WR 25.53% | longs -845.1699 | shorts 0
+- short_only: retorno -0.91% | PF 0.97 | DD 7.57% | trades 89 | WR 38.2% | longs 0 | shorts -90.6742
+
+180 dias
+- both: retorno -7.92% | PF 0.77 | DD 10.23% | trades 110 | WR 35.45% | longs -714.4427 | shorts -77.8068
+- long_only: retorno -9.12% | PF 0.44 | DD 10.34% | trades 40 | WR 25.0% | longs -911.6076 | shorts 0
+- short_only: retorno -7.5% | PF 0.77 | DD 10.22% | trades 89 | WR 35.96% | longs 0 | shorts -750.0386
+
+Leitura objetiva:
+- 30 dias: shorts estao menos ruins que longs.
+- 90 dias: shorts quase zeram o resultado; longs continuam muito fracos.
+- 180 dias: ambos lados perdem dinheiro, mas longs seguem piores.
+- Com a regra SL/TP only, o problema nao era so devolucao de lucro por gestao. A leitura direcional, especialmente do lado comprador, continua fraca.

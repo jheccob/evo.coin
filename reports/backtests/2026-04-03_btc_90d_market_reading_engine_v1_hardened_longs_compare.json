@@ -1,0 +1,115 @@
+[
+  {
+    "mode": "disabled",
+    "ai_min_win_probability": null,
+    "symbol": "BTC/USDT",
+    "timeframe": "15m",
+    "context_timeframe": "1h",
+    "start_date": "2026-01-03T00:00:00",
+    "end_date": "2026-04-03T00:00:00",
+    "stats": {
+      "total_return_pct": -3.28,
+      "final_balance": 9672.03,
+      "profit_factor": 0.93,
+      "max_drawdown_pct": 9.44,
+      "total_trades": 124,
+      "win_rate_pct": 37.9,
+      "winning_trades": 47,
+      "losing_trades": 77,
+      "exit_reason_counts": {
+        "STOP_LOSS": 77,
+        "TAKE_PROFIT": 47
+      }
+    },
+    "ai_summary": {
+      "mode": "disabled",
+      "min_win_probability": 0.6,
+      "candidate_count": 0,
+      "scored_count": 0,
+      "approved_count": 0,
+      "blocked_count": 0,
+      "high_quality_count": 0,
+      "medium_quality_count": 0,
+      "low_quality_count": 0,
+      "unavailable_count": 0,
+      "model_loaded_count": 0,
+      "win_probability_sum": 0.0,
+      "latest_model_version": null,
+      "approval_rate_pct": 0.0,
+      "avg_win_probability": 0.0,
+      "performance_by_quality_band": {},
+      "model_loaded": false
+    },
+    "longs": {
+      "count": 35,
+      "net_pnl": -207.0607,
+      "wins": 13
+    },
+    "shorts": {
+      "count": 89,
+      "net_pnl": -120.909,
+      "wins": 34
+    }
+  },
+  {
+    "mode": "filter",
+    "ai_min_win_probability": 0.85,
+    "symbol": "BTC/USDT",
+    "timeframe": "15m",
+    "context_timeframe": "1h",
+    "start_date": "2026-01-03T00:00:00",
+    "end_date": "2026-04-03T00:00:00",
+    "stats": {
+      "total_return_pct": -0.75,
+      "final_balance": 9924.53,
+      "profit_factor": 0.97,
+      "max_drawdown_pct": 5.5,
+      "total_trades": 48,
+      "win_rate_pct": 41.67,
+      "winning_trades": 20,
+      "losing_trades": 28,
+      "exit_reason_counts": {
+        "STOP_LOSS": 28,
+        "TAKE_PROFIT": 20
+      }
+    },
+    "ai_summary": {
+      "mode": "filter",
+      "min_win_probability": 0.85,
+      "candidate_count": 495,
+      "scored_count": 495,
+      "approved_count": 206,
+      "blocked_count": 289,
+      "high_quality_count": 261,
+      "medium_quality_count": 137,
+      "low_quality_count": 97,
+      "unavailable_count": 0,
+      "model_loaded_count": 495,
+      "win_probability_sum": 332.51462076976895,
+      "latest_model_version": "trade_decision_xgb",
+      "approval_rate_pct": 41.62,
+      "avg_win_probability": 0.6717,
+      "performance_by_quality_band": {
+        "high": {
+          "trades": 48,
+          "wins": 20,
+          "losses": 28,
+          "net_profit": -75.4682,
+          "avg_win_probability": 0.9383,
+          "win_rate": 41.67
+        }
+      },
+      "model_loaded": true
+    },
+    "longs": {
+      "count": 0,
+      "net_pnl": 0,
+      "wins": 0
+    },
+    "shorts": {
+      "count": 48,
+      "net_pnl": -75.4682,
+      "wins": 20
+    }
+  }
+]

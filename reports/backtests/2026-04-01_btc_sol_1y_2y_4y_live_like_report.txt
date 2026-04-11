@@ -1,0 +1,137 @@
+Backtest report
+Date generated: 2026-04-01
+
+Goal
+Measure how the current bot setup would have behaved in market-like operation for BTC/USDT and SOL/USDT across 1, 2 and 4 years.
+
+Method
+- Engine: current project backtest engine
+- Mode: live-like operational simulation
+- Initial balance: 10000 USD
+- Timeframe: 15m
+- Context timeframe: 1h
+- Costs: engine defaults (fee_rate 0.001, slippage 0.0005)
+- Validation in these 6 runs: disabled
+- Walk-forward in these 6 runs: disabled
+- Reason: focus on "how it would have operated" instead of promotion validation
+
+Profiles used
+- BTC/USDT: Perfil Global Base (15m), family Majors
+- SOL/USDT: Perfil Global Base (15m) + Trend Alts family overlay
+
+Current operational setup details
+- BTC/USDT: RSI 14 / 54 / 47, SL 0.8%, TP 1.8%, volume OFF, trend OFF, avoid ranging OFF, context 1h
+- SOL/USDT: RSI 14 / 54 / 47, SL 0.9%, TP 2.0%, volume OFF, trend ON, avoid ranging ON, context 1h
+
+Results
+
+BTC/USDT
+- 1 year
+  Run ID: 1340
+  Window: 2025-04-01 to 2026-04-01
+  Return: -8.33%
+  Final balance: 9166.75
+  Trades: 98
+  Win rate: 35.71%
+  Profit factor: 0.63
+  Max drawdown: 10.04%
+  Sharpe: -1.70
+  Objective status: blocked
+  Objective score: 47.50
+
+- 2 years
+  Run ID: 1342
+  Window: 2024-04-01 to 2026-04-01
+  Return: -7.22%
+  Final balance: 9277.50
+  Trades: 45
+  Win rate: 24.44%
+  Profit factor: 0.54
+  Max drawdown: 10.28%
+  Sharpe: -1.29
+  Objective status: blocked
+  Objective score: 15.00
+
+- 4 years
+  Run ID: 1344
+  Window: 2022-04-02 to 2026-04-01
+  Return: -8.37%
+  Final balance: 9162.83
+  Trades: 99
+  Win rate: 38.38%
+  Profit factor: 0.66
+  Max drawdown: 10.20%
+  Sharpe: -0.72
+  Objective status: blocked
+  Objective score: 44.17
+
+SOL/USDT
+- 1 year
+  Run ID: 1339
+  Window: 2025-04-01 to 2026-04-01
+  Return: -6.84%
+  Final balance: 9316.03
+  Trades: 155
+  Win rate: 38.71%
+  Profit factor: 0.83
+  Max drawdown: 9.02%
+  Sharpe: -0.82
+  Objective status: blocked
+  Objective score: 50.83
+
+- 2 years
+  Run ID: 1341
+  Window: 2024-04-01 to 2026-04-01
+  Return: -7.23%
+  Final balance: 9277.39
+  Trades: 143
+  Win rate: 37.06%
+  Profit factor: 0.80
+  Max drawdown: 10.16%
+  Sharpe: -0.75
+  Objective status: blocked
+  Objective score: 50.83
+
+- 4 years
+  Run ID: 1343
+  Window: 2022-04-02 to 2026-04-01
+  Return: -8.31%
+  Final balance: 9168.63
+  Trades: 63
+  Win rate: 28.57%
+  Profit factor: 0.52
+  Max drawdown: 10.12%
+  Sharpe: -0.99
+  Objective status: blocked
+  Objective score: 44.17
+
+Executive reading
+- The current bot is not profitable on BTC or SOL in 1, 2 or 4 years.
+- All 6 runs finished blocked.
+- Drawdown stayed controlled around 9% to 10%, so the problem is not "explosion of risk". The problem is structural edge leakage.
+- SOL was less bad than BTC in 1 year and 2 years, but still negative and still below PF 1.0.
+- BTC stayed negative in all tested horizons and never recovered a positive expectancy profile.
+- The similarity of the losses across 1, 2 and 4 years suggests the issue is persistent, not a bad isolated window.
+
+Important comparison
+- Reference validation-heavy BTC run: 1338
+  Window: 2025-03-31 to 2026-03-31
+  Return: -9.75%
+  Final balance: 9025.43
+  Trades: 100
+  Win rate: 35.00%
+  Profit factor: 0.59
+  Max drawdown: 10.04%
+  Sharpe: -1.97
+  Objective status: blocked
+  Objective score: 37.28
+- This reference points in the same direction as the live-like runs above: the setup is still negative.
+
+Practical conclusion
+- The bot currently survives better than it explodes, but it still loses money.
+- Next useful step is not to trust promotion yet.
+- Next useful step is to inspect where the edge is leaking:
+  long vs short
+  setup type performance
+  exit reasons
+  regime and market state breakdown

@@ -1,0 +1,155 @@
+[
+  {
+    "days": 30,
+    "start": "2026-03-04",
+    "end": "2026-04-03",
+    "total_return_pct": 1.14,
+    "final_balance": 10114.49,
+    "total_trades": 15,
+    "win_rate": 46.67,
+    "profit_factor": 1.35,
+    "max_drawdown": 1.4,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 15,
+        "win_rate": 46.67,
+        "profit_factor": 1.35,
+        "net_profit": 114.49,
+        "total_result_pct": 4.09,
+        "avg_result_pct": 0.27,
+        "winning_trades": 7,
+        "losing_trades": 8,
+        "avg_mfe_pct": 1.19,
+        "avg_mae_pct": 0.54
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 7,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 1.19,
+      "avg_mae_pct": 0.54
+    }
+  },
+  {
+    "days": 90,
+    "start": "2026-01-03",
+    "end": "2026-04-03",
+    "total_return_pct": -1.35,
+    "final_balance": 9865.02,
+    "total_trades": 34,
+    "win_rate": 44.12,
+    "profit_factor": 0.84,
+    "max_drawdown": 2.88,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 34,
+        "win_rate": 44.12,
+        "profit_factor": 0.84,
+        "net_profit": -134.98,
+        "total_result_pct": -0.58,
+        "avg_result_pct": -0.02,
+        "winning_trades": 15,
+        "losing_trades": 19,
+        "avg_mfe_pct": 0.86,
+        "avg_mae_pct": 0.56
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 13,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 0.86,
+      "avg_mae_pct": 0.56
+    }
+  },
+  {
+    "days": 180,
+    "start": "2025-10-05",
+    "end": "2026-04-03",
+    "total_return_pct": -6.46,
+    "final_balance": 9354.45,
+    "total_trades": 71,
+    "win_rate": 36.62,
+    "profit_factor": 0.48,
+    "max_drawdown": 7.54,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 70,
+        "win_rate": 37.14,
+        "profit_factor": 0.48,
+        "net_profit": -641.45,
+        "total_result_pct": -14.8,
+        "avg_result_pct": -0.21,
+        "winning_trades": 26,
+        "losing_trades": 44,
+        "avg_mfe_pct": 0.74,
+        "avg_mae_pct": 0.62
+      },
+      {
+        "market_pattern": "trend_pullback_short",
+        "total_trades": 1,
+        "win_rate": 0.0,
+        "profit_factor": 0.0,
+        "net_profit": -4.1,
+        "total_result_pct": -0.25,
+        "avg_result_pct": -0.25,
+        "winning_trades": 0,
+        "losing_trades": 1,
+        "avg_mfe_pct": 2.46,
+        "avg_mae_pct": 0.45
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 23,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 0.76,
+      "avg_mae_pct": 0.61
+    }
+  },
+  {
+    "days": 365,
+    "start": "2025-04-03",
+    "end": "2026-04-03",
+    "total_return_pct": -9.2,
+    "final_balance": 9080.41,
+    "total_trades": 79,
+    "win_rate": 31.65,
+    "profit_factor": 0.45,
+    "max_drawdown": 10.01,
+    "market_pattern_summary": [
+      {
+        "market_pattern": "trend_resume_long",
+        "total_trades": 79,
+        "win_rate": 31.65,
+        "profit_factor": 0.45,
+        "net_profit": -919.59,
+        "total_result_pct": -23.09,
+        "avg_result_pct": -0.29,
+        "winning_trades": 25,
+        "losing_trades": 54,
+        "avg_mfe_pct": 0.63,
+        "avg_mae_pct": 0.57
+      }
+    ],
+    "position_management_summary": {
+      "break_even_activated_count": 20,
+      "trailing_activated_count": 0,
+      "post_pump_protection_count": 0,
+      "structure_exit_count": 0,
+      "regime_exit_count": 0,
+      "avg_mfe_pct": 0.63,
+      "avg_mae_pct": 0.57
+    }
+  }
+]

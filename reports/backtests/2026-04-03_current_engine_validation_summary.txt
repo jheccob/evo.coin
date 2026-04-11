@@ -1,0 +1,50 @@
+BTC/USDT futures 15m -> 1h
+Estado do motor validado em 2026-04-03
+
+Janela 30d
+- Periodo: 2026-03-04 ate 2026-04-03
+- Resultado: +1.77%
+- Saldo final: 10176.91
+- Trades: 14
+- Win rate: 50.00%
+- Profit factor: 1.54
+- Drawdown: 1.82%
+- Leitura dominante: trend_resume_long
+
+Janela 90d
+- Periodo: 2026-01-03 ate 2026-04-03
+- Resultado: -0.44%
+- Saldo final: 9956.18
+- Trades: 32
+- Win rate: 46.88%
+- Profit factor: 0.95
+- Leitura dominante: trend_resume_long
+
+Janela 180d
+- Periodo: 2025-10-05 ate 2026-04-03
+- Resultado: -6.94%
+- Saldo final: 9305.98
+- Trades: 66
+- Win rate: 36.36%
+- Profit factor: 0.48
+- Leituras: trend_resume_long dominante, com 1 trade residual de trend_pullback_short
+
+Janela 365d
+- Periodo: 2025-04-03 ate 2026-04-03
+- Resultado: -9.12%
+- Saldo final: 9087.60
+- Trades: 73
+- Win rate: 30.14%
+- Profit factor: 0.49
+- Leitura dominante: trend_resume_long
+
+Diagnostico
+- O motor atual melhorou de forma real no curto prazo.
+- O ganho de 30 dias ainda nao se sustenta em 180 e 365 dias.
+- O principal vazamento agora esta concentrado em trend_resume_long fora da janela curta.
+- A arquitetura atual esta mais limpa e profissional, mas o edge ainda nao esta robusto para promocao a runtime live.
+
+Proximo foco recomendado
+- Refinar o criterio estrutural de trend_resume_long no regime de 1h.
+- Revalidar 90/180/365 apos o ajuste.
+- So depois disso promover a IA como filtro real de runtime.

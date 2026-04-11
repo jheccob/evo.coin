@@ -1,0 +1,105 @@
+[
+  {
+    "mode": "disabled",
+    "ai_min_win_probability": null,
+    "stats": {
+      "total_return_pct": 1.45,
+      "final_balance": 10145.01,
+      "profit_factor": 1.09,
+      "max_drawdown_pct": 5.08,
+      "total_trades": 37,
+      "win_rate_pct": 40.54,
+      "winning_trades": 15,
+      "losing_trades": 22,
+      "exit_reason_counts": {
+        "STOP_LOSS": 22,
+        "TAKE_PROFIT": 15
+      }
+    },
+    "ai_summary": {
+      "mode": "disabled",
+      "min_win_probability": 0.6,
+      "candidate_count": 0,
+      "scored_count": 0,
+      "approved_count": 0,
+      "blocked_count": 0,
+      "high_quality_count": 0,
+      "medium_quality_count": 0,
+      "low_quality_count": 0,
+      "unavailable_count": 0,
+      "model_loaded_count": 0,
+      "win_probability_sum": 0.0,
+      "latest_model_version": null,
+      "approval_rate_pct": 0.0,
+      "avg_win_probability": 0.0,
+      "performance_by_quality_band": {},
+      "model_loaded": false
+    },
+    "longs": {
+      "count": 17,
+      "net_pnl": 189.8607,
+      "wins": 7
+    },
+    "shorts": {
+      "count": 20,
+      "net_pnl": -44.8482,
+      "wins": 8
+    }
+  },
+  {
+    "mode": "filter",
+    "ai_min_win_probability": 0.85,
+    "stats": {
+      "total_return_pct": 0.56,
+      "final_balance": 10055.94,
+      "profit_factor": 1.08,
+      "max_drawdown_pct": 3.66,
+      "total_trades": 16,
+      "win_rate_pct": 43.75,
+      "winning_trades": 7,
+      "losing_trades": 9,
+      "exit_reason_counts": {
+        "STOP_LOSS": 9,
+        "TAKE_PROFIT": 7
+      }
+    },
+    "ai_summary": {
+      "mode": "filter",
+      "min_win_probability": 0.85,
+      "candidate_count": 168,
+      "scored_count": 168,
+      "approved_count": 82,
+      "blocked_count": 86,
+      "high_quality_count": 103,
+      "medium_quality_count": 46,
+      "low_quality_count": 19,
+      "unavailable_count": 0,
+      "model_loaded_count": 168,
+      "win_probability_sum": 124.04744403809309,
+      "latest_model_version": "trade_decision_xgb",
+      "approval_rate_pct": 48.81,
+      "avg_win_probability": 0.7384,
+      "performance_by_quality_band": {
+        "high": {
+          "trades": 16,
+          "wins": 7,
+          "losses": 9,
+          "net_profit": 55.9444,
+          "avg_win_probability": 0.9347,
+          "win_rate": 43.75
+        }
+      },
+      "model_loaded": true
+    },
+    "longs": {
+      "count": 0,
+      "net_pnl": 0,
+      "wins": 0
+    },
+    "shorts": {
+      "count": 16,
+      "net_pnl": 55.9444,
+      "wins": 7
+    }
+  }
+]

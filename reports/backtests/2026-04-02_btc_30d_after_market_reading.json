@@ -1,0 +1,88 @@
+{
+  "symbol": "BTC/USDT",
+  "timeframe": "15m",
+  "context_timeframe": "1h",
+  "start_date": "2026-03-03T23:59:00",
+  "end_date": "2026-04-02T23:59:00",
+  "saved_run_id": null,
+  "total_return_pct": -4.66,
+  "final_balance": 9533.84,
+  "profit_factor": 0.41,
+  "max_drawdown": 6.47,
+  "total_trades": 46,
+  "win_rate": 23.91,
+  "ai_summary": {
+    "mode": "filter",
+    "min_win_probability": 0.6,
+    "candidate_count": 419,
+    "scored_count": 419,
+    "approved_count": 147,
+    "blocked_count": 272,
+    "high_quality_count": 284,
+    "medium_quality_count": 60,
+    "low_quality_count": 75,
+    "unavailable_count": 0,
+    "model_loaded_count": 419,
+    "win_probability_sum": 300.55783488973975,
+    "latest_model_version": "trade_decision_xgb",
+    "approval_rate_pct": 35.08,
+    "avg_win_probability": 0.7173,
+    "performance_by_quality_band": {
+      "high": {
+        "trades": 46,
+        "wins": 11,
+        "losses": 35,
+        "net_profit": -466.1584,
+        "avg_win_probability": 0.8997,
+        "win_rate": 23.91
+      }
+    },
+    "model_loaded": true
+  },
+  "objective_check": {
+    "status": "blocked",
+    "objective_score": 26.47,
+    "objective_grade": "D"
+  },
+  "top_market_patterns": [
+    {
+      "market_pattern": "trend_pullback_short",
+      "total_trades": 37,
+      "win_rate": 29.73,
+      "profit_factor": 0.56,
+      "net_profit": -254.88,
+      "total_result_pct": -7.21,
+      "avg_result_pct": -0.19,
+      "winning_trades": 11,
+      "losing_trades": 26,
+      "avg_mfe_pct": 0.58,
+      "avg_mae_pct": 0.31
+    },
+    {
+      "market_pattern": "reversal_short",
+      "total_trades": 7,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "net_profit": -160.88,
+      "total_result_pct": -3.8,
+      "avg_result_pct": -0.54,
+      "winning_trades": 0,
+      "losing_trades": 7,
+      "avg_mfe_pct": 0.05,
+      "avg_mae_pct": 0.38
+    },
+    {
+      "market_pattern": "trend_resume_short",
+      "total_trades": 2,
+      "win_rate": 0.0,
+      "profit_factor": 0.0,
+      "net_profit": -50.4,
+      "total_result_pct": -0.8,
+      "avg_result_pct": -0.4,
+      "winning_trades": 0,
+      "losing_trades": 2,
+      "avg_mfe_pct": 0.42,
+      "avg_mae_pct": 0.32
+    }
+  ]
+}

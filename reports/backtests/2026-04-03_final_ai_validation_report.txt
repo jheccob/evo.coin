@@ -1,0 +1,42 @@
+Teste final IA com Market Reading Engine
+Data de referencia: 2026-04-03
+
+Base de treino limpa do motor atual:
+- Run 1433 | BTC/USDT 15m | 2022-03-04 ate 2024-03-04 | retorno -3.30% | trades 126 | candidatos 3439 | aprovados 368
+- Run 1432 | BTC/USDT 15m | 2024-03-04 ate 2026-03-04 | retorno -7.78% | trades 132 | candidatos 3775 | aprovados 370
+- Dataset combinado usado no candidato: 258 trades
+
+Metricas do modelo candidato combinado:
+- Accuracy: 0.5897
+- Precision: 0.4286
+- Recall: 0.6923
+- ROC AUC: 0.5888
+- Log loss: 0.7765
+
+Top features do candidato:
+- scenario_score
+- analytical_signal_COMPRA
+- candidate_signal_COMPRA
+- regime_score
+- context_strength
+- atr
+- context_score
+- signal_score
+- entry_score
+
+Janela final limpa e fora do treino:
+- BTC/USDT 15m -> 1h
+- Periodo: 2026-03-04 ate 2026-04-03
+- Baseline sem IA: +1.45% | PF 1.09 | DD 5.08% | 37 trades | win rate 40.54%
+
+Comparativo com IA candidata:
+- Threshold 0.52: +1.03% | PF 1.70 | DD 2.03% | 4 trades | win rate 50.00% | aprovacao 14.29%
+- Threshold 0.55: +1.03% | PF 1.70 | DD 2.03% | 4 trades | win rate 50.00% | aprovacao 12.50%
+- Threshold 0.58: +1.40% | PF 5.00 | DD 1.29% | 1 trade | win rate 100.00% | aprovacao 8.33%
+- Threshold 0.60: +1.40% | PF 5.00 | DD 1.29% | 1 trade | win rate 100.00% | aprovacao 8.33%
+
+Leitura objetiva:
+- A IA nova melhorou qualidade e drawdown, mas ainda ficou seletiva demais.
+- O baseline continua melhor em throughput e retorno absoluto total.
+- O threshold 0.52 foi o melhor equilibrio entre retorno e reducao de drawdown, mas a amostra de trades ficou pequena demais para promocao.
+- O projeto evoluiu na arquitetura, mas o artefato de IA ainda nao esta pronto para substituir o baseline operacional.

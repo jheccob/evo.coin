@@ -1,0 +1,39 @@
+BTC/USDT futures | 15m -> 1h | 30 dias | janela 2026-03-03 23:59 ate 2026-04-02 23:59
+
+1. Baseline antes da nova leitura estrutural
+- run_id: 1414
+- retorno: -0.83%
+- saldo final: 9917.44
+- profit factor: 0.31
+- drawdown: 1.80%
+- trades: 6
+- win rate: 16.67%
+- IA: 33 sinais avaliados | 8 aprovados | 25 bloqueados
+
+2. Primeira versao da leitura estrutural
+- retorno: -4.66%
+- saldo final: 9533.84
+- profit factor: 0.41
+- drawdown: 6.47%
+- trades: 46
+- win rate: 23.91%
+- IA: 419 sinais avaliados | 147 aprovados | 272 bloqueados
+- problema observado: excesso de entradas vendedoras, principalmente trend_pullback_short e reversal_short
+
+3. Leitura estrutural refinada
+- retorno: -4.11%
+- saldo final: 9589.39
+- profit factor: 0.44
+- drawdown: 5.49%
+- trades: 35
+- win rate: 25.71%
+- IA: 262 sinais avaliados | 88 aprovados | 174 bloqueados
+- principais padroes executados:
+  - trend_pullback_short: 30 trades | PF 0.46 | net -345.63
+  - trend_resume_short: 5 trades | PF 0.36 | net -64.97
+
+Leitura objetiva:
+- a nova arquitetura de leitura trouxe mais contexto de mercado e melhorou PF, win rate e distribuicao de sinais em relacao a primeira versao estrutural
+- mesmo assim, ainda nao virou edge positivo
+- o principal vazamento atual esta no lado short
+- antes de promover isso, o proximo ajuste certo e endurecer ou desativar shorts em contexto de BTC que nao confirme claramente continuidade baixista no 1h
