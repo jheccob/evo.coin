@@ -109,74 +109,78 @@ def _entry_allowed(state: dict) -> tuple[bool, str]:
     return True, ""
 
 
-_validate_real_mode_guards()
+def main() -> None:
+    _validate_real_mode_guards()
 
-ultimo_timestamp = None
-posicao_atual = None
-params = StrategyParams()
-risk_state = {
-    "day": None,
-    "daily_realized_pct": 0.0,
-    "consecutive_losses": 0,
-    "blocked": False,
-    "block_reason": "",
-}
+    ultimo_timestamp = None
+    posicao_atual = None
+    params = StrategyParams()
+    risk_state = {
+        "day": None,
+        "daily_realized_pct": 0.0,
+        "consecutive_losses": 0,
+        "blocked": False,
+        "block_reason": "",
+    }
 
+    while True:
+        try:
+            df = fetch_candles(config.SYMBOL, config.TIMEFRAME, limit=config.LIMIT, testnet=config.TESTNET)
+            if df.empty:
+                print("Nenhum candle retornado, aguardando...")
+                time.sleep(config.POLL_SECONDS)
+                continue
 
-while True:
-    try:
-        df = fetch_candles(config.SYMBOL, config.TIMEFRAME, limit=config.LIMIT, testnet=config.TESTNET)
-        if df.empty:
-            print("Nenhum candle retornado, aguardando...")
+            df = calculate_indicators(df, params)
+            timestamp_atual = df["timestamp"].iloc[-1]
+
+            if ultimo_timestamp is None:
+                ultimo_timestamp = timestamp_atual
+                _roll_daily_state(risk_state, timestamp_atual)
+                print("Bot iniciado, aguardando novo candle fechado...")
+            elif timestamp_atual != ultimo_timestamp:
+                ultimo_timestamp = timestamp_atual
+                _roll_daily_state(risk_state, timestamp_atual)
+                preco = float(df["close"].iloc[-1])
+                print(f"Novo candle detectado | preço: {preco:.2f}")
+
+                if posicao_atual is not None:
+                    gestao = evaluate_open_position(posicao_atual, preco, timestamp_atual)
+                    if gestao["action"] == "close":
+                        trade = gestao["closed_position"]
+                        posicao_atual = None
+                        print("Saída:", trade["reason"], "| resultado %:", round(trade["gross_pct"], 4))
+                        _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
+                    else:
+                        posicao_atual = gestao["position"]
+                        if gestao["action"] == "partial":
+                            print("Parcial atingida; break-even e trailing ativados.")
+
+                resultado = generate_entry_signal(df, params)
+                print("Sinal:", resultado["signal"], "| motivo:", resultado["reason"])
+
+                if posicao_atual is None and resultado["signal"] in {"buy", "sell"}:
+                    can_enter, block_reason = _entry_allowed(risk_state)
+                    if not can_enter:
+                        print("Entrada bloqueada:", block_reason)
+                    else:
+                        posicao_atual = create_position(
+                            resultado["signal"],
+                            entry_price=preco,
+                            timestamp=timestamp_atual,
+                            atr=float(resultado["atr"]),
+                        )
+                        print("Entrada:", posicao_atual["side"], "| preço:", round(posicao_atual["entry_price"], 2))
+
+                print("------")
+            else:
+                print("Sem candle novo. Aguardando...")
+
             time.sleep(config.POLL_SECONDS)
-            continue
+        except Exception as e:
+            print("Erro:", e)
+            time.sleep(60)
 
-        df = calculate_indicators(df, params)
-        timestamp_atual = df["timestamp"].iloc[-1]
 
-        if ultimo_timestamp is None:
-            ultimo_timestamp = timestamp_atual
-            _roll_daily_state(risk_state, timestamp_atual)
-            print("Bot iniciado, aguardando novo candle fechado...")
-        elif timestamp_atual != ultimo_timestamp:
-            ultimo_timestamp = timestamp_atual
-            _roll_daily_state(risk_state, timestamp_atual)
-            preco = float(df["close"].iloc[-1])
-            print(f"Novo candle detectado | preço: {preco:.2f}")
-
-            if posicao_atual is not None:
-                gestao = evaluate_open_position(posicao_atual, preco, timestamp_atual)
-                if gestao["action"] == "close":
-                    trade = gestao["closed_position"]
-                    posicao_atual = None
-                    print("Saída:", trade["reason"], "| resultado %:", round(trade["gross_pct"], 4))
-                    _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
-                else:
-                    posicao_atual = gestao["position"]
-                    if gestao["action"] == "partial":
-                        print("Parcial atingida; break-even e trailing ativados.")
-
-            resultado = generate_entry_signal(df, params)
-            print("Sinal:", resultado["signal"], "| motivo:", resultado["reason"])
-
-            if posicao_atual is None and resultado["signal"] in {"buy", "sell"}:
-                can_enter, block_reason = _entry_allowed(risk_state)
-                if not can_enter:
-                    print("Entrada bloqueada:", block_reason)
-                else:
-                    posicao_atual = create_position(
-                        resultado["signal"],
-                        entry_price=preco,
-                        timestamp=timestamp_atual,
-                        atr=float(resultado["atr"]),
-                    )
-                    print("Entrada:", posicao_atual["side"], "| preço:", round(posicao_atual["entry_price"], 2))
-
-            print("------")
-        else:
-            print("Sem candle novo. Aguardando...")
-
-        time.sleep(config.POLL_SECONDS)
-    except Exception as e:
-        print("Erro:", e)
-        time.sleep(60)
+if __name__ == "__main__":
+    main()

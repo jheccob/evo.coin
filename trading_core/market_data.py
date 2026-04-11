@@ -195,6 +195,10 @@ def get_market_data(bot, limit: int = 200, symbol: Optional[str] = None, timefra
     resolved_symbol = symbol or bot.symbol
     resolved_timeframe = timeframe or bot.timeframe
     client = get_realtime_stream_client(bot, symbol=resolved_symbol, timeframe=resolved_timeframe)
+    if client is None:
+        use_testnet = bool(getattr(runtime_config, "TESTNET", False))
+        df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit, testnet=use_testnet)
+        return calculate_indicators(bot, df)
     try:
         df = client.get_market_data(limit=limit)
     except Exception:

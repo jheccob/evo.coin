@@ -1579,6 +1579,13 @@ def _get_realtime_chart_snapshot(symbol, timeframe, fallback_data, limit=200):
 
     try:
         stream_client = trading_bot._get_realtime_stream_client(symbol=symbol, timeframe=timeframe)
+        if stream_client is None:
+            logger.warning(
+                "Stream client indisponivel para snapshot realtime (%s %s). Usando fallback.",
+                symbol,
+                timeframe,
+            )
+            return fallback_data, None
         chart_data = stream_client.get_market_data(
             limit=limit,
             timeout=2.0,
@@ -3284,6 +3291,8 @@ def main():
                         symbol=symbol,
                         timeframe=ws_timeframe,
                     )
+                    if stream_client is None:
+                        raise RuntimeError("Cliente de stream nao inicializado.")
                     stream_status = stream_client.get_current_status()
                     st.session_state.ws_auto_connected = True
                     if st.session_state.get('ws_current_key') != ws_key:
@@ -3335,6 +3344,8 @@ def main():
                                 symbol=symbol,
                                 timeframe=ws_timeframe,
                             )
+                            if stream_client is None:
+                                raise RuntimeError("Cliente de stream nao inicializado apos reconexao.")
                             stream_status = stream_client.get_current_status()
                             st.session_state.ws_auto_connected = True
                             st.session_state.ws_current_key = ws_key
@@ -3925,6 +3936,7 @@ def main():
                 st.info("💡 **Como configurar:**\n1. Crie um bot no @BotFather\n2. Obtenha seu Chat ID no @userinfobot\n3. Configure aqui")
 
     # Status indicators for main symbol - renderizar apenas na visao de operacao de mercado
+    futures_tab1 = futures_tab2 = futures_tab3 = None
     if active_market_view == "futures":
         status_container = st.container()
         with status_container:
@@ -4344,7 +4356,7 @@ def main():
     elif active_market_view == "futures" and st.session_state.current_data is not None and runtime_bot is None:
         st.warning("⚠️ Dados em cache existem, mas o runtime de mercado está indisponível para processar sinais.")
 
-    if active_market_view == "futures":
+    if active_market_view == "futures" and futures_tab2 is not None and futures_tab3 is not None:
         # Tab 2: Calculadoras
         with futures_tab2:
             st.markdown("### ⚖️ Calculadoras de Trading")
