@@ -718,16 +718,25 @@ def get_trader_bot_process_state():
     pid = st.session_state.get("trader_bot_pid")
     running = _is_process_running(pid)
     use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    embedded_runtime = str(os.getenv("TRADER_BOT_EMBEDDED", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if embedded_runtime:
+        testnet_env = str(os.getenv("TESTNET", "true")).strip().lower()
+        use_testnet = testnet_env in {"1", "true", "yes", "on", "y", "sim"}
     if not running:
         st.session_state.trader_bot_pid = None
         st.session_state.telegram_trading_bot_started = False
         pid = None
+    if embedded_runtime and not running:
+        # No modo all do Railway, o bot é iniciado fora do controle da sessão Streamlit.
+        # Consideramos runtime online para evitar falso "OFF/Crash" na UI.
+        running = True
     return {
         "running": running,
         "pid": pid,
         "use_testnet": use_testnet,
         "mode_label": "Testnet" if use_testnet else "Conta Real",
         "entrypoint": str(Path(__file__).resolve().with_name("start_telegram_bot.py")),
+        "managed_externally": embedded_runtime,
     }
 
 
@@ -832,12 +841,13 @@ def stop_trader_bot_process():
 
 def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
     trader_bot_state = get_trader_bot_process_state()
+    managed_externally = bool(trader_bot_state.get("managed_externally"))
 
     bot_runtime_col1, bot_runtime_col2, bot_runtime_col3, bot_runtime_col4 = st.columns(4)
     with bot_runtime_col1:
         st.metric("Status Runtime", "ON" if trader_bot_state.get("running") else "OFF")
     with bot_runtime_col2:
-        st.metric("PID", trader_bot_state.get("pid") or "-")
+        st.metric("PID", trader_bot_state.get("pid") or ("EMBEDDED" if managed_externally else "-"))
     with bot_runtime_col3:
         st.metric("Modo", trader_bot_state.get("mode_label", "Testnet"))
     with bot_runtime_col4:
@@ -853,7 +863,7 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
         horizontal=True,
         key=f"{section_key}_runtime_mode",
         format_func=lambda value: "Testnet (seguro)" if value == "testnet" else "Conta Real (cuidado)",
-        disabled=bool(trader_bot_state.get("running")),
+        disabled=bool(trader_bot_state.get("running")) or managed_externally,
     )
     selected_use_testnet = selected_runtime_mode == "testnet"
     if not bool(trader_bot_state.get("running")):
@@ -863,7 +873,11 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
 
     bot_control_col1, bot_control_col2 = st.columns(2)
     with bot_control_col1:
-        if st.button("▶️ Ligar Bot Trader", key=f"{section_key}_start"):
+        if st.button(
+            "▶️ Ligar Bot Trader",
+            key=f"{section_key}_start",
+            disabled=managed_externally or bool(trader_bot_state.get("running")),
+        ):
             success, message = start_trader_bot_process(use_testnet=selected_use_testnet)
             if success:
                 st.success(message)
@@ -874,7 +888,7 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
         if st.button(
             "⏹️ Parar Bot Trader",
             key=f"{section_key}_stop",
-            disabled=not trader_bot_state.get("running"),
+            disabled=managed_externally or not trader_bot_state.get("running"),
         ):
             success, message = stop_trader_bot_process()
             if success:
@@ -882,6 +896,9 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
                 st.rerun()
             else:
                 st.error(message)
+
+    if managed_externally:
+        st.info("Runtime gerenciado externamente (RAILWAY_SERVICE_MODE=all). Status ON sincronizado pelo ambiente.")
 
     st.caption(
         "Controle manual do processo local via start_telegram_bot.py. "

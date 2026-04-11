@@ -5,6 +5,7 @@ import runpy
 import subprocess
 import sys
 import signal
+import traceback
 from pathlib import Path
 
 
@@ -39,11 +40,11 @@ def _run_all(repo_root: Path) -> int:
     Mantem o dashboard no foreground e finaliza o bot no shutdown.
     """
     bot_entrypoint = repo_root / "start_telegram_bot.py"
+    os.environ["TRADER_BOT_EMBEDDED"] = "1"
+    print(f"[railway] starting bot process from: {bot_entrypoint}", flush=True)
     bot_process = subprocess.Popen(
         [sys.executable, str(bot_entrypoint)],
         cwd=str(repo_root),
-        stdout=sys.stdout,
-        stderr=sys.stderr,
     )
 
     def _terminate_bot(*_args):
@@ -68,6 +69,11 @@ def _run_all(repo_root: Path) -> int:
 def main() -> int:
     repo_root = Path(__file__).resolve().parent
     mode = str(os.getenv("RAILWAY_SERVICE_MODE", "dashboard")).strip().lower()
+    port = str(os.getenv("PORT", "8501")).strip() or "8501"
+    print(
+        f"[railway] booting mode={mode} port={port} python={sys.version.split()[0]} cwd={repo_root}",
+        flush=True,
+    )
 
     if mode in {"all", "both", "full"}:
         return _run_all(repo_root)
@@ -77,4 +83,11 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except SystemExit:
+        raise
+    except Exception:
+        print("[railway] fatal error on startup:", flush=True)
+        traceback.print_exc()
+        raise
