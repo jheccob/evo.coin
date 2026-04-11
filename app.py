@@ -711,6 +711,15 @@ def get_authenticated_dashboard_user():
         clear_dashboard_user_session()
         return None
 
+    user_id = auth_payload.get("user_id")
+    if user_id is not None:
+        try:
+            subscription_payload = db.get_dashboard_user_subscription(int(user_id))
+            auth_payload["subscription"] = subscription_payload
+            st.session_state.dashboard_user_auth = auth_payload
+        except Exception:
+            logger.warning("Falha ao carregar assinatura do usuário %s.", user_id, exc_info=True)
+
     return auth_payload
 
 
@@ -865,7 +874,11 @@ def stop_trader_bot_process():
     return True, f"Solicitação de parada enviada para o PID {pid}."
 
 
-def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
+def render_trader_bot_runtime_controls(
+    section_key: str = "bot_trader_runtime",
+    allow_start: bool = True,
+    block_reason: str = "",
+):
     trader_bot_state = get_trader_bot_process_state()
     managed_externally = bool(trader_bot_state.get("managed_externally"))
 
@@ -902,7 +915,7 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
         if st.button(
             "▶️ Ligar Bot Trader",
             key=f"{section_key}_start",
-            disabled=managed_externally or bool(trader_bot_state.get("running")),
+            disabled=managed_externally or bool(trader_bot_state.get("running")) or not bool(allow_start),
         ):
             success, message = start_trader_bot_process(use_testnet=selected_use_testnet)
             if success:
@@ -925,6 +938,8 @@ def render_trader_bot_runtime_controls(section_key: str = "bot_trader_runtime"):
 
     if managed_externally:
         st.info("Runtime gerenciado externamente (RAILWAY_SERVICE_MODE=all). Status ON sincronizado pelo ambiente.")
+    if not bool(allow_start):
+        st.warning(block_reason or "Runtime bloqueado para esta conta.")
 
     st.caption(
         "Controle manual do processo local via start_telegram_bot.py. "
@@ -2097,7 +2112,8 @@ def render_multiuser_workspace_tab():
             - risco, permissões e governança são acompanhados por conta
 
             Como entrar pela primeira vez:
-            - um admin cria seu acesso em `Admin > Acessos`
+            - você cria sua conta em `Sidebar > Criar Conta Agora`
+            - ou um admin cria seu acesso em `Admin > Acessos`
             - você recebe `login` e `senha inicial`
             - faz login na barra lateral em `Workspace Multiusuário`
             """
@@ -2112,6 +2128,23 @@ def render_multiuser_workspace_tab():
         or str(user_id)
     )
     st.success(f"Sessão ativa: {user_label} | User ID {user_id}")
+    workspace_subscription = workspace_user.get("subscription") or {}
+    subscription_plan = str(workspace_subscription.get("plan_code") or "free").upper()
+    subscription_status = str(workspace_subscription.get("status") or "inactive").lower()
+    if workspace_subscription.get("is_active"):
+        st.success(
+            f"Assinatura ativa: {subscription_plan} | "
+            f"expira em {workspace_subscription.get('expires_at')}"
+        )
+        if workspace_subscription.get("expiring_soon"):
+            st.warning(
+                f"Renovação recomendada: faltam {int(workspace_subscription.get('days_remaining', 0))} dia(s) para expirar."
+            )
+    else:
+        st.warning(
+            f"Assinatura {subscription_plan} está {subscription_status}. "
+            "Ative um plano para operar o bot em runtime."
+        )
     if workspace_user.get("require_password_change"):
         st.warning("Sua conta exige troca de senha antes de uso recorrente. Atualize abaixo.")
 
@@ -2708,6 +2741,20 @@ def main():
         st.sidebar.success(f"Sessão ativa: {dashboard_user_label}")
         if expires_at_label:
             st.sidebar.caption(f"Sessão válida até: {expires_at_label}")
+        subscription_payload = dashboard_user.get("subscription") or {}
+        subscription_plan = str(subscription_payload.get("plan_code") or "free").upper()
+        subscription_status = str(subscription_payload.get("status") or "inactive").lower()
+        subscription_expires_at = subscription_payload.get("expires_at")
+        if subscription_payload.get("is_active"):
+            st.sidebar.success(f"Plano ativo: {subscription_plan}")
+        else:
+            st.sidebar.warning(f"Plano inativo: {subscription_plan} ({subscription_status})")
+        if subscription_expires_at:
+            st.sidebar.caption(f"Assinatura expira em: {subscription_expires_at}")
+        if subscription_payload.get("expiring_soon"):
+            st.sidebar.warning(
+                f"Sua assinatura expira em {int(subscription_payload.get('days_remaining', 0))} dia(s). Renove para não interromper o bot."
+            )
         if dashboard_user.get("require_password_change"):
             st.sidebar.warning("Troque sua senha no workspace antes de operar regularmente.")
         if st.sidebar.button("Sair do Workspace", key="dashboard_user_logout"):
@@ -2734,9 +2781,53 @@ def main():
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
-        st.sidebar.caption(
-            "Acesso isolado por usuário. Login/senha são criados pelo admin em Admin > Acessos."
-        )
+        if ProductionConfig.ALLOW_SELF_SERVICE_SIGNUP:
+            st.sidebar.caption(
+                "Acesso isolado por usuário. Crie sua conta abaixo e depois ative um plano para operar o bot."
+            )
+            with st.sidebar.expander("📝 Criar Conta Agora", expanded=False):
+                with st.form("dashboard_self_signup_form"):
+                    st.text_input("Login desejado", key="dashboard_self_signup_login")
+                    st.text_input("Senha", type="password", key="dashboard_self_signup_password")
+                    st.text_input("Confirmar senha", type="password", key="dashboard_self_signup_password_confirm")
+                    st.text_input("Nome de exibição (opcional)", key="dashboard_self_signup_display_name")
+                    st.text_input("Contato (Telegram/email opcional)", key="dashboard_self_signup_contact")
+                    st.text_area("Observações (opcional)", key="dashboard_self_signup_notes")
+                    if st.form_submit_button("Criar Conta"):
+                        signup_login = str(st.session_state.get("dashboard_self_signup_login") or "").strip()
+                        signup_password = str(st.session_state.get("dashboard_self_signup_password") or "")
+                        signup_password_confirm = str(st.session_state.get("dashboard_self_signup_password_confirm") or "")
+                        if not signup_login or not signup_password:
+                            st.error("Preencha login e senha para criar a conta.")
+                        elif signup_password != signup_password_confirm:
+                            st.error("A confirmação da senha não confere.")
+                        else:
+                            try:
+                                created = db.register_dashboard_user_selfservice(
+                                    {
+                                        "login_name": signup_login,
+                                        "password": signup_password,
+                                        "display_name": st.session_state.get("dashboard_self_signup_display_name"),
+                                        "contact_text": st.session_state.get("dashboard_self_signup_contact"),
+                                        "notes": st.session_state.get("dashboard_self_signup_notes"),
+                                    }
+                                )
+                                st.success(
+                                    f"Conta criada com sucesso (User ID {created.get('user_id')}). "
+                                    "Faça login e ative um plano para operar o bot."
+                                )
+                                st.session_state.dashboard_self_signup_login = ""
+                                st.session_state.dashboard_self_signup_password = ""
+                                st.session_state.dashboard_self_signup_password_confirm = ""
+                                st.session_state.dashboard_self_signup_display_name = ""
+                                st.session_state.dashboard_self_signup_contact = ""
+                                st.session_state.dashboard_self_signup_notes = ""
+                            except Exception as signup_exc:
+                                st.error(f"Não foi possível criar a conta: {signup_exc}")
+        else:
+            st.sidebar.caption(
+                "Cadastro público desativado. Solicite acesso ao administrador."
+            )
 
     # Continue with sidebar configuration
 
@@ -3833,10 +3924,13 @@ def main():
             with col3:
                 st.info("💡 **Como configurar:**\n1. Crie um bot no @BotFather\n2. Obtenha seu Chat ID no @userinfobot\n3. Configure aqui")
 
-    # Status indicators for main symbol - usando containers para atualização suave
-    status_container = st.container()
-    with status_container:
-        col1, col2, col3, col4, col5 = st.columns(5)
+    # Status indicators for main symbol - renderizar apenas na visao de operacao de mercado
+    if active_market_view == "futures":
+        status_container = st.container()
+        with status_container:
+            col1, col2, col3, col4, col5 = st.columns(5)
+    else:
+        col1 = col2 = col3 = col4 = col5 = None
 
     # Check if we need to update data
     should_update = (
@@ -3845,7 +3939,7 @@ def main():
     )
     runtime_bot = get_session_trading_bot_safe(selected_exchange)
 
-    if should_update and runtime_bot is not None:
+    if active_market_view == "futures" and should_update and runtime_bot is not None:
         try:
             with st.spinner('Carregando dados...'):
                 data = runtime_bot.get_market_data()
@@ -3862,12 +3956,12 @@ def main():
                 logger.warning("Falha de georrestrição Binance no carregamento inicial da dashboard: %s", error_text)
             else:
                 st.error(f"Erro ao carregar dados: {error_text}")
-    elif should_update and runtime_bot is None:
+    elif active_market_view == "futures" and should_update and runtime_bot is None:
         st.info("ℹ️ Runtime de mercado ainda inicializando. Aguarde alguns segundos.")
 
     # Store multi-symbol data (already initialized above)
 
-    if st.session_state.current_data is not None and runtime_bot is not None:
+    if active_market_view == "futures" and st.session_state.current_data is not None and runtime_bot is not None:
         data = st.session_state.current_data
         last_candle = data.iloc[-1]
         data_is_fresh, data_age_seconds = _is_data_fresh(
@@ -4247,7 +4341,7 @@ def main():
                 require_volume=require_volume,
                 require_trend=require_trend,
             )
-    elif st.session_state.current_data is not None and runtime_bot is None:
+    elif active_market_view == "futures" and st.session_state.current_data is not None and runtime_bot is None:
         st.warning("⚠️ Dados em cache existem, mas o runtime de mercado está indisponível para processar sinais.")
 
     if active_market_view == "futures":
@@ -4367,7 +4461,7 @@ def main():
                 st.info("📭 Clique para gerar um cenário teórico com base na configuração atual")
 
     # Auto-refresh mechanism otimizado - cache inteligente
-    if auto_refresh:
+    if auto_refresh and active_dashboard_section == "market":
         current_time_check = get_brazil_datetime_naive()
         cache_timeout = 90
 
@@ -4426,6 +4520,21 @@ def main():
         workspace_session_active = bool(dashboard_user)
         telegram_library_ready = is_telegram_service_available()
         session_notifications_enabled = bool(st.session_state.get("telegram_notifications"))
+        subscription_payload = (dashboard_user or {}).get("subscription") or {}
+        subscription_active = bool(subscription_payload.get("is_active"))
+        subscription_plan = str(subscription_payload.get("plan_code") or "free").upper()
+        subscription_gate_required = bool(ProductionConfig.REQUIRE_ACTIVE_SUBSCRIPTION_FOR_BOT)
+        bot_start_allowed = bool(
+            workspace_session_active
+            and (not subscription_gate_required or subscription_active)
+        )
+        bot_start_block_reason = ""
+        if not workspace_session_active:
+            bot_start_block_reason = "Faça login no Workspace para habilitar o runtime."
+        elif subscription_gate_required and not subscription_active:
+            bot_start_block_reason = (
+                "Assinatura inativa/expirada. Ative um plano semanal, mensal ou anual para ligar o bot."
+            )
 
         context_col1, context_col2, context_col3, context_col4 = st.columns(4)
         with context_col1:
@@ -4451,7 +4560,7 @@ def main():
             f"Risco {runtime_risk_profile}"
         )
 
-        readiness_col1, readiness_col2, readiness_col3, readiness_col4 = st.columns(4)
+        readiness_col1, readiness_col2, readiness_col3, readiness_col4, readiness_col5 = st.columns(5)
         with readiness_col1:
             st.metric("Processo", "ON" if bot_process_state.get("running") else "OFF")
         with readiness_col2:
@@ -4460,13 +4569,21 @@ def main():
             st.metric("Lib Telegram", "OK" if telegram_library_ready else "PENDENTE")
         with readiness_col4:
             st.metric("Notif. Sessao", "ON" if session_notifications_enabled else "OFF")
+        with readiness_col5:
+            st.metric("Assinatura", f"{subscription_plan} {'ON' if subscription_active else 'OFF'}")
 
         if bot_view_mode == "Runtime":
             if not ProductionConfig.TELEGRAM_BOT_TOKEN:
                 st.warning("Configure TELEGRAM_BOT_TOKEN antes de ligar o bot trader.")
+            if bot_start_block_reason:
+                st.warning(bot_start_block_reason)
 
             st.markdown("### ▶️ Runtime")
-            render_trader_bot_runtime_controls(section_key="bot_hub")
+            render_trader_bot_runtime_controls(
+                section_key="bot_hub",
+                allow_start=bot_start_allowed,
+                block_reason=bot_start_block_reason,
+            )
 
         elif bot_view_mode == "Prontidao":
             st.markdown("### 🧪 Checklist de Prontidão")
@@ -4490,6 +4607,8 @@ def main():
 
             if not workspace_session_active:
                 st.warning("Faça login no Workspace para operar com contexto isolado por usuário.")
+            if subscription_gate_required and not subscription_active:
+                st.warning("Assinatura inativa/expirada para uso do bot. Ative um plano para liberar operação.")
             if not telegram_library_ready:
                 st.warning("Biblioteca Telegram indisponível neste ambiente. O runtime pode subir sem comandos interativos completos.")
             if not ProductionConfig.TELEGRAM_BOT_TOKEN:
@@ -7373,9 +7492,10 @@ def main():
                 """
                 1. Defina `ADMIN_PANEL_PASSWORD` no ambiente e faça deploy.
                 2. Entre com essa senha no bloco de autenticação Admin abaixo.
-                3. Em `Visão Admin -> Acessos`, crie `user_id`, `login_name` e `senha inicial`.
-                4. O usuário entra na sidebar em `Workspace Multiusuário` com esse login/senha.
-                5. Em seguida, cadastre conta/risco/credenciais nas visões `Contas` e `Resumo`.
+                3. Usuários podem criar conta em `Sidebar -> Criar Conta Agora`.
+                4. Em `Visão Admin -> Acessos`, ajuste plano/assinatura (semanal, mensal, anual).
+                5. O bot só liga quando a assinatura estiver ativa.
+                6. Em seguida, cadastre conta/risco/credenciais nas visões `Contas` e `Resumo`.
                 """
             )
             st.caption(
@@ -7501,6 +7621,137 @@ def main():
 
             if admin_show_access:
                 st.subheader("👤 Acesso da Dashboard")
+                signup_requests = db.list_dashboard_signup_requests(limit=300)
+                pending_signup_requests = [
+                    item for item in signup_requests
+                    if str(item.get("status") or "").strip().lower() == "pending"
+                ]
+                approved_signup_requests = [
+                    item for item in signup_requests
+                    if str(item.get("status") or "").strip().lower() == "approved"
+                ]
+                rejected_signup_requests = [
+                    item for item in signup_requests
+                    if str(item.get("status") or "").strip().lower() == "rejected"
+                ]
+
+                req_col1, req_col2, req_col3 = st.columns(3)
+                with req_col1:
+                    st.metric("Solicitações Pendentes", len(pending_signup_requests))
+                with req_col2:
+                    st.metric("Solicitações Aprovadas", len(approved_signup_requests))
+                with req_col3:
+                    st.metric("Solicitações Rejeitadas", len(rejected_signup_requests))
+
+                st.markdown("### 📨 Solicitações de Cadastro")
+                if pending_signup_requests:
+                    pending_df = pd.DataFrame(pending_signup_requests)[
+                        [
+                            "id",
+                            "login_name",
+                            "display_name",
+                            "contact_text",
+                            "requested_at",
+                            "notes",
+                        ]
+                    ].rename(
+                        columns={
+                            "id": "Request ID",
+                            "login_name": "Login",
+                            "display_name": "Nome",
+                            "contact_text": "Contato",
+                            "requested_at": "Solicitado em",
+                            "notes": "Observações",
+                        }
+                    )
+                    st.dataframe(pending_df, width="stretch", hide_index=True)
+                else:
+                    st.info("Não há solicitações pendentes no momento.")
+
+                with st.form("dashboard_signup_review_form"):
+                    if pending_signup_requests:
+                        request_options = {
+                            f"#{int(item['id'])} | {item.get('login_name')} | {item.get('display_name') or 'sem nome'}": item
+                            for item in pending_signup_requests
+                        }
+                        selected_request_label = st.selectbox(
+                            "Solicitação pendente",
+                            options=list(request_options.keys()),
+                            key="dashboard_signup_selected_request",
+                        )
+                        selected_request = request_options[selected_request_label]
+                        review_action = st.radio(
+                            "Ação",
+                            options=["Aprovar", "Rejeitar"],
+                            horizontal=True,
+                            key="dashboard_signup_review_action",
+                        )
+                        review_user_id = st.number_input(
+                            "User ID para aprovação (0 = automático)",
+                            min_value=0,
+                            step=1,
+                            value=0,
+                            key="dashboard_signup_review_user_id",
+                        )
+                        review_notes = st.text_area(
+                            "Notas da revisão",
+                            key="dashboard_signup_review_notes",
+                        )
+                        if st.form_submit_button("Processar Solicitação"):
+                            try:
+                                reviewer_name = str(st.session_state.get("dashboard_user_login") or "admin")
+                                result = db.review_dashboard_signup_request(
+                                    request_id=int(selected_request["id"]),
+                                    action="approve" if review_action == "Aprovar" else "reject",
+                                    reviewed_by=reviewer_name,
+                                    review_notes=review_notes,
+                                    approved_user_id=(int(review_user_id) if int(review_user_id) > 0 else None),
+                                )
+                                if result.get("status") == "approved":
+                                    st.success(
+                                        f"Solicitação aprovada. Login {result.get('login_name')} liberado para User ID {result.get('approved_user_id')}."
+                                    )
+                                else:
+                                    st.warning(f"Solicitação {result.get('request_id')} rejeitada.")
+                                st.rerun()
+                            except Exception as review_error:
+                                st.error(f"Falha ao revisar solicitação: {review_error}")
+                    else:
+                        st.info("Sem pendências para revisar.")
+                        st.form_submit_button("Processar Solicitação", disabled=True)
+
+                with st.expander("Histórico de solicitações", expanded=False):
+                    if signup_requests:
+                        history_df = pd.DataFrame(signup_requests)[
+                            [
+                                "id",
+                                "login_name",
+                                "display_name",
+                                "status",
+                                "requested_at",
+                                "reviewed_at",
+                                "reviewed_by",
+                                "approved_user_id",
+                                "review_notes",
+                            ]
+                        ].rename(
+                            columns={
+                                "id": "Request ID",
+                                "login_name": "Login",
+                                "display_name": "Nome",
+                                "status": "Status",
+                                "requested_at": "Solicitado em",
+                                "reviewed_at": "Revisado em",
+                                "reviewed_by": "Revisado por",
+                                "approved_user_id": "User ID Aprovado",
+                                "review_notes": "Notas",
+                            }
+                        )
+                        st.dataframe(history_df, width="stretch", hide_index=True)
+                    else:
+                        st.caption("Sem histórico de solicitações.")
+
+                st.markdown("---")
                 dashboard_access_rows = db.list_dashboard_user_access(limit=200)
                 if dashboard_access_rows:
                     access_df = pd.DataFrame(dashboard_access_rows)[
@@ -7509,6 +7760,9 @@ def main():
                             "login_name",
                             "is_active",
                             "require_password_change",
+                            "plan_code",
+                            "subscription_status",
+                            "subscription_expires_at",
                             "telegram_username",
                             "telegram_first_name",
                             "telegram_plan",
@@ -7521,6 +7775,9 @@ def main():
                             "login_name": "Login",
                             "is_active": "Ativo",
                             "require_password_change": "Troca Senha",
+                            "plan_code": "Assinatura",
+                            "subscription_status": "Status Assinatura",
+                            "subscription_expires_at": "Expira em",
                             "telegram_username": "Telegram Username",
                             "telegram_first_name": "Nome",
                             "telegram_plan": "Plano",
@@ -7565,6 +7822,102 @@ def main():
                             st.rerun()
                         except Exception as access_error:
                             st.error(f"Falha ao salvar acesso da dashboard: {access_error}")
+
+                st.markdown("### 💳 Assinaturas e Créditos")
+                subscription_rows = db.list_dashboard_user_subscriptions(limit=300)
+                if subscription_rows:
+                    subscription_df = pd.DataFrame(subscription_rows)[
+                        [
+                            "user_id",
+                            "login_name",
+                            "plan_code",
+                            "status",
+                            "expires_at",
+                            "days_remaining",
+                            "is_active",
+                            "expiring_soon",
+                            "credits_balance",
+                            "auto_renew",
+                        ]
+                    ].rename(
+                        columns={
+                            "user_id": "User ID",
+                            "login_name": "Login",
+                            "plan_code": "Plano",
+                            "status": "Status",
+                            "expires_at": "Expira em",
+                            "days_remaining": "Dias Restantes",
+                            "is_active": "Ativa",
+                            "expiring_soon": "Expira em Breve",
+                            "credits_balance": "Créditos",
+                            "auto_renew": "Auto Renew",
+                        }
+                    )
+                    st.dataframe(subscription_df, width="stretch", hide_index=True)
+                else:
+                    st.caption("Nenhuma assinatura cadastrada ainda.")
+
+                with st.form("dashboard_subscription_admin_form"):
+                    sub_col1, sub_col2, sub_col3 = st.columns(3)
+                    with sub_col1:
+                        sub_user_id = st.number_input("User ID Assinatura", min_value=1, step=1, key="sub_user_id")
+                        sub_plan_code = st.selectbox(
+                            "Plano",
+                            options=["weekly", "monthly", "yearly", "free"],
+                            key="sub_plan_code",
+                        )
+                    with sub_col2:
+                        sub_action = st.selectbox(
+                            "Ação",
+                            options=["Ativar/Renovar", "Bloquear", "Inativar"],
+                            key="sub_action",
+                        )
+                        sub_auto_renew = st.checkbox("Auto Renew", value=False, key="sub_auto_renew")
+                    with sub_col3:
+                        sub_extend = st.checkbox("Somar ao período atual", value=True, key="sub_extend")
+                        sub_credits = st.number_input("Créditos (+/-)", value=0.0, step=10.0, key="sub_credits")
+                        sub_notes = st.text_area("Notas da Assinatura", key="sub_notes")
+
+                    if st.form_submit_button("Salvar Assinatura"):
+                        try:
+                            if sub_action == "Ativar/Renovar":
+                                result_sub = db.activate_dashboard_user_subscription(
+                                    user_id=int(sub_user_id),
+                                    plan_code=str(sub_plan_code),
+                                    approved_by="admin",
+                                    extend_from_current=bool(sub_extend),
+                                    auto_renew=bool(sub_auto_renew),
+                                    payment_provider="manual",
+                                    credits_delta=float(sub_credits),
+                                    notes=sub_notes,
+                                )
+                                st.success(
+                                    f"Assinatura atualizada: {result_sub.get('plan_code')} | "
+                                    f"status={result_sub.get('status')} | expira={result_sub.get('expires_at')}"
+                                )
+                            elif sub_action == "Bloquear":
+                                result_sub = db.set_dashboard_user_subscription_status(
+                                    user_id=int(sub_user_id),
+                                    status="blocked",
+                                    notes=sub_notes,
+                                )
+                                st.warning(
+                                    f"Assinatura bloqueada para User ID {int(sub_user_id)} "
+                                    f"(status {result_sub.get('status')})."
+                                )
+                            else:
+                                result_sub = db.set_dashboard_user_subscription_status(
+                                    user_id=int(sub_user_id),
+                                    status="inactive",
+                                    notes=sub_notes,
+                                )
+                                st.info(
+                                    f"Assinatura inativada para User ID {int(sub_user_id)} "
+                                    f"(status {result_sub.get('status')})."
+                                )
+                            st.rerun()
+                        except Exception as sub_error:
+                            st.error(f"Falha ao salvar assinatura: {sub_error}")
 
             if admin_show_accounts:
                 st.subheader("🏦 Contas Multiuser")

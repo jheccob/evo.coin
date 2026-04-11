@@ -759,6 +759,48 @@ class TradingDatabase:
             '''
         )
 
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS dashboard_user_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                plan_code TEXT NOT NULL DEFAULT 'free',
+                status TEXT NOT NULL DEFAULT 'inactive',
+                started_at TEXT,
+                expires_at TEXT,
+                auto_renew BOOLEAN NOT NULL DEFAULT FALSE,
+                payment_provider TEXT,
+                external_subscription_id TEXT,
+                credits_balance REAL NOT NULL DEFAULT 0.0,
+                last_payment_at TEXT,
+                next_billing_at TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+        )
+
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS dashboard_signup_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                login_name TEXT NOT NULL UNIQUE,
+                password_salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                display_name TEXT,
+                contact_text TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reviewed_at TEXT,
+                reviewed_by TEXT,
+                review_notes TEXT,
+                approved_user_id INTEGER,
+                notes TEXT
+            )
+            '''
+        )
+
         self._ensure_column(cursor, 'trading_signals', 'context_timeframe', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'strategy_version', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'regime', 'TEXT')
@@ -930,6 +972,24 @@ class TradingDatabase:
             ON dashboard_user_access(login_name)
             '''
         )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_user_subscriptions_status_expiry
+            ON dashboard_user_subscriptions(status, expires_at)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_signup_requests_status
+            ON dashboard_signup_requests(status, requested_at)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_signup_requests_login
+            ON dashboard_signup_requests(login_name)
+            '''
+        )
 
         conn.commit()
         conn.close()
@@ -1001,6 +1061,87 @@ class TradingDatabase:
             return False
         derived = cls._hash_dashboard_password(password, salt_hex=salt_hex)
         return hmac.compare_digest(derived["hash_hex"], str(stored_hash_hex))
+
+    @staticmethod
+    def _normalize_subscription_plan_code(plan_code: Any) -> str:
+        normalized = str(plan_code or "free").strip().lower()
+        if normalized in {"weekly", "mensal", "semanal"}:
+            return "weekly"
+        if normalized in {"monthly", "mes", "mensalidade"}:
+            return "monthly"
+        if normalized in {"yearly", "annual", "anual"}:
+            return "yearly"
+        if normalized in {"trial"}:
+            return "trial"
+        return "free"
+
+    @staticmethod
+    def _plan_duration_days(plan_code: str) -> int:
+        normalized = str(plan_code or "").strip().lower()
+        if normalized == "weekly":
+            return 7
+        if normalized == "monthly":
+            return 30
+        if normalized == "yearly":
+            return 365
+        if normalized == "trial":
+            return 7
+        return 0
+
+    @staticmethod
+    def _to_utc_datetime(value: Any) -> Optional[datetime]:
+        if value in (None, ""):
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    @classmethod
+    def _build_subscription_snapshot(
+        cls,
+        *,
+        plan_code: Any,
+        status: Any,
+        started_at: Any,
+        expires_at: Any,
+        alert_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        normalized_plan = cls._normalize_subscription_plan_code(plan_code)
+        normalized_status = str(status or "inactive").strip().lower()
+        started_dt = cls._to_utc_datetime(started_at)
+        expires_dt = cls._to_utc_datetime(expires_at)
+        now_utc = datetime.now(UTC)
+
+        is_active = (
+            normalized_status == "active"
+            and expires_dt is not None
+            and expires_dt > now_utc
+        )
+        if normalized_status == "active" and not is_active:
+            normalized_status = "expired"
+
+        days_remaining = 0
+        if expires_dt is not None and expires_dt > now_utc:
+            total_seconds = (expires_dt - now_utc).total_seconds()
+            days_remaining = int((total_seconds + 86399) // 86400)
+
+        threshold = max(int(alert_days or ProductionConfig.SUBSCRIPTION_EXPIRY_ALERT_DAYS), 1)
+        expiring_soon = bool(is_active and days_remaining <= threshold)
+
+        return {
+            "plan_code": normalized_plan,
+            "status": normalized_status,
+            "started_at": started_dt.isoformat() if started_dt else None,
+            "expires_at": expires_dt.isoformat() if expires_dt else None,
+            "is_active": bool(is_active),
+            "days_remaining": int(days_remaining),
+            "expiring_soon": bool(expiring_soon),
+            "alert_threshold_days": int(threshold),
+        }
 
     def upsert_dashboard_user_access(self, access_data: Dict[str, Any]) -> int:
         user_id = int(access_data["user_id"])
@@ -1077,6 +1218,15 @@ class TradingDatabase:
                 (user_id,),
             )
             row = cursor.fetchone()
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_subscriptions (
+                    user_id, plan_code, status, started_at, expires_at, auto_renew, credits_balance, updated_at
+                ) VALUES (?, 'free', 'inactive', NULL, NULL, 0, 0.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO NOTHING
+                ''',
+                (user_id,),
+            )
             conn.commit()
             return int(row["id"])
         finally:
@@ -1092,10 +1242,20 @@ class TradingDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 '''
-                SELECT access.*, tu.username AS telegram_username, tu.first_name AS telegram_first_name, tu.plan AS telegram_plan
+                SELECT
+                    access.*,
+                    tu.username AS telegram_username,
+                    tu.first_name AS telegram_first_name,
+                    tu.plan AS telegram_plan,
+                    sub.plan_code AS subscription_plan_code,
+                    sub.status AS subscription_status,
+                    sub.started_at AS subscription_started_at,
+                    sub.expires_at AS subscription_expires_at
                 FROM dashboard_user_access access
                 LEFT JOIN telegram_users tu
                   ON tu.telegram_id = access.user_id
+                LEFT JOIN dashboard_user_subscriptions sub
+                  ON sub.user_id = access.user_id
                 WHERE lower(access.login_name) = ?
                    OR CAST(access.user_id AS TEXT) = ?
                 LIMIT 1
@@ -1123,6 +1283,12 @@ class TradingDatabase:
                 ''',
                 (last_login_at, int(payload["id"])),
             )
+            subscription_snapshot = self._build_subscription_snapshot(
+                plan_code=payload.get("subscription_plan_code"),
+                status=payload.get("subscription_status"),
+                started_at=payload.get("subscription_started_at"),
+                expires_at=payload.get("subscription_expires_at"),
+            )
             conn.commit()
             return {
                 "id": int(payload["id"]),
@@ -1134,6 +1300,7 @@ class TradingDatabase:
                 "username": payload.get("telegram_username"),
                 "first_name": payload.get("telegram_first_name"),
                 "plan": payload.get("telegram_plan"),
+                "subscription": subscription_snapshot,
             }
         finally:
             conn.close()
@@ -1202,6 +1369,9 @@ class TradingDatabase:
                     tu.username AS telegram_username,
                     tu.first_name AS telegram_first_name,
                     tu.plan AS telegram_plan,
+                    COALESCE(sub.plan_code, 'free') AS plan_code,
+                    COALESCE(sub.status, 'inactive') AS subscription_status,
+                    sub.expires_at AS subscription_expires_at,
                     (
                         SELECT COUNT(*)
                         FROM user_accounts ua
@@ -1210,12 +1380,680 @@ class TradingDatabase:
                 FROM dashboard_user_access access
                 LEFT JOIN telegram_users tu
                   ON tu.telegram_id = access.user_id
+                LEFT JOIN dashboard_user_subscriptions sub
+                  ON sub.user_id = access.user_id
                 ORDER BY access.user_id ASC
                 LIMIT ?
                 ''',
                 (int(limit),),
             )
             return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def register_dashboard_user_selfservice(self, signup_data: Dict[str, Any]) -> Dict[str, Any]:
+        login_name = self._normalize_dashboard_login_name(signup_data.get("login_name"))
+        if not login_name:
+            raise ValueError("Informe um login válido.")
+
+        password = str(signup_data.get("password") or "")
+        password_payload = self._hash_dashboard_password(password)
+        notes = str(signup_data.get("notes") or "").strip() or None
+        display_name = str(signup_data.get("display_name") or "").strip() or None
+        contact_text = str(signup_data.get("contact_text") or "").strip() or None
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT id
+                FROM dashboard_user_access
+                WHERE lower(login_name) = ?
+                LIMIT 1
+                ''',
+                (login_name,),
+            )
+            if cursor.fetchone():
+                raise ValueError("Este login já está em uso.")
+
+            user_id = self._next_dashboard_user_id(cursor)
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_access (
+                    user_id,
+                    login_name,
+                    password_salt,
+                    password_hash,
+                    is_active,
+                    require_password_change,
+                    notes,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, 1, 0, ?, CURRENT_TIMESTAMP)
+                ''',
+                (
+                    int(user_id),
+                    login_name,
+                    password_payload["salt_hex"],
+                    password_payload["hash_hex"],
+                    notes,
+                ),
+            )
+            access_id = int(cursor.lastrowid)
+
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_subscriptions (
+                    user_id, plan_code, status, started_at, expires_at, auto_renew, credits_balance, notes, updated_at
+                ) VALUES (?, 'free', 'inactive', NULL, NULL, 0, 0.0, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO NOTHING
+                ''',
+                (int(user_id), notes),
+            )
+
+            if display_name:
+                cursor.execute(
+                    '''
+                    INSERT INTO telegram_users (
+                        telegram_id, username, first_name, plan, is_admin, joined_date
+                    ) VALUES (?, ?, ?, 'free', 0, CURRENT_TIMESTAMP)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        username = COALESCE(excluded.username, telegram_users.username),
+                        first_name = COALESCE(excluded.first_name, telegram_users.first_name)
+                    ''',
+                    (int(user_id), login_name, display_name),
+                )
+            elif contact_text:
+                cursor.execute(
+                    '''
+                    INSERT INTO telegram_users (
+                        telegram_id, username, first_name, plan, is_admin, joined_date
+                    ) VALUES (?, ?, ?, 'free', 0, CURRENT_TIMESTAMP)
+                    ON CONFLICT(telegram_id) DO UPDATE SET
+                        username = COALESCE(excluded.username, telegram_users.username)
+                    ''',
+                    (int(user_id), login_name, contact_text),
+                )
+
+            conn.commit()
+            return {
+                "access_id": access_id,
+                "user_id": int(user_id),
+                "login_name": login_name,
+                "subscription": self._build_subscription_snapshot(
+                    plan_code="free",
+                    status="inactive",
+                    started_at=None,
+                    expires_at=None,
+                ),
+            }
+        finally:
+            conn.close()
+
+    def get_dashboard_user_subscription(self, user_id: int) -> Dict[str, Any]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_subscriptions (
+                    user_id, plan_code, status, started_at, expires_at, auto_renew, credits_balance, updated_at
+                ) VALUES (?, 'free', 'inactive', NULL, NULL, 0, 0.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO NOTHING
+                ''',
+                (int(user_id),),
+            )
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_user_subscriptions
+                WHERE user_id = ?
+                LIMIT 1
+                ''',
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            payload = dict(row) if row else {
+                "user_id": int(user_id),
+                "plan_code": "free",
+                "status": "inactive",
+                "started_at": None,
+                "expires_at": None,
+                "auto_renew": False,
+                "credits_balance": 0.0,
+                "last_payment_at": None,
+                "next_billing_at": None,
+                "notes": None,
+            }
+            snapshot = self._build_subscription_snapshot(
+                plan_code=payload.get("plan_code"),
+                status=payload.get("status"),
+                started_at=payload.get("started_at"),
+                expires_at=payload.get("expires_at"),
+            )
+            return {
+                **payload,
+                **snapshot,
+                "user_id": int(payload.get("user_id", user_id)),
+                "auto_renew": bool(payload.get("auto_renew", False)),
+                "credits_balance": float(payload.get("credits_balance", 0.0) or 0.0),
+            }
+        finally:
+            conn.close()
+
+    def list_dashboard_user_subscriptions(self, limit: int = 200) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT
+                    sub.user_id,
+                    access.login_name,
+                    sub.plan_code,
+                    sub.status,
+                    sub.started_at,
+                    sub.expires_at,
+                    sub.auto_renew,
+                    sub.credits_balance,
+                    sub.payment_provider,
+                    sub.external_subscription_id,
+                    sub.last_payment_at,
+                    sub.next_billing_at,
+                    sub.notes,
+                    sub.updated_at
+                FROM dashboard_user_subscriptions sub
+                LEFT JOIN dashboard_user_access access
+                  ON access.user_id = sub.user_id
+                ORDER BY
+                    CASE WHEN lower(sub.status) = 'active' THEN 0 ELSE 1 END,
+                    sub.expires_at ASC,
+                    sub.user_id ASC
+                LIMIT ?
+                ''',
+                (int(limit),),
+            )
+            rows = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                snapshot = self._build_subscription_snapshot(
+                    plan_code=item.get("plan_code"),
+                    status=item.get("status"),
+                    started_at=item.get("started_at"),
+                    expires_at=item.get("expires_at"),
+                )
+                rows.append({**item, **snapshot})
+            return rows
+        finally:
+            conn.close()
+
+    def activate_dashboard_user_subscription(
+        self,
+        *,
+        user_id: int,
+        plan_code: str,
+        approved_by: Optional[str] = None,
+        extend_from_current: bool = True,
+        auto_renew: bool = False,
+        payment_provider: Optional[str] = None,
+        external_subscription_id: Optional[str] = None,
+        credits_delta: float = 0.0,
+        notes: Optional[str] = None,
+        started_at: Optional[Any] = None,
+        expires_at: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        normalized_plan = self._normalize_subscription_plan_code(plan_code)
+        now_utc = datetime.now(UTC)
+        explicit_start = self._to_utc_datetime(started_at)
+        explicit_expiry = self._to_utc_datetime(expires_at)
+        duration_days = self._plan_duration_days(normalized_plan)
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_user_access
+                WHERE user_id = ?
+                LIMIT 1
+                ''',
+                (int(user_id),),
+            )
+            if not cursor.fetchone():
+                raise ValueError(f"User ID {int(user_id)} não encontrado em dashboard_user_access.")
+
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_user_subscriptions
+                WHERE user_id = ?
+                LIMIT 1
+                ''',
+                (int(user_id),),
+            )
+            current = cursor.fetchone()
+            current_payload = dict(current) if current else {}
+            current_expiry = self._to_utc_datetime(current_payload.get("expires_at"))
+
+            base_start = explicit_start or now_utc
+            if (
+                extend_from_current
+                and current_expiry is not None
+                and current_expiry > now_utc
+                and explicit_start is None
+            ):
+                base_start = current_expiry
+
+            resolved_expiry = explicit_expiry
+            if resolved_expiry is None:
+                if duration_days <= 0:
+                    resolved_expiry = base_start
+                else:
+                    resolved_expiry = base_start + timedelta(days=duration_days)
+
+            credits_previous = float(current_payload.get("credits_balance", 0.0) or 0.0)
+            credits_new = credits_previous + float(credits_delta or 0.0)
+            merged_notes = str(notes or "").strip() or current_payload.get("notes")
+            reviewer = str(approved_by or "").strip() or "admin"
+
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_subscriptions (
+                    user_id, plan_code, status, started_at, expires_at, auto_renew,
+                    payment_provider, external_subscription_id, credits_balance,
+                    last_payment_at, next_billing_at, notes, updated_at
+                ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    plan_code = excluded.plan_code,
+                    status = 'active',
+                    started_at = excluded.started_at,
+                    expires_at = excluded.expires_at,
+                    auto_renew = excluded.auto_renew,
+                    payment_provider = COALESCE(excluded.payment_provider, dashboard_user_subscriptions.payment_provider),
+                    external_subscription_id = COALESCE(excluded.external_subscription_id, dashboard_user_subscriptions.external_subscription_id),
+                    credits_balance = excluded.credits_balance,
+                    last_payment_at = excluded.last_payment_at,
+                    next_billing_at = excluded.next_billing_at,
+                    notes = excluded.notes,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    int(user_id),
+                    normalized_plan,
+                    base_start.isoformat(),
+                    resolved_expiry.isoformat(),
+                    int(bool(auto_renew)),
+                    str(payment_provider or "").strip() or None,
+                    str(external_subscription_id or "").strip() or None,
+                    float(credits_new),
+                    now_utc.isoformat(),
+                    resolved_expiry.isoformat() if bool(auto_renew) else None,
+                    merged_notes if merged_notes else f"Ativado por {reviewer}",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return self.get_dashboard_user_subscription(int(user_id))
+
+    def set_dashboard_user_subscription_status(
+        self,
+        *,
+        user_id: int,
+        status: str,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status not in {"inactive", "active", "expired", "blocked"}:
+            raise ValueError("Status de assinatura inválido.")
+
+        current = self.get_dashboard_user_subscription(int(user_id))
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE dashboard_user_subscriptions
+                SET status = ?,
+                    notes = COALESCE(?, notes),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE user_id = ?
+                ''',
+                (
+                    normalized_status,
+                    str(notes or "").strip() or None,
+                    int(user_id),
+                ),
+            )
+            if normalized_status in {"inactive", "expired", "blocked"}:
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_user_subscriptions
+                    SET auto_renew = 0
+                    WHERE user_id = ?
+                    ''',
+                    (int(user_id),),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        if normalized_status in {"inactive", "expired", "blocked"}:
+            return self.get_dashboard_user_subscription(int(user_id))
+        return {
+            **current,
+            "status": normalized_status,
+            "is_active": bool(normalized_status == "active" and current.get("is_active")),
+        }
+
+    def create_dashboard_signup_request(self, request_data: Dict[str, Any]) -> int:
+        login_name = self._normalize_dashboard_login_name(request_data.get("login_name"))
+        if not login_name:
+            raise ValueError("Informe um login válido para solicitar cadastro.")
+
+        password = str(request_data.get("password") or "")
+        password_payload = self._hash_dashboard_password(password)
+
+        display_name = str(request_data.get("display_name") or "").strip() or None
+        contact_text = str(request_data.get("contact_text") or "").strip() or None
+        notes = str(request_data.get("notes") or "").strip() or None
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT id
+                FROM dashboard_user_access
+                WHERE lower(login_name) = ?
+                LIMIT 1
+                ''',
+                (login_name,),
+            )
+            if cursor.fetchone():
+                raise ValueError("Este login já está em uso.")
+
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_signup_requests (
+                    login_name, password_salt, password_hash, display_name, contact_text,
+                    status, requested_at, reviewed_at, reviewed_by, review_notes, approved_user_id, notes
+                ) VALUES (?, ?, ?, ?, ?, 'pending', CURRENT_TIMESTAMP, NULL, NULL, NULL, NULL, ?)
+                ON CONFLICT(login_name) DO UPDATE SET
+                    password_salt = excluded.password_salt,
+                    password_hash = excluded.password_hash,
+                    display_name = excluded.display_name,
+                    contact_text = excluded.contact_text,
+                    status = 'pending',
+                    requested_at = CURRENT_TIMESTAMP,
+                    reviewed_at = NULL,
+                    reviewed_by = NULL,
+                    review_notes = NULL,
+                    approved_user_id = NULL,
+                    notes = excluded.notes
+                ''',
+                (
+                    login_name,
+                    password_payload["salt_hex"],
+                    password_payload["hash_hex"],
+                    display_name,
+                    contact_text,
+                    notes,
+                ),
+            )
+            cursor.execute(
+                '''
+                SELECT id
+                FROM dashboard_signup_requests
+                WHERE login_name = ?
+                LIMIT 1
+                ''',
+                (login_name,),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            return int(row["id"])
+        finally:
+            conn.close()
+
+    def list_dashboard_signup_requests(self, limit: int = 200, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        normalized_status = str(status or "").strip().lower() or None
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            if normalized_status:
+                cursor.execute(
+                    '''
+                    SELECT
+                        req.id,
+                        req.login_name,
+                        req.display_name,
+                        req.contact_text,
+                        req.status,
+                        req.requested_at,
+                        req.reviewed_at,
+                        req.reviewed_by,
+                        req.review_notes,
+                        req.approved_user_id,
+                        req.notes
+                    FROM dashboard_signup_requests req
+                    WHERE lower(req.status) = ?
+                    ORDER BY
+                        CASE WHEN lower(req.status) = 'pending' THEN 0 ELSE 1 END,
+                        req.requested_at DESC,
+                        req.id DESC
+                    LIMIT ?
+                    ''',
+                    (normalized_status, int(limit)),
+                )
+            else:
+                cursor.execute(
+                    '''
+                    SELECT
+                        req.id,
+                        req.login_name,
+                        req.display_name,
+                        req.contact_text,
+                        req.status,
+                        req.requested_at,
+                        req.reviewed_at,
+                        req.reviewed_by,
+                        req.review_notes,
+                        req.approved_user_id,
+                        req.notes
+                    FROM dashboard_signup_requests req
+                    ORDER BY
+                        CASE WHEN lower(req.status) = 'pending' THEN 0 ELSE 1 END,
+                        req.requested_at DESC,
+                        req.id DESC
+                    LIMIT ?
+                    ''',
+                    (int(limit),),
+                )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def _next_dashboard_user_id(self, cursor) -> int:
+        cursor.execute(
+            '''
+            SELECT MAX(value) AS max_user_id
+            FROM (
+                SELECT COALESCE(MAX(user_id), 0) AS value FROM dashboard_user_access
+                UNION ALL
+                SELECT COALESCE(MAX(telegram_id), 0) AS value FROM telegram_users
+                UNION ALL
+                SELECT COALESCE(MAX(user_id), 0) AS value FROM user_accounts
+            )
+            '''
+        )
+        row = cursor.fetchone()
+        max_user_id = int((row or {"max_user_id": 0})["max_user_id"] or 0)
+        return max(max_user_id + 1, 1000)
+
+    def review_dashboard_signup_request(
+        self,
+        *,
+        request_id: int,
+        action: str,
+        reviewed_by: Optional[str] = None,
+        review_notes: Optional[str] = None,
+        approved_user_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"approve", "reject"}:
+            raise ValueError("Ação inválida para revisão. Use approve ou reject.")
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_signup_requests
+                WHERE id = ?
+                LIMIT 1
+                ''',
+                (int(request_id),),
+            )
+            request_row = cursor.fetchone()
+            if not request_row:
+                raise ValueError("Solicitação de cadastro não encontrada.")
+
+            request_payload = dict(request_row)
+            current_status = str(request_payload.get("status") or "").strip().lower()
+            if current_status != "pending":
+                raise ValueError(f"Solicitação já revisada com status {current_status}.")
+
+            reviewer = str(reviewed_by or "").strip() or "admin"
+            notes = str(review_notes or "").strip() or None
+            reviewed_at = datetime.now(UTC).isoformat()
+
+            if normalized_action == "reject":
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_signup_requests
+                    SET status = 'rejected',
+                        reviewed_at = ?,
+                        reviewed_by = ?,
+                        review_notes = ?,
+                        approved_user_id = NULL
+                    WHERE id = ?
+                    ''',
+                    (reviewed_at, reviewer, notes, int(request_id)),
+                )
+                conn.commit()
+                return {
+                    "request_id": int(request_id),
+                    "status": "rejected",
+                    "login_name": request_payload.get("login_name"),
+                    "approved_user_id": None,
+                }
+
+            login_name = self._normalize_dashboard_login_name(request_payload.get("login_name"))
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_user_access
+                WHERE lower(login_name) = ?
+                LIMIT 1
+                ''',
+                (login_name,),
+            )
+            existing_access = cursor.fetchone()
+
+            if existing_access:
+                access_payload = dict(existing_access)
+                target_user_id = int(access_payload["user_id"])
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_user_access
+                    SET password_salt = ?,
+                        password_hash = ?,
+                        is_active = 1,
+                        require_password_change = 1,
+                        notes = COALESCE(?, notes),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                    ''',
+                    (
+                        str(request_payload["password_salt"]),
+                        str(request_payload["password_hash"]),
+                        notes,
+                        target_user_id,
+                    ),
+                )
+            else:
+                if approved_user_id is not None and int(approved_user_id) > 0:
+                    target_user_id = int(approved_user_id)
+                    cursor.execute(
+                        '''
+                        SELECT id
+                        FROM dashboard_user_access
+                        WHERE user_id = ?
+                        LIMIT 1
+                        ''',
+                        (target_user_id,),
+                    )
+                    if cursor.fetchone():
+                        raise ValueError(f"User ID {target_user_id} já está em uso.")
+                else:
+                    target_user_id = self._next_dashboard_user_id(cursor)
+
+                cursor.execute(
+                    '''
+                    INSERT INTO dashboard_user_access (
+                        user_id,
+                        login_name,
+                        password_salt,
+                        password_hash,
+                        is_active,
+                        require_password_change,
+                        notes,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, 1, 1, ?, CURRENT_TIMESTAMP)
+                    ''',
+                    (
+                        target_user_id,
+                        login_name,
+                        str(request_payload["password_salt"]),
+                        str(request_payload["password_hash"]),
+                        notes,
+                    ),
+                )
+
+            cursor.execute(
+                '''
+                UPDATE dashboard_signup_requests
+                SET status = 'approved',
+                    reviewed_at = ?,
+                    reviewed_by = ?,
+                    review_notes = ?,
+                    approved_user_id = ?
+                WHERE id = ?
+                ''',
+                (reviewed_at, reviewer, notes, int(target_user_id), int(request_id)),
+            )
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_subscriptions (
+                    user_id, plan_code, status, started_at, expires_at, auto_renew, credits_balance, updated_at
+                ) VALUES (?, 'free', 'inactive', NULL, NULL, 0, 0.0, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO NOTHING
+                ''',
+                (int(target_user_id),),
+            )
+
+            conn.commit()
+            return {
+                "request_id": int(request_id),
+                "status": "approved",
+                "login_name": login_name,
+                "approved_user_id": int(target_user_id),
+            }
         finally:
             conn.close()
 
