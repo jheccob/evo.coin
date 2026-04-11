@@ -4202,123 +4202,123 @@ def main():
                 except Exception as e:
                     st.error(f"❌ Erro na atualização: {str(e)}")
 
-    # Tab 2: Calculadoras
-            with futures_tab2:
-                st.markdown("### ⚖️ Calculadoras de Trading")
+        # Tab 2: Calculadoras
+        with futures_tab2:
+            st.markdown("### ⚖️ Calculadoras de Trading")
 
-                calc_tab1, calc_tab2, calc_tab3 = st.tabs([
-                    "🧮 Calculadora de Posição", "💀 Preço de Liquidação", "💰 P&L Simulador"
-                ])
+            calc_tab1, calc_tab2, calc_tab3 = st.tabs([
+                "🧮 Calculadora de Posição", "💀 Preço de Liquidação", "💰 P&L Simulador"
+            ])
 
-                with calc_tab1:
-                    st.markdown("#### 🧮 Calculadora de Tamanho da Posição")
+            with calc_tab1:
+                st.markdown("#### 🧮 Calculadora de Tamanho da Posição")
 
-                    col1, col2 = st.columns(2)
+                col1, col2 = st.columns(2)
 
-                    with col1:
-                        account_balance = st.number_input("Saldo da Conta ($)", value=10000.0, min_value=100.0)
-                        risk_percent = st.slider("Risco por Trade (%)", 1, 10, 3)
-                        leverage_calc = st.selectbox("Alavancagem Calc", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
-                        entry_price = st.number_input("Preço de Entrada ($)", value=float(st.session_state.current_data.iloc[-1]['close']) if st.session_state.current_data is not None else 1.0)
+                with col1:
+                    account_balance = st.number_input("Saldo da Conta ($)", value=10000.0, min_value=100.0)
+                    risk_percent = st.slider("Risco por Trade (%)", 1, 10, 3)
+                    leverage_calc = st.selectbox("Alavancagem Calc", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
+                    entry_price = st.number_input("Preço de Entrada ($)", value=float(st.session_state.current_data.iloc[-1]['close']) if st.session_state.current_data is not None else 1.0)
 
-                    with col2:
-                        # Cálculos
-                        risk_amount = account_balance * (risk_percent / 100)
-                        position_size_usdt = risk_amount * leverage_calc
-                        quantity = position_size_usdt / entry_price
-                        margin_required = position_size_usdt / leverage_calc
+                with col2:
+                    # Cálculos
+                    risk_amount = account_balance * (risk_percent / 100)
+                    position_size_usdt = risk_amount * leverage_calc
+                    quantity = position_size_usdt / entry_price
+                    margin_required = position_size_usdt / leverage_calc
 
-                        st.metric("💰 Valor Arriscado", f"${risk_amount:.2f}")
-                        st.metric("📊 Tamanho da Posição", f"${position_size_usdt:.2f}")
-                        st.metric("🪙 Quantidade", f"{quantity:.6f}")
-                        st.metric("🏦 Margem Necessária", f"${margin_required:.2f}")
+                    st.metric("💰 Valor Arriscado", f"${risk_amount:.2f}")
+                    st.metric("📊 Tamanho da Posição", f"${position_size_usdt:.2f}")
+                    st.metric("🪙 Quantidade", f"{quantity:.6f}")
+                    st.metric("🏦 Margem Necessária", f"${margin_required:.2f}")
 
-                with calc_tab2:
-                    st.markdown("#### 💀 Calculadora de Preço de Liquidação")
+            with calc_tab2:
+                st.markdown("#### 💀 Calculadora de Preço de Liquidação")
 
-                    col1, col2 = st.columns(2)
+                col1, col2 = st.columns(2)
 
-                    with col1:
-                        entry_price_liq = st.number_input("Preço de Entrada Liq", value=1.0)
-                        leverage_liq = st.selectbox("Alavancagem Liq", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
-                        position_side = st.radio("Lado da Posição", ["LONG", "SHORT"])
+                with col1:
+                    entry_price_liq = st.number_input("Preço de Entrada Liq", value=1.0)
+                    leverage_liq = st.selectbox("Alavancagem Liq", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
+                    position_side = st.radio("Lado da Posição", ["LONG", "SHORT"])
 
-                    with col2:
-                        # Calcular liquidação (simplificado)
-                        if position_side == "LONG":
-                            liquidation_price = entry_price_liq * (1 - (0.9 / leverage_liq))
-                            distance = ((entry_price_liq - liquidation_price) / entry_price_liq) * 100
-                        else:
-                            liquidation_price = entry_price_liq * (1 + (0.9 / leverage_liq))
-                            distance = ((liquidation_price - entry_price_liq) / entry_price_liq) * 100
+                with col2:
+                    # Calcular liquidação (simplificado)
+                    if position_side == "LONG":
+                        liquidation_price = entry_price_liq * (1 - (0.9 / leverage_liq))
+                        distance = ((entry_price_liq - liquidation_price) / entry_price_liq) * 100
+                    else:
+                        liquidation_price = entry_price_liq * (1 + (0.9 / leverage_liq))
+                        distance = ((liquidation_price - entry_price_liq) / entry_price_liq) * 100
 
-                        st.metric("💀 Preço de Liquidação", f"${liquidation_price:.6f}")
-                        st.metric("📏 Distância", f"{distance:.2f}%")
+                    st.metric("💀 Preço de Liquidação", f"${liquidation_price:.6f}")
+                    st.metric("📏 Distância", f"{distance:.2f}%")
 
-                        if distance < 5:
-                            st.error("⚠️ ALTO RISCO DE LIQUIDAÇÃO!")
-                        elif distance < 10:
-                            st.warning("⚠️ Risco moderado de liquidação")
-                        else:
-                            st.success("✅ Distância segura da liquidação")
+                    if distance < 5:
+                        st.error("⚠️ ALTO RISCO DE LIQUIDAÇÃO!")
+                    elif distance < 10:
+                        st.warning("⚠️ Risco moderado de liquidação")
+                    else:
+                        st.success("✅ Distância segura da liquidação")
 
-                with calc_tab3:
-                    st.markdown("#### 💰 Simulador de Profit & Loss")
+            with calc_tab3:
+                st.markdown("#### 💰 Simulador de Profit & Loss")
 
-                    col1, col2 = st.columns(2)
+                col1, col2 = st.columns(2)
 
-                    with col1:
-                        entry_price_pnl = st.number_input("Preço de Entrada PnL", value=1.0)
-                        position_size_pnl = st.number_input("Tamanho da Posição ($)", value=1000.0)
-                        leverage_pnl = st.selectbox("Alavancagem PnL", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
+                with col1:
+                    entry_price_pnl = st.number_input("Preço de Entrada PnL", value=1.0)
+                    position_size_pnl = st.number_input("Tamanho da Posição ($)", value=1000.0)
+                    leverage_pnl = st.selectbox("Alavancagem PnL", [1, 2, 3, 5, 10, 20, 25, 50], index=3)
 
-                        # Cenários de preço
-                        st.markdown("**Cenários de Preço:**")
-                        scenario_1 = st.number_input("Cenário 1 ($)", value=entry_price_pnl * 1.02)
-                        scenario_2 = st.number_input("Cenário 2 ($)", value=entry_price_pnl * 1.05)
-                        scenario_3 = st.number_input("Cenário 3 ($)", value=entry_price_pnl * 0.98)
+                    # Cenários de preço
+                    st.markdown("**Cenários de Preço:**")
+                    scenario_1 = st.number_input("Cenário 1 ($)", value=entry_price_pnl * 1.02)
+                    scenario_2 = st.number_input("Cenário 2 ($)", value=entry_price_pnl * 1.05)
+                    scenario_3 = st.number_input("Cenário 3 ($)", value=entry_price_pnl * 0.98)
 
-                    with col2:
-                        st.markdown("**Resultados:**")
+                with col2:
+                    st.markdown("**Resultados:**")
 
-                        for i, price in enumerate([scenario_1, scenario_2, scenario_3], 1):
-                            price_change_pct = ((price - entry_price_pnl) / entry_price_pnl)
-                            pnl = position_size_pnl * price_change_pct * leverage_pnl
+                    for i, price in enumerate([scenario_1, scenario_2, scenario_3], 1):
+                        price_change_pct = ((price - entry_price_pnl) / entry_price_pnl)
+                        pnl = position_size_pnl * price_change_pct * leverage_pnl
 
-                            color = "🟢" if pnl > 0 else "🔴"
-                            st.write(f"**Cenário {i}:** {color} ${pnl:+.2f} ({price_change_pct * leverage_pnl * 100:+.1f}%)")
+                        color = "🟢" if pnl > 0 else "🔴"
+                        st.write(f"**Cenário {i}:** {color} ${pnl:+.2f} ({price_change_pct * leverage_pnl * 100:+.1f}%)")
 
-            # Tab 3: Cenários teóricos
-            with futures_tab3:
-                st.markdown("### 📊 Simulador Educacional de Cenários")
+        # Tab 3: Cenários teóricos
+        with futures_tab3:
+            st.markdown("### 📊 Simulador Educacional de Cenários")
 
-                # Mock positions for educational demonstration only
-                mock_positions = [
-                    {
-                        "Par": symbol,
-                        "Lado": "LONG",
-                        "Tamanho": f"${5000 * futures_leverage:.0f}",
-                        "Alavancagem": f"{futures_leverage}x",
-                        "Entrada": f"${st.session_state.current_data.iloc[-1]['close']:.6f}" if st.session_state.current_data is not None else "$1.000000",
-                        "Atual": f"${st.session_state.current_data.iloc[-1]['close'] * 1.015:.6f}" if st.session_state.current_data is not None else "$1.015000",
-                        "PnL": f"+${5000 * futures_leverage * 0.015:.2f}",
-                        "PnL %": f"+{futures_leverage * 1.5:.1f}%",
-                        "Margem": f"${5000:.0f}",
-                        "Liquidação": f"${st.session_state.current_data.iloc[-1]['close'] * (1 - 0.9/futures_leverage):.6f}" if st.session_state.current_data is not None else "$0.900000"
-                    }
-                ]
+            # Mock positions for educational demonstration only
+            mock_positions = [
+                {
+                    "Par": symbol,
+                    "Lado": "LONG",
+                    "Tamanho": f"${5000 * futures_leverage:.0f}",
+                    "Alavancagem": f"{futures_leverage}x",
+                    "Entrada": f"${st.session_state.current_data.iloc[-1]['close']:.6f}" if st.session_state.current_data is not None else "$1.000000",
+                    "Atual": f"${st.session_state.current_data.iloc[-1]['close'] * 1.015:.6f}" if st.session_state.current_data is not None else "$1.015000",
+                    "PnL": f"+${5000 * futures_leverage * 0.015:.2f}",
+                    "PnL %": f"+{futures_leverage * 1.5:.1f}%",
+                    "Margem": f"${5000:.0f}",
+                    "Liquidação": f"${st.session_state.current_data.iloc[-1]['close'] * (1 - 0.9/futures_leverage):.6f}" if st.session_state.current_data is not None else "$0.900000"
+                }
+            ]
 
-                if st.button("🔄 Gerar Cenário Teórico"):
-                    positions_df = pd.DataFrame(mock_positions)
-                    st.dataframe(positions_df, width="stretch")
+            if st.button("🔄 Gerar Cenário Teórico"):
+                positions_df = pd.DataFrame(mock_positions)
+                st.dataframe(positions_df, width="stretch")
 
-                    profit = 5000 * futures_leverage * 0.015
-                    profit_pct = futures_leverage * 1.5
-                    st.success(f"💰 PnL Total Simulado: +${profit:.2f} (+{profit_pct:.1f}%)")
-                    st.info(f"🏦 Margem Total Usada: $5,000 com {futures_mode}")
-                    st.warning("⚠️ Isto não representa posição real aberta nem paper trade salvo")
-                else:
-                    st.info("📭 Clique para gerar um cenário teórico com base na configuração atual")
+                profit = 5000 * futures_leverage * 0.015
+                profit_pct = futures_leverage * 1.5
+                st.success(f"💰 PnL Total Simulado: +${profit:.2f} (+{profit_pct:.1f}%)")
+                st.info(f"🏦 Margem Total Usada: $5,000 com {futures_mode}")
+                st.warning("⚠️ Isto não representa posição real aberta nem paper trade salvo")
+            else:
+                st.info("📭 Clique para gerar um cenário teórico com base na configuração atual")
 
     if active_dashboard_section == "bot":
         st.header("🤖 Central do Bot Trader")
