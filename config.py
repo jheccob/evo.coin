@@ -116,6 +116,9 @@ MAX_OPEN_REAL_TRADES = _get_int("MAX_OPEN_REAL_TRADES", 1)
 
 class AppConfig:
     DB_PATH = os.getenv("DB_PATH", "data/trading_bot.db")
+    DATABASE_URL = str(os.getenv("DATABASE_URL", "")).strip()
+    DB_BACKEND = "postgres" if DATABASE_URL.lower().startswith(("postgres://", "postgresql://")) else "sqlite"
+    DB_DISPLAY = "postgres (DATABASE_URL)" if DB_BACKEND == "postgres" else DB_PATH
 
     DEFAULT_SYMBOL = os.getenv("APP_DEFAULT_SYMBOL", SYMBOL)
     DEFAULT_TIMEFRAME = os.getenv("APP_DEFAULT_TIMEFRAME", TIMEFRAME)
