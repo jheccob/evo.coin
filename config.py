@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional
 
-BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "True").lower() == "true"
+BINANCE_TESTNET = str(os.getenv("BINANCE_TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 
@@ -49,7 +49,7 @@ SYMBOL = os.getenv("SYMBOL", "BTC/USDT")
 TIMEFRAME = os.getenv("TIMEFRAME", "15m")
 LIMIT = _get_int("LIMIT", 200)
 
-TESTNET = _get_bool("TESTNET", True)
+TESTNET = _get_bool("TESTNET", BINANCE_TESTNET)
 POLL_SECONDS = _get_int("POLL_SECONDS", 30)
 LEVERAGE = _get_int("LEVERAGE", 5)
 RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 1.0)
