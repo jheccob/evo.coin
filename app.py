@@ -273,7 +273,7 @@ class _TerminalBacktestEngine:
                 timeframe=timeframe,
                 candles=candles,
                 fee_pct=fee_pct,
-                testnet=False,
+                testnet=bool(getattr(runtime_config, "TESTNET", True)),
                 use_local_csv=True,
             )
 

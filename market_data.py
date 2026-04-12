@@ -3,21 +3,80 @@ import gzip
 import os
 
 
-def get_exchange(testnet: bool = False):
+def _build_exchange_candidates(testnet: bool = False):
     import ccxt
-    config = {"enableRateLimit": True}
+    candidates = []
 
-    # Prefer futures-native client when available.
+    base_config = {"enableRateLimit": True}
     exchange_cls = getattr(ccxt, "binanceusdm", None)
-    if exchange_cls is None:
-        config["options"] = {"defaultType": "future"}
-        exchange = ccxt.binance(config)
-    else:
-        exchange = exchange_cls(config)
+    if exchange_cls is not None:
+        candidates.append(("binanceusdm", exchange_cls(dict(base_config))))
+
+    # Fallback para Binance spot pública
+    candidates.append(("binance", ccxt.binance(dict(base_config))))
+
+    # Fallback adicional para regiões onde Binance pode estar bloqueada
+    bybit_cls = getattr(ccxt, "bybit", None)
+    if bybit_cls is not None:
+        candidates.append(
+            (
+                "bybit",
+                bybit_cls(
+                    {
+                        **base_config,
+                        "options": {"defaultType": "swap"},
+                    }
+                ),
+            )
+        )
 
     if testnet:
-        exchange.set_sandbox_mode(True)
-    return exchange
+        for _, exchange in candidates:
+            try:
+                exchange.set_sandbox_mode(True)
+            except Exception:
+                pass
+
+    return candidates
+
+
+def get_exchange(testnet: bool = False):
+    return _build_exchange_candidates(testnet=testnet)[0][1]
+
+
+def _is_restricted_location_error(exc: Exception) -> bool:
+    text = str(exc or "").lower()
+    return "restricted location" in text or "service unavailable from a restricted location" in text or " 451 " in f" {text} "
+
+
+def _fetch_ohlcv_with_exchange_fallback(
+    symbol: str,
+    timeframe: str,
+    limit: int,
+    testnet: bool = False,
+):
+    last_error = None
+    errors = []
+    for exchange_name, exchange in _build_exchange_candidates(testnet=testnet):
+        try:
+            resolved_symbol = _resolve_exchange_symbol(exchange, symbol)
+            ohlcv = exchange.fetch_ohlcv(resolved_symbol, timeframe=timeframe, limit=limit)
+            if ohlcv:
+                return exchange, resolved_symbol, ohlcv
+        except Exception as exc:
+            last_error = exc
+            errors.append(f"{exchange_name}: {exc}")
+            if not _is_restricted_location_error(exc):
+                # Mantemos fallback mesmo para outros erros transitórios.
+                continue
+
+    if last_error is None:
+        raise RuntimeError("Falha ao obter candles: nenhuma exchange disponível.")
+
+    raise RuntimeError(
+        "Falha ao obter candles em todas as exchanges candidatas. "
+        + " | ".join(errors)
+    ) from last_error
 
 
 def _symbol_candidates(symbol: str):
@@ -104,15 +163,22 @@ def _candles_to_dataframe(ohlcv):
 
 
 def fetch_candles(symbol: str, timeframe: str, limit: int = 500, testnet: bool = False):
-    exchange = get_exchange(testnet=testnet)
-    resolved_symbol = _resolve_exchange_symbol(exchange, symbol)
-    ohlcv = exchange.fetch_ohlcv(resolved_symbol, timeframe=timeframe, limit=limit)
+    _, _, ohlcv = _fetch_ohlcv_with_exchange_fallback(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=limit,
+        testnet=testnet,
+    )
     return _candles_to_dataframe(ohlcv)
 
 
 def fetch_historical_candles(symbol: str, timeframe: str, total_limit: int = 2000, batch_limit: int = 500, testnet: bool = False):
-    exchange = get_exchange(testnet=testnet)
-    resolved_symbol = _resolve_exchange_symbol(exchange, symbol)
+    exchange, resolved_symbol, _ = _fetch_ohlcv_with_exchange_fallback(
+        symbol=symbol,
+        timeframe=timeframe,
+        limit=min(max(int(batch_limit or 1), 1), max(int(total_limit or 1), 1)),
+        testnet=testnet,
+    )
     timeframe_ms = exchange.parse_timeframe(timeframe) * 1000
     since = exchange.milliseconds() - (total_limit * timeframe_ms)
     all_ohlcv = []
