@@ -4753,6 +4753,9 @@ def main():
         runtime_family_label = AppConfig.get_symbol_profile_family_label(symbol)
         bot_process_state = get_trader_bot_process_state()
         workspace_session_active = bool(dashboard_user)
+        admin_session_active = bool(st.session_state.get("admin_authenticated"))
+        operator_session_active = bool(workspace_session_active or admin_session_active)
+        operator_session_label = "Workspace" if workspace_session_active else ("Admin" if admin_session_active else "OFF")
         telegram_library_ready = is_telegram_service_available()
         websocket_library_ready = is_websocket_runtime_available()
         session_notifications_enabled = bool(st.session_state.get("telegram_notifications"))
@@ -4760,17 +4763,18 @@ def main():
         subscription_active = bool(subscription_payload.get("is_active"))
         subscription_plan = str(subscription_payload.get("plan_code") or "free").upper()
         subscription_gate_required = bool(ProductionConfig.REQUIRE_ACTIVE_SUBSCRIPTION_FOR_BOT)
+        subscription_gate_satisfied = bool(admin_session_active or not subscription_gate_required or subscription_active)
         bot_start_allowed = bool(
-            workspace_session_active
+            operator_session_active
             and websocket_library_ready
-            and (not subscription_gate_required or subscription_active)
+            and subscription_gate_satisfied
         )
         bot_start_block_reason = ""
-        if not workspace_session_active:
-            bot_start_block_reason = "Faça login no Workspace para habilitar o runtime."
+        if not operator_session_active:
+            bot_start_block_reason = "Faça login no Workspace ou autentique o Admin para habilitar o runtime."
         elif not websocket_library_ready:
             bot_start_block_reason = "Biblioteca websockets ausente no ambiente. Instale as dependências antes de ligar o bot."
-        elif subscription_gate_required and not subscription_active:
+        elif subscription_gate_required and not subscription_gate_satisfied:
             bot_start_block_reason = (
                 "Assinatura inativa/expirada. Ative um plano semanal, mensal ou anual para ligar o bot."
             )
@@ -4803,15 +4807,21 @@ def main():
         with readiness_col1:
             st.metric("Processo", "ON" if bot_process_state.get("running") else "OFF")
         with readiness_col2:
-            st.metric("Workspace", "ON" if workspace_session_active else "OFF")
+            st.metric("Sessão Operador", operator_session_label)
         with readiness_col3:
             st.metric("Lib Telegram", "OK" if telegram_library_ready else "PENDENTE")
         with readiness_col4:
             st.metric("Notif. Sessao", "ON" if session_notifications_enabled else "OFF")
         with readiness_col5:
-            st.metric("Assinatura", f"{subscription_plan} {'ON' if subscription_active else 'OFF'}")
+            subscription_status_label = "ADMIN BYPASS" if admin_session_active and subscription_gate_required else f"{subscription_plan} {'ON' if subscription_active else 'OFF'}"
+            st.metric("Assinatura", subscription_status_label)
         with readiness_col6:
             st.metric("Lib WebSocket", "OK" if websocket_library_ready else "PENDENTE")
+
+        if admin_session_active and not workspace_session_active:
+            st.info(
+                "Sessão Admin detectada. O runtime do bot pode ser ligado para operação técnica mesmo sem login no Workspace."
+            )
 
         if bot_view_mode == "Runtime":
             if not ProductionConfig.TELEGRAM_BOT_TOKEN:
@@ -4820,6 +4830,12 @@ def main():
                 st.warning("Biblioteca websockets indisponível. O bot não deve ser ligado sem streaming ativo.")
             if bot_start_block_reason:
                 st.warning(bot_start_block_reason)
+
+            if not operator_session_active:
+                st.caption(
+                    "Para liberar o botão, você pode seguir um destes caminhos: "
+                    "`Sidebar -> Entrar no Workspace` ou `Admin -> Entrar`."
+                )
 
             st.markdown("### ▶️ Runtime")
             render_trader_bot_runtime_controls(
@@ -4836,6 +4852,8 @@ def main():
             with readiness_status_col1:
                 st.info(
                     f"Workspace ativo: {'sim' if workspace_session_active else 'nao'}\n\n"
+                    f"Admin autenticado: {'sim' if admin_session_active else 'nao'}\n\n"
+                    f"Sessão operadora: {operator_session_label}\n\n"
                     f"Token do bot trader: {'ok' if ProductionConfig.TELEGRAM_BOT_TOKEN else 'pendente'}\n\n"
                     f"Biblioteca Telegram: {'ok' if telegram_library_ready else 'pendente'}\n\n"
                     f"Biblioteca WebSocket: {'ok' if websocket_library_ready else 'pendente'}\n\n"
@@ -4849,9 +4867,9 @@ def main():
                     f"Banco: {AppConfig.DB_DISPLAY}"
                 )
 
-            if not workspace_session_active:
-                st.warning("Faça login no Workspace para operar com contexto isolado por usuário.")
-            if subscription_gate_required and not subscription_active:
+            if not operator_session_active:
+                st.warning("Faça login no Workspace ou autentique o Admin para operar o runtime.")
+            if subscription_gate_required and not subscription_gate_satisfied:
                 st.warning("Assinatura inativa/expirada para uso do bot. Ative um plano para liberar operação.")
             if not telegram_library_ready:
                 st.warning("Biblioteca Telegram indisponível neste ambiente. O runtime pode subir sem comandos interativos completos.")
@@ -4868,7 +4886,7 @@ def main():
             st.markdown("### 🧭 Fluxo Recomendado")
             st.markdown(
                 """
-                1. Entre no `Workspace` para operar com sessão isolada.
+                1. Entre no `Workspace` ou autentique o `Admin` para liberar o runtime.
                 2. Use `Mercado` para revisar gráfico, contexto, sinal e risco.
                 3. Confira `Prontidao` nesta tela antes de subir o processo.
                 4. Ligue o bot em `Runtime` e acompanhe o PID.
