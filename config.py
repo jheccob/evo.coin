@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from typing import Dict, List, Optional
 
+BINANCE_TESTNET = os.getenv("BINANCE_TESTNET", "True").lower() == "true"
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 
 def _get_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)

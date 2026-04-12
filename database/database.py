@@ -1,12 +1,13 @@
 """
 Sistema de banco de dados usando SQLite para persistir dados do trading bot
 """
-import sqlite3
-import os
-import json
 import hmac
 import hashlib
+import json
+import os
+import re
 import secrets
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import List, Dict, Optional, Any
 from utils.timezone_utils import get_brazil_datetime_naive, format_brazil_time
@@ -15,6 +16,138 @@ from market_state_engine import (
     market_states_to_setup_allowlist,
     setup_types_to_market_state_allowlist,
 )
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception:
+    psycopg = None
+    dict_row = None
+
+
+_SQLITE_LITERAL_DATETIME_PATTERN = re.compile(
+    r"datetime\(\s*'now'\s*,\s*'(?P<interval>[^']+)'\s*\)",
+    flags=re.IGNORECASE,
+)
+_SQLITE_NOW_DATETIME_PATTERN = re.compile(
+    r"datetime\(\s*'now'\s*\)",
+    flags=re.IGNORECASE,
+)
+
+
+def _looks_like_postgres_url(database_url: str) -> bool:
+    normalized = str(database_url or "").strip().lower()
+    return normalized.startswith(("postgres://", "postgresql://"))
+
+
+def _replace_literal_datetime_now(match: re.Match) -> str:
+    raw_interval = str(match.group("interval") or "").strip()
+    if not raw_interval:
+        return "NOW()"
+    sign = "+"
+    interval_body = raw_interval
+    if raw_interval.startswith("-"):
+        sign = "-"
+        interval_body = raw_interval[1:].strip()
+    elif raw_interval.startswith("+"):
+        sign = "+"
+        interval_body = raw_interval[1:].strip()
+    if not interval_body:
+        return "NOW()"
+    return f"(NOW() {sign} INTERVAL '{interval_body}')"
+
+
+def _sqlite_to_postgres_sql(sql: str) -> str:
+    translated = str(sql or "")
+    translated = translated.replace(
+        "INTEGER PRIMARY KEY AUTOINCREMENT",
+        "BIGSERIAL PRIMARY KEY",
+    )
+    translated = translated.replace("AUTOINCREMENT", "")
+    translated = translated.replace("BOOLEAN", "INTEGER")
+    translated = translated.replace("datetime('now', ?)", "(NOW() + %s::interval)")
+    translated = _SQLITE_LITERAL_DATETIME_PATTERN.sub(_replace_literal_datetime_now, translated)
+    translated = _SQLITE_NOW_DATETIME_PATTERN.sub("NOW()", translated)
+
+    if re.search(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", translated, flags=re.IGNORECASE):
+        translated = re.sub(
+            r"\bINSERT\s+OR\s+IGNORE\s+INTO\b",
+            "INSERT INTO",
+            translated,
+            flags=re.IGNORECASE,
+        )
+        stripped = translated.rstrip()
+        if "ON CONFLICT" not in stripped.upper():
+            translated = stripped.rstrip(";") + " ON CONFLICT DO NOTHING"
+
+    translated = translated.replace("?", "%s")
+    return translated
+
+
+class _PostgresCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.lastrowid = None
+
+    def execute(self, sql, params=None):
+        translated_sql = _sqlite_to_postgres_sql(sql)
+        self._cursor.execute(translated_sql, params if params is not None else ())
+        self.lastrowid = None
+        if translated_sql.lstrip().upper().startswith("INSERT"):
+            try:
+                self._cursor.execute("SELECT LASTVAL() AS lastval")
+                lastval_row = self._cursor.fetchone()
+                if isinstance(lastval_row, dict):
+                    self.lastrowid = lastval_row.get("lastval")
+                elif lastval_row:
+                    self.lastrowid = lastval_row[0]
+            except Exception:
+                self.lastrowid = None
+        return self
+
+    def executemany(self, sql, seq_of_params):
+        translated_sql = _sqlite_to_postgres_sql(sql)
+        self._cursor.executemany(translated_sql, seq_of_params)
+        self.lastrowid = None
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    def close(self):
+        self._cursor.close()
+
+    def __getattr__(self, item):
+        return getattr(self._cursor, item)
+
+
+class _PostgresConnection:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def cursor(self):
+        return _PostgresCursor(self._conn.cursor(row_factory=dict_row))
+
+    def execute(self, sql, params=None):
+        cursor = self.cursor()
+        cursor.execute(sql, params)
+        return cursor
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
 
 
 def build_strategy_version(
@@ -52,14 +185,26 @@ def build_strategy_version(
 class TradingDatabase:
     def __init__(self, db_path: str = AppConfig.DB_PATH):
         self.db_path = db_path
-        # Criar diretório se não existir
-        os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+        self.database_url = str(os.getenv("DATABASE_URL", "")).strip()
+        self.backend = "postgres" if _looks_like_postgres_url(self.database_url) else "sqlite"
+        if self.backend == "postgres" and psycopg is None:
+            print(
+                "[database] DATABASE_URL detectada, mas psycopg nao esta disponivel. "
+                "Fallback para sqlite.",
+                flush=True,
+            )
+            self.backend = "sqlite"
+        if self.backend == "sqlite":
+            os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.init_database()
     
     def get_connection(self):
-        """Criar conexão com banco de dados"""
+        """Criar conexao com banco de dados"""
+        if self.backend == "postgres":
+            conn = psycopg.connect(self.database_url)
+            return _PostgresConnection(conn)
         conn = sqlite3.connect(self.db_path, timeout=30.0)
-        conn.row_factory = sqlite3.Row  # Para retornar dicionários
+        conn.row_factory = sqlite3.Row  # Para retornar dicionarios
         self._configure_sqlite_connection(conn)
         return conn
 
@@ -996,6 +1141,29 @@ class TradingDatabase:
 
     def _ensure_column(self, cursor, table_name: str, column_name: str, column_definition: str):
         """Adicionar coluna em instalacoes antigas sem destruir o banco existente."""
+        if self.backend == "postgres":
+            cursor.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = %s
+                  AND column_name = %s
+                LIMIT 1
+                """,
+                (table_name, column_name),
+            )
+            if cursor.fetchone() is None:
+                postgres_definition = str(column_definition).replace("BOOLEAN", "INTEGER")
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {postgres_definition}"
+                    )
+                except Exception as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        raise
+            return
+
         cursor.execute(f"PRAGMA table_info({table_name})")
         existing_columns = {row[1] for row in cursor.fetchall()}
         if column_name not in existing_columns:
@@ -3776,7 +3944,11 @@ class TradingDatabase:
             signal_id = cursor.lastrowid
             conn.commit()
             return int(signal_id)
-        except sqlite3.IntegrityError:
+        except Exception as exc:
+            is_sqlite_integrity = isinstance(exc, sqlite3.IntegrityError)
+            is_postgres_unique = "duplicate key value violates unique constraint" in str(exc).lower()
+            if not (is_sqlite_integrity or is_postgres_unique):
+                raise
             if candle_timestamp:
                 cursor.execute(
                     '''

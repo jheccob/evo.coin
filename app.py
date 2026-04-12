@@ -4614,7 +4614,7 @@ def main():
                     f"Perfil de referencia: {active_runtime_profile}\n\n"
                     f"Familia observada: {runtime_family_label}\n\n"
                     f"Timeframe atual: {timeframe}\n\n"
-                    f"Banco: {AppConfig.DB_PATH}"
+                    f"Banco: {AppConfig.DB_DISPLAY}"
                 )
 
             if not workspace_session_active:
