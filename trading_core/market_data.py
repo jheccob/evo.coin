@@ -131,6 +131,7 @@ def get_realtime_stream_client(bot, symbol: Optional[str] = None, timeframe: Opt
             symbol=resolved_symbol,
             timeframe=resolved_timeframe,
             max_candles=max(int(getattr(AppConfig, "MAX_CANDLES", 1000) or 1000), 250),
+            testnet=bool(getattr(runtime_config, "TESTNET", False)),
         )
     else:
         client = RestFallbackStreamClient(symbol=resolved_symbol, timeframe=resolved_timeframe)
