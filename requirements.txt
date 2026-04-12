@@ -5,4 +5,3 @@ plotly>=5.24,<6
 ccxt>=4.4,<5
 requests>=2.32,<3
 python-telegram-bot>=21,<23
-python start_railway.py
