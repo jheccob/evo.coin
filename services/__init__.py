@@ -21,6 +21,12 @@ except Exception:
     MultiUserRuntimeService = None
 
 try:
+    from .live_execution_service import LiveExecutionService
+    __all__.append("LiveExecutionService")
+except Exception:
+    LiveExecutionService = None
+
+try:
     from .paper_trade_service import PaperTradeService
     __all__.append("PaperTradeService")
 except Exception:

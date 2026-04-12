@@ -2,8 +2,10 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+import config
 from config import ProductionConfig
 from database.database import db as runtime_db
+from services.live_execution_service import LiveExecutionService
 from services.risk_management_service import RiskManagementService
 
 logger = logging.getLogger(__name__)
@@ -16,9 +18,10 @@ class MultiUserRuntimeService:
     ENABLE_MULTIUSER_AUTO_ORDER_EXECUTION estiver desabilitado.
     """
 
-    def __init__(self, database=None, risk_management_service=None):
+    def __init__(self, database=None, risk_management_service=None, live_execution_service=None):
         self.database = database or runtime_db
         self.risk_management_service = risk_management_service or RiskManagementService(database=self.database)
+        self.live_execution_service = live_execution_service or LiveExecutionService(database=self.database)
 
     def run_cycle(
         self,
@@ -27,6 +30,7 @@ class MultiUserRuntimeService:
         strategy_version: Optional[str] = None,
         entry_price: Optional[float] = None,
         stop_loss_pct: float = ProductionConfig.DEFAULT_LIVE_STOP_LOSS_PCT,
+        signal_side: Optional[str] = None,
     ) -> List[Dict]:
         if not ProductionConfig.ENABLE_MULTIUSER_RUNTIME:
             return []
@@ -46,6 +50,7 @@ class MultiUserRuntimeService:
                 strategy_version=strategy_version,
                 entry_price=entry_price,
                 stop_loss_pct=stop_loss_pct,
+                signal_side=signal_side,
             )
             results.append(result)
         return results
@@ -59,6 +64,7 @@ class MultiUserRuntimeService:
         strategy_version: Optional[str],
         entry_price: Optional[float],
         stop_loss_pct: float,
+        signal_side: Optional[str],
     ) -> Dict:
         now_iso = datetime.now(timezone.utc).isoformat()
         user_id = int(context["user_id"])
@@ -195,27 +201,84 @@ class MultiUserRuntimeService:
                 },
             }
 
-        event = self.database.save_user_execution_event(
-            {
+        if not signal_side:
+            event = self.database.save_user_execution_event(
+                {
+                    "user_id": user_id,
+                    "account_id": account_id,
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "strategy_version": strategy_version,
+                    "event_type": "execution_blocked_policy",
+                    "event_status": "blocked",
+                    "message": "Autoexecucao exige signal_side explicito.",
+                    "details_json": {"source": "multiuser_runtime", "timestamp": now_iso},
+                }
+            )
+            return {
                 "user_id": user_id,
                 "account_id": account_id,
-                "exchange": exchange,
-                "symbol": symbol,
-                "timeframe": timeframe,
-                "strategy_version": strategy_version,
-                "event_type": "execution_blocked_policy",
-                "event_status": "blocked",
-                "message": "Execucao automatica nao implementada nesta fase incremental.",
-                "details_json": {"source": "multiuser_runtime", "timestamp": now_iso},
+                "status": "blocked",
+                "reason": "missing_signal_side",
+                "event_id": event,
             }
-        )
-        return {
-            "user_id": user_id,
-            "account_id": account_id,
-            "status": "blocked",
-            "reason": "auto_execution_not_implemented",
-            "event_id": event,
-        }
+
+        try:
+            execution_result = self.live_execution_service.submit_market_order(
+                context=context,
+                symbol=symbol,
+                timeframe=timeframe,
+                strategy_version=strategy_version,
+                signal_side=signal_side,
+                quantity=float(risk_plan.get("quantity", 0.0) or 0.0),
+                reduce_only=False,
+                source="multiuser_runtime",
+                testnet=bool(config.TESTNET),
+                leverage=int((risk_profile.get("leverage_cap") or config.LEVERAGE) or config.LEVERAGE),
+                metadata={
+                    "risk_mode": risk_plan.get("risk_mode"),
+                    "risk_amount": risk_plan.get("risk_amount"),
+                    "position_notional": risk_plan.get("position_notional"),
+                },
+            )
+            return {
+                "user_id": user_id,
+                "account_id": account_id,
+                "status": "executed",
+                "event_id": execution_result.get("event_id"),
+                "order_id": execution_result.get("order_id"),
+                "exchange_order_id": execution_result.get("exchange_order_id"),
+                "risk_plan": {
+                    "risk_mode": risk_plan.get("risk_mode"),
+                    "risk_amount": risk_plan.get("risk_amount"),
+                    "position_notional": risk_plan.get("position_notional"),
+                    "quantity": risk_plan.get("quantity"),
+                },
+                "reconciliation": execution_result.get("reconciliation"),
+            }
+        except Exception as execution_error:
+            event = self.database.save_user_execution_event(
+                {
+                    "user_id": user_id,
+                    "account_id": account_id,
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "strategy_version": strategy_version,
+                    "event_type": "execution_runtime_error",
+                    "event_status": "error",
+                    "message": f"Falha na autoexecucao: {execution_error}",
+                    "details_json": {"source": "multiuser_runtime", "timestamp": now_iso},
+                }
+            )
+            return {
+                "user_id": user_id,
+                "account_id": account_id,
+                "status": "error",
+                "reason": str(execution_error),
+                "event_id": event,
+            }
 
     def _evaluate_account_hard_block(self, context: Dict, symbol: Optional[str] = None, timeframe: Optional[str] = None) -> Optional[str]:
         if not bool(context.get("live_enabled")):

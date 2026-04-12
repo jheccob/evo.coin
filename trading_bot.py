@@ -695,9 +695,16 @@ class TradingBot:
         del strong_trend_regime, reversal_confirmed, volatility_state, price_location, micro_breakout_recent
         market_pattern = str(setup_type or "").strip().lower()
         objective_passed = bool(
-            market_pattern in {"trend_resume_long", "trend_resume_short", "ema_rsi_resume_long", "ema_rsi_resume_short"}
+            market_pattern in {
+                "trend_resume_long",
+                "trend_resume_short",
+                "pullback_long",
+                "pullback_short",
+                "ema_rsi_resume_long",
+                "ema_rsi_resume_short",
+            }
             and structure_quality >= 4.0
-            and structure_state in {"trend_resume", "trend_resume_wait"}
+            and structure_state in {"trend_resume", "trend_resume_wait", "pullback"}
         )
         if not objective_passed:
             emit_block_debug(
@@ -782,7 +789,7 @@ class TradingBot:
     ) -> bool:
         return (
             str((entry_evaluation or {}).get("entry_quality") or "bad").strip().lower() == "bad"
-            and structure_state in {"trend_resume", "trend_resume_wait"}
+            and structure_state in {"trend_resume", "trend_resume_wait", "pullback"}
             and structure_quality >= 4.0
             and confirmation_state in {"confirmed", "waiting"}
         )

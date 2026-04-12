@@ -1,6 +1,7 @@
 import pandas as pd
 import gzip
 import os
+import config
 
 
 def _build_exchange_candidates(testnet: bool = False):
@@ -206,21 +207,43 @@ def _normalize_timeframe_for_csv(timeframe: str) -> str:
     return timeframe.replace(" ", "").lower()
 
 
-def fetch_historical_candles_from_csv(symbol: str, timeframe: str, total_limit: int = 2000):
+def resolve_history_csv_path(symbol: str, timeframe: str) -> str:
     """
-    Lê dados históricos de um arquivo CSV local gzipado.
-    Exemplo: BTCUSDT_15m.csv.gz localizado em data/history/
+    Resolve o arquivo histórico local aceitando tanto .csv.gz quanto .csv.
+    Se nada existir, retorna o caminho preferencial .csv.gz para manter
+    mensagens de erro e documentação consistentes.
     """
     symbol = _normalize_symbol_for_csv(symbol)
     timeframe = _normalize_timeframe_for_csv(timeframe)
-    file_name = f"{symbol}_{timeframe}.csv.gz"
-    file_path = os.path.join("data", "history", file_name)
+
+    base_name = f"{symbol}_{timeframe}"
+    candidates = [
+        os.path.join(config.HISTORY_DATA_DIR, f"{base_name}.csv.gz"),
+        os.path.join(config.HISTORY_DATA_DIR, f"{base_name}.csv"),
+    ]
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    return candidates[0]
+
+
+def fetch_historical_candles_from_csv(symbol: str, timeframe: str, total_limit: int = 2000):
+    """
+    Lê dados históricos de um arquivo CSV local gzipado.
+    Exemplo: BTCUSDT_15m.csv.gz localizado em HISTORY_DATA_DIR.
+    """
+    file_path = resolve_history_csv_path(symbol, timeframe)
     
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
     
     try:
-        df = pd.read_csv(gzip.open(file_path, 'rt'))
+        if file_path.endswith(".gz"):
+            df = pd.read_csv(gzip.open(file_path, 'rt'))
+        else:
+            df = pd.read_csv(file_path)
         df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
         
         # Converter colunas numéricas

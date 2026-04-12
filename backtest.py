@@ -38,10 +38,13 @@ def run_backtest(
     fee_pct: float,
     testnet: bool = False,
     use_local_csv: bool = True,
+    preloaded_df: pd.DataFrame | None = None,
 ):
     params = StrategyParams()
 
-    if use_local_csv:
+    if preloaded_df is not None:
+        df = preloaded_df.copy()
+    elif use_local_csv:
         try:
             df = fetch_historical_candles_from_csv(symbol, timeframe, total_limit=candles)
         except FileNotFoundError:

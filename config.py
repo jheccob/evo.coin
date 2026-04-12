@@ -53,12 +53,17 @@ TESTNET = _get_bool("TESTNET", BINANCE_TESTNET)
 BACKTEST_USE_TESTNET = _get_bool("BACKTEST_USE_TESTNET", False)
 BACKTEST_USE_LOCAL_CSV = _get_bool("BACKTEST_USE_LOCAL_CSV", True)
 BACKTEST_REQUIRE_LOCAL_CSV = _get_bool("BACKTEST_REQUIRE_LOCAL_CSV", True)
-BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP = _get_bool("BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP", False)
+BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP = _get_bool("BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP", True)
 BOT_ALLOW_REST_FALLBACK = _get_bool("BOT_ALLOW_REST_FALLBACK", False)
 BOT_WEBSOCKET_TIMEOUT_SEC = _get_float("BOT_WEBSOCKET_TIMEOUT_SEC", 25.0)
 BOT_BOOTSTRAP_CANDLES = _get_int("BOT_BOOTSTRAP_CANDLES", max(LIMIT, 300))
+HISTORY_DATA_DIR = os.getenv("HISTORY_DATA_DIR", os.path.join("data", "history"))
 POLL_SECONDS = _get_int("POLL_SECONDS", 30)
 LEVERAGE = _get_int("LEVERAGE", 5)
+SINGLE_USER_RUNTIME_USER_ID = _get_int("SINGLE_USER_RUNTIME_USER_ID", 0)
+SINGLE_USER_RUNTIME_ACCOUNT_ID = os.getenv("SINGLE_USER_RUNTIME_ACCOUNT_ID", "env-primary")
+SINGLE_USER_RUNTIME_ACCOUNT_ALIAS = os.getenv("SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "Primary Env Account")
+SINGLE_USER_RUNTIME_EXCHANGE = os.getenv("SINGLE_USER_RUNTIME_EXCHANGE", "binanceusdm")
 RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", 1.0)
 MAX_OPEN_TRADES = _get_int("MAX_OPEN_TRADES", 1)
 
@@ -121,6 +126,63 @@ MAX_CONSECUTIVE_REAL_LOSSES = _get_int("MAX_CONSECUTIVE_REAL_LOSSES", 4)
 MAX_OPEN_REAL_TRADES = _get_int("MAX_OPEN_REAL_TRADES", 1)
 
 
+def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> Dict[str, object]:
+    """
+    Snapshot oficial do baseline ativo no runtime.
+    Mantém um retrato único do setup para logs, auditoria e comparações.
+    """
+    from database.database import build_strategy_version
+
+    resolved_context = context_timeframe or os.getenv("APP_PRIMARY_CONTEXT_TIMEFRAME", "1h")
+    strategy_version = build_strategy_version(
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        rsi_period=RSI_PERIOD,
+        rsi_min=int(BUY_RSI_SIGNAL),
+        rsi_max=int(SELL_RSI_SIGNAL),
+        stop_loss_pct=float(LONG_STOP_LOSS_PCT),
+        take_profit_pct=float(LONG_TAKE_PROFIT_PCT),
+        require_volume=False,
+        require_trend=False,
+        avoid_ranging=False,
+        context_timeframe=resolved_context,
+    )
+
+    return {
+        "strategy_version": strategy_version,
+        "symbol": SYMBOL,
+        "timeframe": TIMEFRAME,
+        "context_timeframe": resolved_context,
+        "rsi_period": int(RSI_PERIOD),
+        "buy_rsi_signal": float(BUY_RSI_SIGNAL),
+        "sell_rsi_signal": float(SELL_RSI_SIGNAL),
+        "allow_long": bool(ALLOW_LONG),
+        "allow_short": bool(ALLOW_SHORT),
+        "block_unknown_regime": bool(BLOCK_UNKNOWN_REGIME),
+        "enable_short_pullback": bool(ENABLE_SHORT_PULLBACK),
+        "enable_short_resume": bool(ENABLE_SHORT_RESUME),
+        "short_rsi_min": float(SHORT_RSI_MIN),
+        "long_pullback_min_trend_strength_pct": float(LONG_PULLBACK_MIN_TREND_STRENGTH_PCT),
+        "min_trend_strength_pct_long": float(MIN_TREND_STRENGTH_PCT),
+        "min_trend_strength_pct_short": float(MIN_TREND_STRENGTH_PCT_SHORT),
+        "long_stop_loss_pct": float(LONG_STOP_LOSS_PCT),
+        "short_stop_loss_pct": float(SHORT_STOP_LOSS_PCT),
+        "long_take_profit_pct": float(LONG_TAKE_PROFIT_PCT),
+        "short_take_profit_pct": float(SHORT_TAKE_PROFIT_PCT),
+        "trailing_trigger_pct": float(TRAILING_TRIGGER_PCT),
+        "partial_target_pct": float(PARTIAL_TARGET_PCT),
+        "fee_pct": float(FEE_PCT),
+        "testnet": bool(TESTNET),
+        "live_execution_enabled": bool(ProductionConfig.ENABLE_LIVE_EXECUTION),
+        "db_backend": "postgres" if str(DATABASE_URL or "").strip().lower().startswith(("postgres://", "postgresql://")) else "sqlite",
+        "history_data_dir": str(HISTORY_DATA_DIR),
+        "bot_require_local_csv_bootstrap": bool(BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP),
+        "bot_allow_rest_fallback": bool(BOT_ALLOW_REST_FALLBACK),
+        "bot_bootstrap_candles": int(BOT_BOOTSTRAP_CANDLES),
+        "bot_websocket_timeout_sec": float(BOT_WEBSOCKET_TIMEOUT_SEC),
+    }
+
+
 class AppConfig:
     DB_PATH = os.getenv("DB_PATH", "data/trading_bot.db")
     DATABASE_URL = str(os.getenv("DATABASE_URL", "")).strip()
@@ -130,9 +192,8 @@ class AppConfig:
     DEFAULT_SYMBOL = os.getenv("APP_DEFAULT_SYMBOL", SYMBOL)
     DEFAULT_TIMEFRAME = os.getenv("APP_DEFAULT_TIMEFRAME", TIMEFRAME)
     DEFAULT_RSI_PERIOD = _get_int("APP_DEFAULT_RSI_PERIOD", RSI_PERIOD)
-    # Mantido dentro do range da UI (45-60 / 40-55).
-    DEFAULT_RSI_MIN = _get_int("APP_DEFAULT_RSI_MIN", 54)
-    DEFAULT_RSI_MAX = _get_int("APP_DEFAULT_RSI_MAX", 47)
+    DEFAULT_RSI_MIN = _get_int("APP_DEFAULT_RSI_MIN", int(BUY_RSI_SIGNAL))
+    DEFAULT_RSI_MAX = _get_int("APP_DEFAULT_RSI_MAX", int(SELL_RSI_SIGNAL))
 
     PRIMARY_CONTEXT_TIMEFRAME = os.getenv("APP_PRIMARY_CONTEXT_TIMEFRAME", "1h")
     DEFAULT_BACKTEST_WINDOW_DAYS = _get_int("APP_DEFAULT_BACKTEST_WINDOW_DAYS", 90)
@@ -162,8 +223,8 @@ class AppConfig:
 
     _CRYPTO_TIMEFRAME_SETTINGS = {
         "1m": {"rsi_oversold": 50, "rsi_overbought": 50, "min_confidence": 72, "min_volume_ratio": 1.4},
-        "5m": {"rsi_oversold": 54, "rsi_overbought": 47, "min_confidence": 70, "min_volume_ratio": 1.2},
-        "15m": {"rsi_oversold": 54, "rsi_overbought": 47, "min_confidence": 68, "min_volume_ratio": 1.15},
+        "5m": {"rsi_oversold": int(BUY_RSI_SIGNAL), "rsi_overbought": int(SELL_RSI_SIGNAL), "min_confidence": 70, "min_volume_ratio": 1.2},
+        "15m": {"rsi_oversold": int(BUY_RSI_SIGNAL), "rsi_overbought": int(SELL_RSI_SIGNAL), "min_confidence": 68, "min_volume_ratio": 1.15},
         "30m": {"rsi_oversold": 53, "rsi_overbought": 47, "min_confidence": 66, "min_volume_ratio": 1.1},
         "1h": {"rsi_oversold": 52, "rsi_overbought": 48, "min_confidence": 64, "min_volume_ratio": 1.05},
         "4h": {"rsi_oversold": 51, "rsi_overbought": 49, "min_confidence": 62, "min_volume_ratio": 1.0},
@@ -172,8 +233,8 @@ class AppConfig:
 
     _DAY_TRADING_SETTINGS = {
         "1m": {"rsi_oversold": 50, "rsi_overbought": 50, "min_confidence": 74, "min_volume_ratio": 1.5},
-        "5m": {"rsi_oversold": 54, "rsi_overbought": 47, "min_confidence": 72, "min_volume_ratio": 1.3},
-        "15m": {"rsi_oversold": 54, "rsi_overbought": 47, "min_confidence": 70, "min_volume_ratio": 1.2},
+        "5m": {"rsi_oversold": int(BUY_RSI_SIGNAL), "rsi_overbought": int(SELL_RSI_SIGNAL), "min_confidence": 72, "min_volume_ratio": 1.3},
+        "15m": {"rsi_oversold": int(BUY_RSI_SIGNAL), "rsi_overbought": int(SELL_RSI_SIGNAL), "min_confidence": 70, "min_volume_ratio": 1.2},
     }
 
     _DIRECTION_FILTER_LABELS = {
@@ -234,6 +295,9 @@ class AppConfig:
             "bt_market_family": "all_states",
             "bt_direction_focus": ["COMPRA", "VENDA"],
             "bt_risk_profile": "balanced",
+            "bt_rsi_period": RSI_PERIOD,
+            "bt_rsi_min": int(BUY_RSI_SIGNAL),
+            "bt_rsi_max": int(SELL_RSI_SIGNAL),
             "bt_enable_volume_filter": False,
             "bt_enable_trend_filter": False,
             "bt_enable_avoid_ranging": False,
@@ -245,6 +309,9 @@ class AppConfig:
             "bt_market_family": "trend_only",
             "bt_direction_focus": ["COMPRA", "VENDA"],
             "bt_risk_profile": "conservative",
+            "bt_rsi_period": RSI_PERIOD,
+            "bt_rsi_min": int(BUY_RSI_SIGNAL),
+            "bt_rsi_max": int(SELL_RSI_SIGNAL),
             "bt_enable_volume_filter": True,
             "bt_enable_trend_filter": True,
             "bt_enable_avoid_ranging": True,
@@ -256,6 +323,9 @@ class AppConfig:
             "bt_market_family": "long_bias",
             "bt_direction_focus": ["COMPRA"],
             "bt_risk_profile": "balanced",
+            "bt_rsi_period": RSI_PERIOD,
+            "bt_rsi_min": int(BUY_RSI_SIGNAL),
+            "bt_rsi_max": int(SELL_RSI_SIGNAL),
             "bt_enable_volume_filter": False,
             "bt_enable_trend_filter": False,
             "bt_enable_avoid_ranging": False,
@@ -267,6 +337,9 @@ class AppConfig:
             "bt_market_family": "short_bias",
             "bt_direction_focus": ["VENDA"],
             "bt_risk_profile": "balanced",
+            "bt_rsi_period": RSI_PERIOD,
+            "bt_rsi_min": int(BUY_RSI_SIGNAL),
+            "bt_rsi_max": int(SELL_RSI_SIGNAL),
             "bt_enable_volume_filter": False,
             "bt_enable_trend_filter": False,
             "bt_enable_avoid_ranging": False,
@@ -426,15 +499,21 @@ class _NullExchange:
 
 class ExchangeConfig:
     @staticmethod
-    def get_exchange_instance(exchange_name: str = "binance", testnet: bool = False):
+    def get_exchange_instance_with_credentials(
+        exchange_name: str = "binance",
+        *,
+        api_key: str = "",
+        api_secret: str = "",
+        testnet: bool = False,
+    ):
         try:
             import ccxt  # type: ignore
         except Exception:
             return _NullExchange()
 
         normalized_name = str(exchange_name or "binance").strip().lower()
-        api_key = os.getenv("BINANCE_API_KEY", "")
-        api_secret = os.getenv("BINANCE_SECRET_KEY", "")
+        api_key = str(api_key or "").strip()
+        api_secret = str(api_secret or "").strip()
 
         if normalized_name in {"binanceusdm", "binance-futures", "futures"} and hasattr(ccxt, "binanceusdm"):
             exchange = ccxt.binanceusdm(
@@ -460,6 +539,15 @@ class ExchangeConfig:
             except Exception:
                 pass
         return exchange
+
+    @staticmethod
+    def get_exchange_instance(exchange_name: str = "binance", testnet: bool = False):
+        return ExchangeConfig.get_exchange_instance_with_credentials(
+            exchange_name=exchange_name,
+            api_key=os.getenv("BINANCE_API_KEY", ""),
+            api_secret=os.getenv("BINANCE_SECRET_KEY", ""),
+            testnet=testnet,
+        )
 
     @staticmethod
     def test_connection(exchange_name: str = "binance", testnet: bool = False):
@@ -602,6 +690,10 @@ __all__ = [
     "BOT_BOOTSTRAP_CANDLES",
     "POLL_SECONDS",
     "LEVERAGE",
+    "SINGLE_USER_RUNTIME_USER_ID",
+    "SINGLE_USER_RUNTIME_ACCOUNT_ID",
+    "SINGLE_USER_RUNTIME_ACCOUNT_ALIAS",
+    "SINGLE_USER_RUNTIME_EXCHANGE",
     "RISK_PER_TRADE_PCT",
     "MAX_OPEN_TRADES",
     "FAST_EMA",

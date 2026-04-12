@@ -1,8 +1,15 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import pandas as pd
+
+import config
+from strategy_engine import (
+    StrategyParams,
+    calculate_indicators as engine_calculate_indicators,
+    generate_entry_signal,
+)
 
 
 def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -18,26 +25,18 @@ def _ensure_datetime_index(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_index()
 
 
-def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gains = delta.clip(lower=0)
-    losses = -delta.clip(upper=0)
-    avg_gain = gains.ewm(alpha=1 / max(period, 1), adjust=False).mean()
-    avg_loss = losses.ewm(alpha=1 / max(period, 1), adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    return 100 - (100 / (1 + rs))
-
-
-def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    tr = pd.concat(
-        [
-            (df["high"] - df["low"]).abs(),
-            (df["high"] - df["close"].shift(1)).abs(),
-            (df["low"] - df["close"].shift(1)).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.rolling(max(period, 1)).mean()
+def _build_params(
+    buy_rsi_threshold: Optional[float] = None,
+    sell_rsi_threshold: Optional[float] = None,
+) -> StrategyParams:
+    return StrategyParams(
+        buy_rsi_floor=float(
+            config.BUY_RSI_SIGNAL if buy_rsi_threshold is None else buy_rsi_threshold
+        ),
+        sell_rsi_ceiling=float(
+            config.SELL_RSI_SIGNAL if sell_rsi_threshold is None else sell_rsi_threshold
+        ),
+    )
 
 
 def prepare_candle_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -47,40 +46,46 @@ def prepare_candle_features(df: pd.DataFrame) -> pd.DataFrame:
         out[column] = pd.to_numeric(out[column], errors="coerce")
     out = out.dropna(subset=["open", "high", "low", "close", "volume"])
 
-    out["ema_fast"] = out["close"].ewm(span=9, adjust=False).mean()
-    out["ema_slow"] = out["close"].ewm(span=21, adjust=False).mean()
-    out["ema_trend"] = out["close"].ewm(span=50, adjust=False).mean()
-    out["rsi"] = _compute_rsi(out["close"], period=14)
-    out["atr"] = _compute_atr(out, period=14)
-    out["atr_pct"] = out["atr"] / out["close"].replace(0, pd.NA) * 100
-
-    if "is_closed" not in out.columns:
-        out["is_closed"] = True
-    out["is_closed"] = out["is_closed"].fillna(True).astype(bool)
-    return out
+    prepared = engine_calculate_indicators(out, _build_params())
+    if "is_closed" not in prepared.columns:
+        prepared["is_closed"] = True
+    prepared["is_closed"] = prepared["is_closed"].fillna(True).astype(bool)
+    return prepared
 
 
 def analyze_prepared_candle(
     df: pd.DataFrame,
     index: int = -1,
-    buy_rsi_threshold: float = 54.0,
-    sell_rsi_threshold: float = 47.0,
+    buy_rsi_threshold: Optional[float] = None,
+    sell_rsi_threshold: Optional[float] = None,
 ) -> Dict[str, str]:
-    if df is None or df.empty or len(df) < 3:
+    if df is None or df.empty:
         return {"signal": "hold", "reason": "dados insuficientes"}
 
-    row = df.iloc[index]
-    prev = df.iloc[index - 1]
+    resolved_df = df.copy()
+    if index != -1:
+        effective_index = len(resolved_df) + index if index < 0 else index
+        effective_index = max(min(effective_index, len(resolved_df) - 1), 0)
+        resolved_df = resolved_df.iloc[: effective_index + 1].copy()
+    if len(resolved_df) < 3:
+        return {"signal": "hold", "reason": "dados insuficientes"}
 
-    bullish_structure = row["close"] > row["ema_fast"] > row["ema_slow"] > row["ema_trend"]
-    bearish_structure = row["close"] < row["ema_fast"] < row["ema_slow"] < row["ema_trend"]
+    required_columns = {"ema_fast", "ema_slow", "ema_trend", "rsi", "atr", "atr_pct"}
+    if not required_columns.issubset(set(resolved_df.columns)):
+        ohlcv_columns = {"open", "high", "low", "close", "volume"}
+        if not ohlcv_columns.issubset(set(resolved_df.columns)):
+            return {"signal": "hold", "reason": "dados insuficientes"}
+        resolved_df = prepare_candle_features(resolved_df)
 
-    bullish_trigger = float(prev["rsi"]) <= float(buy_rsi_threshold) < float(row["rsi"])
-    bearish_trigger = float(prev["rsi"]) >= float(sell_rsi_threshold) > float(row["rsi"])
-
-    if bullish_structure and bullish_trigger:
-        return {"signal": "buy", "reason": "trend_resume_long confirmado"}
-    if bearish_structure and bearish_trigger:
-        return {"signal": "sell", "reason": "trend_resume_short confirmado"}
-    return {"signal": "hold", "reason": "sem gatilho confirmado"}
-
+    result = generate_entry_signal(
+        resolved_df,
+        _build_params(
+            buy_rsi_threshold=buy_rsi_threshold,
+            sell_rsi_threshold=sell_rsi_threshold,
+        ),
+        index=-1,
+    )
+    return {
+        "signal": str(result.get("signal") or "hold"),
+        "reason": str(result.get("reason") or "sem gatilho"),
+    }

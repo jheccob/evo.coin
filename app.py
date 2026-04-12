@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import contextlib
 import os
 import json
 from datetime import datetime, timedelta, date
@@ -125,6 +126,120 @@ class _TerminalBacktestEngine:
         # margem para aquecimento de indicadores e bordas de execução
         estimated = int(total_minutes / tf_minutes) + 250
         return max(500, min(estimated, 100000))
+
+    @staticmethod
+    def _resolve_backtest_csv_reference_path(symbol: str, timeframe: str) -> Path:
+        from market_data import resolve_history_csv_path
+
+        return Path(resolve_history_csv_path(symbol, timeframe))
+
+    @staticmethod
+    def _load_backtest_from_shared_stream(symbol: str, timeframe: str, candles: int) -> tuple[pd.DataFrame | None, str | None]:
+        runtime_bot = st.session_state.get("trading_bot")
+        if runtime_bot is None:
+            return None, None
+
+        try:
+            stream_client = runtime_bot._get_realtime_stream_client(symbol=symbol, timeframe=timeframe)
+            if stream_client is None:
+                return None, None
+
+            status = stream_client.get_current_status() or {}
+            available_candles = int(status.get("candles") or 0)
+            client_capacity = int(getattr(stream_client, "max_candles", 0) or 0)
+            if available_candles < candles or client_capacity < candles:
+                return None, None
+
+            df = stream_client.get_market_data(
+                limit=candles,
+                timeout=2.0,
+                include_current_candle=False,
+            )
+            if df is None or df.empty or len(df) < candles:
+                return None, None
+            return df.reset_index(drop=True), "shared_websocket_buffer"
+        except Exception:
+            logger.warning(
+                "Falha ao reutilizar buffer websocket compartilhado para backtest %s %s.",
+                symbol,
+                timeframe,
+                exc_info=True,
+            )
+            return None, None
+
+    @classmethod
+    def _load_backtest_from_websocket_path(
+        cls,
+        symbol: str,
+        timeframe: str,
+        candles: int,
+        *,
+        testnet: bool,
+        allow_csv_bootstrap: bool,
+        require_local_csv: bool,
+    ) -> tuple[pd.DataFrame, str]:
+        shared_df, shared_source = cls._load_backtest_from_shared_stream(symbol, timeframe, candles)
+        if shared_df is not None:
+            return shared_df, shared_source or "shared_websocket_buffer"
+
+        csv_reference_path = cls._resolve_backtest_csv_reference_path(symbol, timeframe)
+        if not allow_csv_bootstrap:
+            raise RuntimeError(
+                "Backtest da dashboard usa caminho websocket e bloqueia fallback REST. "
+                f"O buffer compartilhado nao tem {candles} candles para {symbol} {timeframe}. "
+                f"Suba o CSV historico em {csv_reference_path} ou habilite BACKTEST_USE_LOCAL_CSV."
+            )
+
+        if require_local_csv and not csv_reference_path.exists():
+            raise RuntimeError(
+                "Backtest da dashboard usa caminho websocket + bootstrap local e bloqueia fallback REST. "
+                f"Arquivo CSV obrigatorio nao encontrado: {csv_reference_path}. "
+                "Suba os historicos no volume antes de executar."
+            )
+
+        from market_data import fetch_historical_candles_from_csv
+        from trading_bot_websocket import StreamlinedTradingBot
+
+        try:
+            bootstrap_df = fetch_historical_candles_from_csv(symbol, timeframe, total_limit=candles)
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "Backtest da dashboard usa caminho websocket + bootstrap local e bloqueia fallback REST. "
+                f"Arquivo CSV obrigatorio nao encontrado: {csv_reference_path}."
+            ) from exc
+
+        if bootstrap_df is None or bootstrap_df.empty or len(bootstrap_df) < candles:
+            raise RuntimeError(
+                "CSV historico insuficiente para o backtest solicitado. "
+                f"Necessario: {candles} candles | disponivel: {0 if bootstrap_df is None else len(bootstrap_df)}. "
+                f"Arquivo: {csv_reference_path}."
+            )
+
+        temp_stream = StreamlinedTradingBot(
+            symbol=symbol,
+            timeframe=timeframe,
+            max_candles=max(candles, 300),
+            testnet=bool(testnet),
+            allow_rest_fallback=False,
+            bootstrap_df=bootstrap_df,
+        )
+        try:
+            df = temp_stream.get_market_data(
+                limit=candles,
+                timeout=2.0,
+                include_current_candle=False,
+            )
+        finally:
+            with contextlib.suppress(Exception):
+                temp_stream.stop()
+
+        if df is None or df.empty or len(df) < candles:
+            raise RuntimeError(
+                "Falha ao montar a serie historica pelo caminho websocket + bootstrap local. "
+                f"Esperado: {candles} candles | retornado: {0 if df is None else len(df)}."
+            )
+
+        return df.reset_index(drop=True), "websocket_bootstrap_csv"
 
     @staticmethod
     def _build_trade_summary_df(trades, initial_balance: float) -> pd.DataFrame:
@@ -268,26 +383,16 @@ class _TerminalBacktestEngine:
         backtest_use_testnet = bool(getattr(runtime_config, "BACKTEST_USE_TESTNET", False))
         backtest_use_local_csv = bool(getattr(runtime_config, "BACKTEST_USE_LOCAL_CSV", True))
         backtest_require_local_csv = bool(getattr(runtime_config, "BACKTEST_REQUIRE_LOCAL_CSV", True))
-        csv_reference_path = None
+        csv_reference_path = self._resolve_backtest_csv_reference_path(symbol, timeframe)
 
-        if backtest_use_local_csv and backtest_require_local_csv:
-            try:
-                from market_data import _normalize_symbol_for_csv, _normalize_timeframe_for_csv
-
-                csv_symbol = _normalize_symbol_for_csv(symbol)
-                csv_timeframe = _normalize_timeframe_for_csv(timeframe)
-                csv_reference_path = Path("data") / "history" / f"{csv_symbol}_{csv_timeframe}.csv.gz"
-                if not csv_reference_path.exists():
-                    raise RuntimeError(
-                        "Backtest da dashboard bloqueado: CSV local obrigatorio nao encontrado. "
-                        f"Arquivo esperado: {csv_reference_path}. "
-                        "Suba os historicos no volume (/app/data/history) ou desative BACKTEST_REQUIRE_LOCAL_CSV."
-                    )
-            except RuntimeError:
-                raise
-            except Exception:
-                # Se a normalização falhar por qualquer motivo, seguimos e tratamos no fallback.
-                pass
+        backtest_df, backtest_data_source = self._load_backtest_from_websocket_path(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
+            testnet=backtest_use_testnet,
+            allow_csv_bootstrap=backtest_use_local_csv,
+            require_local_csv=backtest_require_local_csv,
+        )
 
         capture = io.StringIO()
         try:
@@ -299,38 +404,10 @@ class _TerminalBacktestEngine:
                     fee_pct=fee_pct,
                     testnet=backtest_use_testnet,
                     use_local_csv=backtest_use_local_csv,
+                    preloaded_df=backtest_df,
                 )
-        except Exception as exc:
-            error_text = str(exc or "")
-            error_text_lower = error_text.lower()
-            if (
-                backtest_use_local_csv
-                and (
-                    "restricted location" in error_text_lower
-                    or "service unavailable from a restricted location" in error_text_lower
-                    or "cloudfront" in error_text_lower
-                    or " 451 " in f" {error_text_lower} "
-                )
-            ):
-                extra_hint = f" Arquivo CSV esperado: {csv_reference_path}." if csv_reference_path else ""
-                raise RuntimeError(
-                    "Backtest bloqueado por restricao geografica da exchange no ambiente do Railway (451/403). "
-                    "Para manter comparabilidade com os testes validados, use CSV local em data/history." + extra_hint
-                ) from exc
+        except Exception:
             raise
-        captured_output = str(capture.getvalue() or "")
-        captured_output_lower = captured_output.lower()
-        csv_fallback_happened = (
-            "arquivo local" in captured_output_lower
-            and "encontrado" in captured_output_lower
-            and "usando api" in captured_output_lower
-        )
-        if backtest_require_local_csv and backtest_use_local_csv and csv_fallback_happened:
-            raise RuntimeError(
-                "Backtest da dashboard bloqueado: CSV local nao encontrado em data/history. "
-                "Para manter comparabilidade com o backtest validado, envie os arquivos historicos "
-                "ou desative BACKTEST_REQUIRE_LOCAL_CSV."
-            )
 
         self._trade_summary_df = self._build_trade_summary_df(trades, initial_balance)
         stats = self._compute_stats(trades, summary, initial_balance)
@@ -363,7 +440,7 @@ class _TerminalBacktestEngine:
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "strategy_version": strategy_version,
-                "data_source": "csv_local" if backtest_use_local_csv and not csv_fallback_happened else "api",
+                "data_source": backtest_data_source,
                 "backtest_use_testnet": backtest_use_testnet,
                 "rsi_min": kwargs.get("rsi_min"),
                 "rsi_max": kwargs.get("rsi_max"),
@@ -426,6 +503,14 @@ def get_telegram_service_class():
 def is_telegram_service_available():
     _, telegram_available = get_telegram_service_class()
     return telegram_available
+
+
+def is_websocket_runtime_available():
+    try:
+        from trading_bot_websocket import WEBSOCKETS_AVAILABLE as market_ws_available
+    except Exception:
+        market_ws_available = False
+    return bool(market_ws_available)
 
 
 def get_or_init_session_telegram_bot():
@@ -597,6 +682,46 @@ def run_async_task_sync(awaitable):
         loop.close()
 
 
+def get_history_data_dir() -> Path:
+    return Path(getattr(AppConfig, "HISTORY_DATA_DIR", os.path.join("data", "history")))
+
+
+def list_history_data_files(limit: int = 50) -> list[dict]:
+    history_dir = get_history_data_dir()
+    if not history_dir.exists():
+        return []
+
+    rows = []
+    for file_path in sorted(history_dir.iterdir(), key=lambda item: item.name.lower()):
+        if not file_path.is_file():
+            continue
+        stat_result = file_path.stat()
+        rows.append(
+            {
+                "Arquivo": file_path.name,
+                "Tamanho (MB)": round(stat_result.st_size / (1024 * 1024), 3),
+                "Atualizado em": datetime.fromtimestamp(stat_result.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def save_uploaded_history_file(uploaded_file) -> Path:
+    safe_name = Path(str(getattr(uploaded_file, "name", "") or "")).name
+    lower_name = safe_name.lower()
+    if not safe_name or not (lower_name.endswith(".csv") or lower_name.endswith(".csv.gz")):
+        raise ValueError("Envie um arquivo .csv ou .csv.gz.")
+
+    history_dir = get_history_data_dir()
+    history_dir.mkdir(parents=True, exist_ok=True)
+    target_path = history_dir / safe_name
+    with open(target_path, "wb") as output_file:
+        output_file.write(uploaded_file.getbuffer())
+    return target_path
+
+
 @st.cache_resource
 def get_user_manager():
     try:
@@ -727,6 +852,12 @@ def get_cached_strategy_evaluation_overview(
     )
 
 
+@st.cache_data(ttl=10, show_spinner=False)
+def get_cached_bot_runtime_db_state(runtime_key: str | None = None, limit: int = 1):
+    rows = db.get_bot_runtime_state(runtime_key=runtime_key, limit=limit)
+    return rows[0] if rows else None
+
+
 def clear_dashboard_data_caches() -> None:
     get_cached_active_strategy_profile.clear()
     get_cached_edge_monitor_summary.clear()
@@ -738,6 +869,7 @@ def clear_dashboard_data_caches() -> None:
     get_cached_governance_history.clear()
     get_cached_strategy_evaluations.clear()
     get_cached_strategy_evaluation_overview.clear()
+    get_cached_bot_runtime_db_state.clear()
 
 
 def clear_dashboard_user_session():
@@ -938,6 +1070,10 @@ def render_trader_bot_runtime_controls(
 ):
     trader_bot_state = get_trader_bot_process_state()
     managed_externally = bool(trader_bot_state.get("managed_externally"))
+    runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    runtime_key = f"primary:{runtime_symbol}:{runtime_timeframe}"
+    runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
 
     bot_runtime_col1, bot_runtime_col2, bot_runtime_col3, bot_runtime_col4 = st.columns(4)
     with bot_runtime_col1:
@@ -950,6 +1086,36 @@ def render_trader_bot_runtime_controls(
         st.metric(
             "Entrypoint",
             Path(trader_bot_state.get("entrypoint", "start_telegram_bot.py")).name,
+        )
+
+    if runtime_db_state:
+        heartbeat_value = str(runtime_db_state.get("last_heartbeat_at") or "-")
+        last_signal_label = str(runtime_db_state.get("last_signal") or "-")
+        last_signal_reason = str(runtime_db_state.get("last_signal_reason") or "-")
+        current_position = str(runtime_db_state.get("position_side") or "flat")
+        runtime_db_col1, runtime_db_col2, runtime_db_col3, runtime_db_col4 = st.columns(4)
+        with runtime_db_col1:
+            st.metric("DB Status", runtime_db_state.get("status") or "-")
+        with runtime_db_col2:
+            st.metric("Ultimo Candle", str(runtime_db_state.get("last_candle_timestamp") or "-"))
+        with runtime_db_col3:
+            st.metric("Ultimo Sinal", last_signal_label)
+        with runtime_db_col4:
+            st.metric("Posicao", current_position)
+
+        st.caption(
+            f"Heartbeat: {heartbeat_value} | "
+            f"Runtime DB: {runtime_key} | "
+            f"Motivo do ultimo sinal: {last_signal_reason}"
+        )
+        if runtime_db_state.get("blocked"):
+            st.warning(f"Runtime bloqueado no DB: {runtime_db_state.get('block_reason') or 'sem motivo informado'}")
+        if runtime_db_state.get("last_error"):
+            st.error(f"Último erro persistido: {runtime_db_state['last_error']}")
+    else:
+        st.caption(
+            f"Sem snapshot persistido do runtime ainda para {runtime_symbol} {runtime_timeframe}. "
+            "Ligue o bot e aguarde o primeiro heartbeat."
         )
 
     selected_runtime_mode = st.radio(
@@ -3034,8 +3200,8 @@ def main():
 
         st.sidebar.subheader("📊 Gatilhos RSI do Motor EMA/RSI")
         rsi_period = st.sidebar.slider("Período RSI", 5, 50, AppConfig.DEFAULT_RSI_PERIOD, help="14 períodos é o padrão mais testado")
-        rsi_min = st.sidebar.slider("RSI Gatilho Compra", 45, 60, AppConfig.DEFAULT_RSI_MIN, help="RSI precisa cruzar acima deste nivel para compra")
-        rsi_max = st.sidebar.slider("RSI Gatilho Venda", 40, 55, AppConfig.DEFAULT_RSI_MAX, help="RSI precisa cruzar abaixo deste nivel para venda")
+        rsi_min = st.sidebar.slider("RSI Gatilho Compra", 45, 70, AppConfig.DEFAULT_RSI_MIN, help="RSI precisa cruzar acima deste nivel para compra")
+        rsi_max = st.sidebar.slider("RSI Gatilho Venda", 30, 55, AppConfig.DEFAULT_RSI_MAX, help="RSI precisa cruzar abaixo deste nivel para venda")
 
         with st.sidebar.expander("📈 Day Trading Otimizado", expanded=True):
             st.markdown("**⚡ Configurações para Day Trader**")
@@ -4588,6 +4754,7 @@ def main():
         bot_process_state = get_trader_bot_process_state()
         workspace_session_active = bool(dashboard_user)
         telegram_library_ready = is_telegram_service_available()
+        websocket_library_ready = is_websocket_runtime_available()
         session_notifications_enabled = bool(st.session_state.get("telegram_notifications"))
         subscription_payload = (dashboard_user or {}).get("subscription") or {}
         subscription_active = bool(subscription_payload.get("is_active"))
@@ -4595,11 +4762,14 @@ def main():
         subscription_gate_required = bool(ProductionConfig.REQUIRE_ACTIVE_SUBSCRIPTION_FOR_BOT)
         bot_start_allowed = bool(
             workspace_session_active
+            and websocket_library_ready
             and (not subscription_gate_required or subscription_active)
         )
         bot_start_block_reason = ""
         if not workspace_session_active:
             bot_start_block_reason = "Faça login no Workspace para habilitar o runtime."
+        elif not websocket_library_ready:
+            bot_start_block_reason = "Biblioteca websockets ausente no ambiente. Instale as dependências antes de ligar o bot."
         elif subscription_gate_required and not subscription_active:
             bot_start_block_reason = (
                 "Assinatura inativa/expirada. Ative um plano semanal, mensal ou anual para ligar o bot."
@@ -4629,7 +4799,7 @@ def main():
             f"Risco {runtime_risk_profile}"
         )
 
-        readiness_col1, readiness_col2, readiness_col3, readiness_col4, readiness_col5 = st.columns(5)
+        readiness_col1, readiness_col2, readiness_col3, readiness_col4, readiness_col5, readiness_col6 = st.columns(6)
         with readiness_col1:
             st.metric("Processo", "ON" if bot_process_state.get("running") else "OFF")
         with readiness_col2:
@@ -4640,10 +4810,14 @@ def main():
             st.metric("Notif. Sessao", "ON" if session_notifications_enabled else "OFF")
         with readiness_col5:
             st.metric("Assinatura", f"{subscription_plan} {'ON' if subscription_active else 'OFF'}")
+        with readiness_col6:
+            st.metric("Lib WebSocket", "OK" if websocket_library_ready else "PENDENTE")
 
         if bot_view_mode == "Runtime":
             if not ProductionConfig.TELEGRAM_BOT_TOKEN:
                 st.warning("Configure TELEGRAM_BOT_TOKEN antes de ligar o bot trader.")
+            if not websocket_library_ready:
+                st.warning("Biblioteca websockets indisponível. O bot não deve ser ligado sem streaming ativo.")
             if bot_start_block_reason:
                 st.warning(bot_start_block_reason)
 
@@ -4664,6 +4838,7 @@ def main():
                     f"Workspace ativo: {'sim' if workspace_session_active else 'nao'}\n\n"
                     f"Token do bot trader: {'ok' if ProductionConfig.TELEGRAM_BOT_TOKEN else 'pendente'}\n\n"
                     f"Biblioteca Telegram: {'ok' if telegram_library_ready else 'pendente'}\n\n"
+                    f"Biblioteca WebSocket: {'ok' if websocket_library_ready else 'pendente'}\n\n"
                     f"Processo em execucao: {'sim' if bot_process_state.get('running') else 'nao'}"
                 )
             with readiness_status_col2:
@@ -4680,6 +4855,8 @@ def main():
                 st.warning("Assinatura inativa/expirada para uso do bot. Ative um plano para liberar operação.")
             if not telegram_library_ready:
                 st.warning("Biblioteca Telegram indisponível neste ambiente. O runtime pode subir sem comandos interativos completos.")
+            if not websocket_library_ready:
+                st.warning("Biblioteca websockets indisponível. Sem ela o bot não mantém feed constante de candles.")
             if not ProductionConfig.TELEGRAM_BOT_TOKEN:
                 st.warning("TELEGRAM_BOT_TOKEN ainda não está configurado no ambiente.")
             if bot_process_state.get("running"):
@@ -4714,6 +4891,10 @@ def main():
         st.info(
             "Escopo desta aba: simulação histórica e validação de estratégia (retorno, drawdown, execução e auditoria). "
             "Não representa sinal operacional ao vivo."
+        )
+        st.caption(
+            f"Origem de dados da dashboard: caminho websocket com buffer compartilhado e/ou bootstrap local em {AppConfig.HISTORY_DATA_DIR}. "
+            "Fallback REST histórico fica bloqueado para preservar comparabilidade e evitar erro 451/403."
         )
         backtest_engine = get_or_init_backtest_engine()
         max_backtest_days = 730
@@ -4762,7 +4943,11 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            if st.button("🚀 Teste Agressivo", help="RSI 54/46, 7 dias", width="stretch"):
+            if st.button(
+                "🚀 Teste Agressivo",
+                help=f"Aplica o baseline EMA/RSI aprovado ({AppConfig.DEFAULT_RSI_MIN}/{AppConfig.DEFAULT_RSI_MAX}) por 7 dias",
+                width="stretch",
+            ):
                 _apply_bt_preset("Leitura Ativa (15m)", start_days=7)
 
         with col2:
@@ -5046,7 +5231,7 @@ def main():
 
                 bt_rsi_min = st.slider(
                     "RSI Gatilho Compra", 
-                    45, 60, 
+                    45, 70, 
                     getattr(st.session_state, 'bt_rsi_min', AppConfig.DEFAULT_RSI_MIN),
                     help="RSI precisa cruzar acima deste nivel para compra",
                     key="bt_rsi_min"
@@ -5054,7 +5239,7 @@ def main():
 
                 bt_rsi_max = st.slider(
                     "RSI Gatilho Venda", 
-                    40, 55, 
+                    30, 55, 
                     getattr(st.session_state, 'bt_rsi_max', AppConfig.DEFAULT_RSI_MAX),
                     help="RSI precisa cruzar abaixo deste nivel para venda",
                     key="bt_rsi_max"
@@ -7125,9 +7310,13 @@ def main():
                 opt_col1, opt_col2 = st.columns(2)
 
                 with opt_col1:
-                    if st.button("🔧 RSI Mais Restritivo", help="RSI 54/46"):
-                        st.session_state.bt_rsi_min = 54
-                        st.session_state.bt_rsi_max = 46
+                    if st.button(
+                        "✅ Baseline Aprovado",
+                        help=f"Aplicar RSI {AppConfig.DEFAULT_RSI_MIN}/{AppConfig.DEFAULT_RSI_MAX}",
+                    ):
+                        st.session_state.bt_rsi_period = AppConfig.DEFAULT_RSI_PERIOD
+                        st.session_state.bt_rsi_min = AppConfig.DEFAULT_RSI_MIN
+                        st.session_state.bt_rsi_max = AppConfig.DEFAULT_RSI_MAX
                         st.rerun()
 
                     if st.button("📈 Timeframe Maior", help="Mudar para timeframe superior"):
@@ -7463,13 +7652,13 @@ def main():
             guide_col1, guide_col2 = st.columns(2)
 
             with guide_col1:
-                st.markdown("""
+                st.markdown(f"""
                 **🚀 Como Começar:**
 
                 1. **Escolha um par** (ex: BTC-USD para volatilidade)
                 2. **Selecione timeframe** (15m é bom para iniciantes)
                 3. **Configure período** (comece com 1-2 semanas)
-                4. **Ajuste gatilhos RSI** (52/47 é o padrão mecânico)
+                4. **Use o baseline aprovado** ({AppConfig.DEFAULT_RSI_MIN}/{AppConfig.DEFAULT_RSI_MAX})
                 5. **Execute e analise**
 
                 **💡 Dicas de Performance:**
@@ -7500,19 +7689,21 @@ def main():
             sample_col1, sample_col2, sample_col3 = st.columns(3)
 
             with sample_col1:
-                st.info("""
-                **🔥 Scalping Agressivo**
-                - Timeframe: 5m
-                - RSI: 54/46
-                - Período: 1 semana
-                - Para: traders ativos
-                """)
+                st.info(
+                    f"""
+                **✅ Setup Validado**
+                - Timeframe: 15m
+                - RSI: {AppConfig.DEFAULT_RSI_MIN}/{AppConfig.DEFAULT_RSI_MAX}
+                - Período: 90 dias
+                - Para: baseline principal
+                """
+                )
 
             with sample_col2:
                 st.info("""
                 **⚖️ Swing Trading**
                 - Timeframe: 1h
-                - RSI: 52/47
+                - RSI: ajuste conforme contexto
                 - Período: 1 mês
                 - Para: trading moderado
                 """)
@@ -7687,6 +7878,54 @@ def main():
                     st.warning("Configure CREDENTIAL_ENCRYPTION_KEY para armazenar credenciais de exchange com segurança.")
                 else:
                     st.success("Credenciais multiuser serão persistidas criptografadas com Fernet.")
+
+                st.markdown("---")
+                st.subheader("🗂️ Volume e Históricos")
+                history_dir = get_history_data_dir()
+                volume_col1, volume_col2, volume_col3 = st.columns(3)
+                with volume_col1:
+                    st.metric("DB Path", getattr(AppConfig, "DB_PATH", "n/d"))
+                with volume_col2:
+                    st.metric("History Dir", str(history_dir))
+                with volume_col3:
+                    st.metric("Arquivos Históricos", len(list_history_data_files(limit=500)))
+
+                st.caption(
+                    "Use este bloco para popular o volume persistente do Railway com os CSVs usados no bootstrap do bot e no backtest da dashboard."
+                )
+
+                history_files = list_history_data_files(limit=200)
+                if history_files:
+                    st.dataframe(pd.DataFrame(history_files), width="stretch", hide_index=True)
+                else:
+                    st.info(
+                        f"Nenhum histórico encontrado em {history_dir}. "
+                        "Envie pelo menos o arquivo do ativo/timeframe principal antes de rodar backtests longos."
+                    )
+
+                uploaded_history_files = st.file_uploader(
+                    "Enviar históricos para o volume",
+                    type=["csv", "gz"],
+                    accept_multiple_files=True,
+                    key="admin_history_csv_uploader",
+                    help="Aceita arquivos .csv e .csv.gz, por exemplo BTCUSDT_15m.csv.gz.",
+                )
+                if st.button("Salvar históricos no volume", key="admin_save_history_files"):
+                    if not uploaded_history_files:
+                        st.warning("Selecione ao menos um arquivo .csv ou .csv.gz antes de salvar.")
+                    else:
+                        saved_files = []
+                        failed_files = []
+                        for uploaded_file in uploaded_history_files:
+                            try:
+                                saved_path = save_uploaded_history_file(uploaded_file)
+                                saved_files.append(saved_path.name)
+                            except Exception as exc:
+                                failed_files.append(f"{getattr(uploaded_file, 'name', 'arquivo')}: {exc}")
+                        if saved_files:
+                            st.success(f"Arquivos salvos no volume: {', '.join(saved_files)}")
+                        if failed_files:
+                            st.error("Falha ao salvar alguns arquivos:\n" + "\n".join(failed_files))
 
             if admin_show_access:
                 st.subheader("👤 Acesso da Dashboard")

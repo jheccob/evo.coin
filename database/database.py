@@ -949,6 +949,34 @@ class TradingDatabase:
             '''
         )
 
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS bot_runtime_state (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                runtime_key TEXT NOT NULL UNIQUE,
+                runtime_name TEXT,
+                environment TEXT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                strategy_version TEXT,
+                status TEXT NOT NULL DEFAULT 'starting',
+                last_heartbeat_at TEXT,
+                last_candle_timestamp TEXT,
+                last_signal TEXT,
+                last_signal_reason TEXT,
+                last_signal_price REAL,
+                position_side TEXT,
+                position_entry_price REAL,
+                blocked BOOLEAN NOT NULL DEFAULT FALSE,
+                block_reason TEXT,
+                last_error TEXT,
+                state_payload TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+        )
+
         self._ensure_column(cursor, 'trading_signals', 'context_timeframe', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'strategy_version', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'regime', 'TEXT')
@@ -1138,6 +1166,12 @@ class TradingDatabase:
             ON dashboard_signup_requests(login_name)
             '''
         )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_bot_runtime_state_lookup
+            ON bot_runtime_state(symbol, timeframe, updated_at)
+            '''
+        )
 
         conn.commit()
         conn.close()
@@ -1195,6 +1229,16 @@ class TradingDatabase:
             return value
         return json.dumps(value, ensure_ascii=True)
 
+    def _from_json_text(self, value: Any) -> Any:
+        if value in (None, ""):
+            return None
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+
     def _to_list(self, raw_value: Any) -> List[str]:
         if raw_value in (None, ""):
             return []
@@ -1212,6 +1256,106 @@ class TradingDatabase:
                 pass
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return [str(raw_value)]
+
+    def upsert_bot_runtime_state(self, runtime_data: Dict[str, Any]) -> int:
+        runtime_key = str(runtime_data.get("runtime_key") or "").strip()
+        symbol = str(runtime_data.get("symbol") or "").strip()
+        timeframe = str(runtime_data.get("timeframe") or "").strip()
+        if not runtime_key:
+            raise ValueError("runtime_key e obrigatorio para persistir estado do bot.")
+        if not symbol or not timeframe:
+            raise ValueError("symbol e timeframe sao obrigatorios para persistir estado do bot.")
+
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                '''
+                INSERT INTO bot_runtime_state (
+                    runtime_key, runtime_name, environment, symbol, timeframe, strategy_version,
+                    status, last_heartbeat_at, last_candle_timestamp, last_signal, last_signal_reason,
+                    last_signal_price, position_side, position_entry_price, blocked, block_reason,
+                    last_error, state_payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(runtime_key) DO UPDATE SET
+                    runtime_name = excluded.runtime_name,
+                    environment = excluded.environment,
+                    symbol = excluded.symbol,
+                    timeframe = excluded.timeframe,
+                    strategy_version = excluded.strategy_version,
+                    status = excluded.status,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    last_candle_timestamp = excluded.last_candle_timestamp,
+                    last_signal = excluded.last_signal,
+                    last_signal_reason = excluded.last_signal_reason,
+                    last_signal_price = excluded.last_signal_price,
+                    position_side = excluded.position_side,
+                    position_entry_price = excluded.position_entry_price,
+                    blocked = excluded.blocked,
+                    block_reason = excluded.block_reason,
+                    last_error = excluded.last_error,
+                    state_payload = excluded.state_payload,
+                    updated_at = datetime('now')
+                ''',
+                (
+                    runtime_key,
+                    runtime_data.get("runtime_name"),
+                    runtime_data.get("environment"),
+                    symbol,
+                    timeframe,
+                    runtime_data.get("strategy_version"),
+                    runtime_data.get("status", "starting"),
+                    runtime_data.get("last_heartbeat_at"),
+                    runtime_data.get("last_candle_timestamp"),
+                    runtime_data.get("last_signal"),
+                    runtime_data.get("last_signal_reason"),
+                    runtime_data.get("last_signal_price"),
+                    runtime_data.get("position_side"),
+                    runtime_data.get("position_entry_price"),
+                    int(bool(runtime_data.get("blocked", False))),
+                    runtime_data.get("block_reason"),
+                    runtime_data.get("last_error"),
+                    self._to_json_text(runtime_data.get("state_payload")),
+                ),
+            )
+            conn.commit()
+            cursor.execute(
+                '''
+                SELECT id
+                FROM bot_runtime_state
+                WHERE runtime_key = ?
+                LIMIT 1
+                ''',
+                (runtime_key,),
+            )
+            row = cursor.fetchone()
+            if isinstance(row, dict):
+                return int(row.get("id") or 0)
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    def get_bot_runtime_state(self, runtime_key: Optional[str] = None, limit: int = 20) -> List[Dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                '''
+                SELECT *
+                FROM bot_runtime_state
+                WHERE (? IS NULL OR runtime_key = ?)
+                ORDER BY updated_at DESC
+                LIMIT ?
+                ''',
+                (runtime_key, runtime_key, int(limit)),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            for row in rows:
+                row["blocked"] = bool(row.get("blocked", False))
+                row["state_payload"] = self._from_json_text(row.get("state_payload"))
+            return rows
+        finally:
+            conn.close()
 
     @staticmethod
     def _normalize_dashboard_login_name(login_name: Any) -> str:
@@ -2639,6 +2783,56 @@ class TradingDatabase:
         finally:
             conn.close()
 
+    def update_user_exchange_credential_status(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        permission_status: Optional[str] = None,
+        token_status: Optional[str] = None,
+        reconciliation_status: Optional[str] = None,
+        last_validated_at: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        updates = []
+        params: List[Any] = []
+
+        if permission_status is not None:
+            updates.append("permission_status = ?")
+            params.append(str(permission_status))
+        if token_status is not None:
+            updates.append("token_status = ?")
+            params.append(str(token_status))
+        if reconciliation_status is not None:
+            updates.append("reconciliation_status = ?")
+            params.append(str(reconciliation_status))
+        if last_validated_at is not None:
+            updates.append("last_validated_at = ?")
+            params.append(str(last_validated_at))
+        if notes is not None:
+            updates.append("notes = ?")
+            params.append(str(notes))
+
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([int(user_id), str(account_id), str(exchange)])
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                UPDATE user_exchange_credentials
+                SET {', '.join(updates)}
+                WHERE user_id = ? AND account_id = ? AND exchange = ?
+                ''',
+                tuple(params),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
     def upsert_user_governance_state(self, governance_data: Dict[str, Any]) -> int:
         conn = self.get_connection()
         try:
@@ -2771,6 +2965,91 @@ class TradingDatabase:
         finally:
             conn.close()
 
+    def upsert_user_live_order(self, order_data: Dict[str, Any]) -> int:
+        user_id = int(order_data["user_id"])
+        account_id = str(order_data["account_id"])
+        exchange_order_id = str(order_data.get("exchange_order_id") or "").strip()
+        client_order_id = str(order_data.get("client_order_id") or "").strip()
+        if not exchange_order_id and not client_order_id:
+            raise ValueError("exchange_order_id ou client_order_id e obrigatorio para upsert de ordem.")
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            existing_row = None
+            if exchange_order_id:
+                cursor.execute(
+                    '''
+                    SELECT id
+                    FROM user_live_orders
+                    WHERE user_id = ? AND account_id = ? AND exchange_order_id = ?
+                    LIMIT 1
+                    ''',
+                    (user_id, account_id, exchange_order_id),
+                )
+                existing_row = cursor.fetchone()
+            if existing_row is None and client_order_id:
+                cursor.execute(
+                    '''
+                    SELECT id
+                    FROM user_live_orders
+                    WHERE user_id = ? AND account_id = ? AND client_order_id = ?
+                    LIMIT 1
+                    ''',
+                    (user_id, account_id, client_order_id),
+                )
+                existing_row = cursor.fetchone()
+
+            payload = (
+                order_data.get("exchange"),
+                order_data.get("symbol"),
+                order_data.get("timeframe"),
+                order_data.get("strategy_version"),
+                client_order_id or None,
+                exchange_order_id or None,
+                order_data.get("side"),
+                order_data.get("order_type"),
+                float(order_data.get("quantity", 0.0) or 0.0),
+                float(order_data.get("price", 0.0) or 0.0),
+                order_data.get("status", "pending"),
+                order_data.get("source"),
+                order_data.get("notes"),
+            )
+
+            if existing_row:
+                row_id = int(existing_row["id"] if isinstance(existing_row, dict) else existing_row[0])
+                cursor.execute(
+                    '''
+                    UPDATE user_live_orders
+                    SET exchange = ?, symbol = ?, timeframe = ?, strategy_version = ?,
+                        client_order_id = ?, exchange_order_id = ?, side = ?, order_type = ?,
+                        quantity = ?, price = ?, status = ?, source = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    payload + (row_id,),
+                )
+                conn.commit()
+                return row_id
+
+            cursor.execute(
+                '''
+                INSERT INTO user_live_orders (
+                    user_id, account_id, exchange, symbol, timeframe, strategy_version,
+                    client_order_id, exchange_order_id, side, order_type, quantity, price, status, source, notes, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''',
+                (
+                    user_id,
+                    account_id,
+                    *payload,
+                ),
+            )
+            row_id = int(cursor.lastrowid or 0)
+            conn.commit()
+            return row_id
+        finally:
+            conn.close()
+
     def create_user_live_position(self, position_data: Dict[str, Any]) -> int:
         conn = self.get_connection()
         try:
@@ -2801,6 +3080,196 @@ class TradingDatabase:
             position_id = cursor.lastrowid
             conn.commit()
             return int(position_id)
+        finally:
+            conn.close()
+
+    def sync_user_live_positions_snapshot(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        symbol: Optional[str],
+        timeframe: Optional[str],
+        strategy_version: Optional[str],
+        positions: List[Dict[str, Any]],
+    ) -> List[int]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM user_live_positions
+                WHERE user_id = ?
+                  AND account_id = ?
+                  AND (? IS NULL OR exchange = ?)
+                  AND (? IS NULL OR symbol = ?)
+                  AND status = 'open'
+                ''',
+                (int(user_id), str(account_id), exchange, exchange, symbol, symbol),
+            )
+            existing_rows = [dict(row) for row in cursor.fetchall()]
+            existing_map = {
+                (
+                    str(row.get("symbol") or ""),
+                    str(row.get("timeframe") or ""),
+                    str(row.get("strategy_version") or ""),
+                    str(row.get("side") or ""),
+                ): row
+                for row in existing_rows
+            }
+
+            active_keys = set()
+            persisted_ids: List[int] = []
+            for position in positions:
+                position_key = (
+                    str(position.get("symbol") or symbol or ""),
+                    str(position.get("timeframe") or timeframe or ""),
+                    str(position.get("strategy_version") or strategy_version or ""),
+                    str(position.get("side") or ""),
+                )
+                active_keys.add(position_key)
+                existing_row = existing_map.get(position_key)
+                payload = (
+                    exchange,
+                    position.get("symbol") or symbol,
+                    position.get("timeframe") or timeframe,
+                    position.get("strategy_version") or strategy_version,
+                    position.get("side"),
+                    float(position.get("quantity", 0.0) or 0.0),
+                    float(position.get("entry_price", 0.0) or 0.0),
+                    float(position.get("mark_price", 0.0) or 0.0),
+                    float(position.get("unrealized_pnl", 0.0) or 0.0),
+                    position.get("status", "open"),
+                    position.get("notes"),
+                )
+
+                if existing_row:
+                    row_id = int(existing_row["id"])
+                    cursor.execute(
+                        '''
+                        UPDATE user_live_positions
+                        SET exchange = ?, symbol = ?, timeframe = ?, strategy_version = ?, side = ?,
+                            quantity = ?, entry_price = ?, mark_price = ?, unrealized_pnl = ?,
+                            status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        ''',
+                        payload + (row_id,),
+                    )
+                    persisted_ids.append(row_id)
+                else:
+                    cursor.execute(
+                        '''
+                        INSERT INTO user_live_positions (
+                            user_id, account_id, exchange, symbol, timeframe, strategy_version,
+                            side, quantity, entry_price, mark_price, unrealized_pnl, status, notes, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        ''',
+                        (
+                            int(user_id),
+                            str(account_id),
+                            *payload,
+                        ),
+                    )
+                    persisted_ids.append(int(cursor.lastrowid or 0))
+
+            for existing_key, existing_row in existing_map.items():
+                if existing_key in active_keys:
+                    continue
+                cursor.execute(
+                    '''
+                    UPDATE user_live_positions
+                    SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (int(existing_row["id"]),),
+                )
+
+            conn.commit()
+            return persisted_ids
+        finally:
+            conn.close()
+
+    def sync_user_live_orders_snapshot(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        symbol: Optional[str],
+        timeframe: Optional[str],
+        strategy_version: Optional[str],
+        open_orders: List[Dict[str, Any]],
+        absent_status: str = "closed",
+    ) -> List[int]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM user_live_orders
+                WHERE user_id = ?
+                  AND account_id = ?
+                  AND (? IS NULL OR exchange = ?)
+                  AND (? IS NULL OR symbol = ?)
+                  AND status IN ('pending', 'open', 'new', 'partially_filled')
+                ''',
+                (int(user_id), str(account_id), exchange, exchange, symbol, symbol),
+            )
+            existing_rows = [dict(row) for row in cursor.fetchall()]
+            existing_map = {}
+            for row in existing_rows:
+                order_key = str(row.get("exchange_order_id") or row.get("client_order_id") or row.get("id"))
+                existing_map[order_key] = row
+
+            active_keys = set()
+            persisted_ids: List[int] = []
+            for order in open_orders:
+                order_id_key = str(order.get("exchange_order_id") or order.get("client_order_id") or "").strip()
+                if not order_id_key:
+                    continue
+                active_keys.add(order_id_key)
+                persisted_ids.append(
+                    self.upsert_user_live_order(
+                        {
+                            "user_id": int(user_id),
+                            "account_id": str(account_id),
+                            "exchange": exchange,
+                            "symbol": order.get("symbol") or symbol,
+                            "timeframe": order.get("timeframe") or timeframe,
+                            "strategy_version": order.get("strategy_version") or strategy_version,
+                            "client_order_id": order.get("client_order_id"),
+                            "exchange_order_id": order.get("exchange_order_id"),
+                            "side": order.get("side"),
+                            "order_type": order.get("order_type"),
+                            "quantity": order.get("quantity"),
+                            "price": order.get("price"),
+                            "status": order.get("status", "open"),
+                            "source": order.get("source"),
+                            "notes": order.get("notes"),
+                        }
+                    )
+                )
+
+            stale_ids = [
+                int(row["id"])
+                for order_key, row in existing_map.items()
+                if order_key not in active_keys
+            ]
+            for row_id in stale_ids:
+                cursor.execute(
+                    '''
+                    UPDATE user_live_orders
+                    SET status = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (str(absent_status), row_id),
+                )
+
+            conn.commit()
+            return persisted_ids
         finally:
             conn.close()
 

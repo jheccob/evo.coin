@@ -4,8 +4,8 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from config import ProductionConfig
-from strategy import analyze_prepared_candle
+from config import AppConfig, ProductionConfig
+from strategy_engine import StrategyParams, generate_entry_signal
 from trading_core.block_debug import emit_block_debug
 
 
@@ -47,7 +47,9 @@ def _ensure_indicator_columns(bot, working_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _resolve_resume_thresholds(bot) -> tuple[float, float]:
-    return float(getattr(bot, "rsi_min", 54)), float(getattr(bot, "rsi_max", 47))
+    return float(getattr(bot, "rsi_min", AppConfig.DEFAULT_RSI_MIN)), float(
+        getattr(bot, "rsi_max", AppConfig.DEFAULT_RSI_MAX)
+    )
 
 
 def _derive_market_bias(row: pd.Series) -> str:
@@ -87,12 +89,25 @@ def _analyze_resume_signal(
             "target_reason": None,
         }
 
-    result = analyze_prepared_candle(df, index=-1)
+    signal_result = generate_entry_signal(
+        df,
+        StrategyParams(
+            buy_rsi_floor=float(buy_threshold),
+            sell_rsi_ceiling=float(sell_threshold),
+        ),
+        index=-1,
+    )
     row = df.iloc[-1]
     prev = df.iloc[-2]
+    setup_name = str(((signal_result.get("setup") or {}).get("setup")) or "").strip().lower() or None
 
     market_bias = _derive_market_bias(row)
-    structure_state = "uptrend" if market_bias == "bullish" else "downtrend" if market_bias == "bearish" else "flat"
+    if setup_name in {"trend_resume_long", "trend_resume_short"}:
+        structure_state = "trend_resume"
+    elif setup_name in {"pullback_long", "pullback_short"}:
+        structure_state = "pullback"
+    else:
+        structure_state = "uptrend" if market_bias == "bullish" else "downtrend" if market_bias == "bearish" else "flat"
     if row["close"] > row["ema_fast"]:
         price_location = "above_ema_fast"
     elif row["close"] < row["ema_fast"]:
@@ -106,20 +121,20 @@ def _analyze_resume_signal(
     take_profit_pct = take_profit_pct / 100 if take_profit_pct > 1 else take_profit_pct
     rr_estimate = round(float(take_profit_pct) / float(stop_loss_pct), 2) if stop_loss_pct > 0 else 0.0
 
-    if result["signal"] == "buy":
+    if signal_result["signal"] == "buy":
         signal = "COMPRA"
         confirmation_state = "confirmed"
         entry_quality = "good"
-        market_pattern = "ema_rsi_resume_long"
+        market_pattern = setup_name or "trend_resume_long"
         structural_stop_price = float(row["close"]) * (1 - stop_loss_pct)
         structural_take_profit_price = float(row["close"]) * (1 + take_profit_pct)
         invalid_if = "Perder a EMA rapida e invalidar o impulso comprador."
         target_reason = "Alvo padrao baseado em continuidade de tendencia compradora."
-    elif result["signal"] == "sell":
+    elif signal_result["signal"] == "sell":
         signal = "VENDA"
         confirmation_state = "confirmed"
         entry_quality = "good"
-        market_pattern = "ema_rsi_resume_short"
+        market_pattern = setup_name or "trend_resume_short"
         structural_stop_price = float(row["close"]) * (1 + stop_loss_pct)
         structural_take_profit_price = float(row["close"]) * (1 - take_profit_pct)
         invalid_if = "Recuperar a EMA rapida e invalidar o impulso vendedor."
@@ -142,7 +157,7 @@ def _analyze_resume_signal(
 
     return {
         "signal": signal,
-        "reason": result["reason"],
+        "reason": signal_result["reason"],
         "market_bias": market_bias,
         "structure_state": structure_state,
         "price_location": price_location,
