@@ -50,11 +50,20 @@ def _candles_to_dataframe(rows: list[dict]) -> pd.DataFrame:
 class StreamlinedTradingBot:
     """Cliente websocket real para klines públicos da Binance com reconexão automática."""
 
-    def __init__(self, symbol: str, timeframe: str, max_candles: int = 500, testnet: bool = False):
+    def __init__(
+        self,
+        symbol: str,
+        timeframe: str,
+        max_candles: int = 500,
+        testnet: bool = False,
+        allow_rest_fallback: bool = True,
+        bootstrap_df: Optional[pd.DataFrame] = None,
+    ):
         self.symbol = symbol
         self.timeframe = _normalize_stream_timeframe(timeframe)
         self.max_candles = max(200, int(max_candles))
         self.testnet = bool(testnet)
+        self.allow_rest_fallback = bool(allow_rest_fallback)
 
         self._stream_symbol = _normalize_stream_symbol(symbol)
         self._lock = threading.RLock()
@@ -82,6 +91,8 @@ class StreamlinedTradingBot:
         else:
             self.provider = "rest_fallback"
             self.last_error = "Pacote websockets nao instalado; usando REST."
+
+        self._seed_from_dataframe(bootstrap_df)
 
     def _endpoint_candidates(self) -> list[tuple[str, str]]:
         stream_name = f"{self._stream_symbol}@kline_{self.timeframe}"
@@ -126,6 +137,48 @@ class StreamlinedTradingBot:
             self._last_message_at = time.time()
             if row["is_closed"]:
                 self._last_closed_timestamp = ts
+
+    def _seed_from_dataframe(self, bootstrap_df: Optional[pd.DataFrame]) -> None:
+        if bootstrap_df is None or bootstrap_df.empty:
+            return
+
+        working_df = bootstrap_df.copy()
+        if "timestamp" not in working_df.columns:
+            return
+
+        if pd.api.types.is_numeric_dtype(working_df["timestamp"]):
+            working_df["timestamp"] = pd.to_datetime(working_df["timestamp"], unit="ms", utc=True, errors="coerce")
+        else:
+            working_df["timestamp"] = pd.to_datetime(working_df["timestamp"], utc=True, errors="coerce")
+
+        required_columns = ["timestamp", "open", "high", "low", "close", "volume"]
+        for column in required_columns:
+            if column not in working_df.columns:
+                return
+            if column != "timestamp":
+                working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
+
+        working_df = working_df.dropna(subset=required_columns)
+        if working_df.empty:
+            return
+
+        working_df = working_df.sort_values("timestamp").tail(self.max_candles)
+        for _, row in working_df.iterrows():
+            timestamp_ms = int(pd.Timestamp(row["timestamp"]).timestamp() * 1000)
+            self._upsert_kline(
+                {
+                    "k": {
+                        "t": timestamp_ms,
+                        "o": float(row["open"]),
+                        "h": float(row["high"]),
+                        "l": float(row["low"]),
+                        "c": float(row["close"]),
+                        "v": float(row["volume"]),
+                        "x": True,
+                    }
+                }
+            )
+        self._ready_event.set()
 
     def _run(self) -> None:
         retry_seconds = 2
@@ -230,6 +283,12 @@ class StreamlinedTradingBot:
                 if len(df) > 1:
                     return df.iloc[:-1].reset_index(drop=True)
             return df.reset_index(drop=True)
+
+        if not self.allow_rest_fallback:
+            raise RuntimeError(
+                "Sem dados no websocket e fallback REST desativado. "
+                "Verifique conectividade do endpoint WS ou carregue bootstrap local."
+            )
 
         # Segurança operacional: se websocket ainda não tiver buffer, tenta preencher por REST.
         df = fetch_candles(self.symbol, self.timeframe, limit=requested, testnet=self.testnet)
