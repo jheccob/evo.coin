@@ -268,17 +268,56 @@ class _TerminalBacktestEngine:
         backtest_use_testnet = bool(getattr(runtime_config, "BACKTEST_USE_TESTNET", False))
         backtest_use_local_csv = bool(getattr(runtime_config, "BACKTEST_USE_LOCAL_CSV", True))
         backtest_require_local_csv = bool(getattr(runtime_config, "BACKTEST_REQUIRE_LOCAL_CSV", True))
+        csv_reference_path = None
+
+        if backtest_use_local_csv and backtest_require_local_csv:
+            try:
+                from market_data import _normalize_symbol_for_csv, _normalize_timeframe_for_csv
+
+                csv_symbol = _normalize_symbol_for_csv(symbol)
+                csv_timeframe = _normalize_timeframe_for_csv(timeframe)
+                csv_reference_path = Path("data") / "history" / f"{csv_symbol}_{csv_timeframe}.csv.gz"
+                if not csv_reference_path.exists():
+                    raise RuntimeError(
+                        "Backtest da dashboard bloqueado: CSV local obrigatorio nao encontrado. "
+                        f"Arquivo esperado: {csv_reference_path}. "
+                        "Suba os historicos no volume (/app/data/history) ou desative BACKTEST_REQUIRE_LOCAL_CSV."
+                    )
+            except RuntimeError:
+                raise
+            except Exception:
+                # Se a normalização falhar por qualquer motivo, seguimos e tratamos no fallback.
+                pass
 
         capture = io.StringIO()
-        with contextlib.redirect_stdout(capture):
-            trades, summary = terminal_run_backtest(
-                symbol=symbol,
-                timeframe=timeframe,
-                candles=candles,
-                fee_pct=fee_pct,
-                testnet=backtest_use_testnet,
-                use_local_csv=backtest_use_local_csv,
-            )
+        try:
+            with contextlib.redirect_stdout(capture):
+                trades, summary = terminal_run_backtest(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    candles=candles,
+                    fee_pct=fee_pct,
+                    testnet=backtest_use_testnet,
+                    use_local_csv=backtest_use_local_csv,
+                )
+        except Exception as exc:
+            error_text = str(exc or "")
+            error_text_lower = error_text.lower()
+            if (
+                backtest_use_local_csv
+                and (
+                    "restricted location" in error_text_lower
+                    or "service unavailable from a restricted location" in error_text_lower
+                    or "cloudfront" in error_text_lower
+                    or " 451 " in f" {error_text_lower} "
+                )
+            ):
+                extra_hint = f" Arquivo CSV esperado: {csv_reference_path}." if csv_reference_path else ""
+                raise RuntimeError(
+                    "Backtest bloqueado por restricao geografica da exchange no ambiente do Railway (451/403). "
+                    "Para manter comparabilidade com os testes validados, use CSV local em data/history." + extra_hint
+                ) from exc
+            raise
         captured_output = str(capture.getvalue() or "")
         captured_output_lower = captured_output.lower()
         csv_fallback_happened = (
