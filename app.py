@@ -265,6 +265,9 @@ class _TerminalBacktestEngine:
 
         fee_pct = float(kwargs.get("fee_pct", getattr(runtime_config, "FEE_PCT", 0.08)) or 0.08)
         candles = int(kwargs.get("candles") or self._estimate_candles(timeframe, start_date, end_date))
+        backtest_use_testnet = bool(getattr(runtime_config, "BACKTEST_USE_TESTNET", False))
+        backtest_use_local_csv = bool(getattr(runtime_config, "BACKTEST_USE_LOCAL_CSV", True))
+        backtest_require_local_csv = bool(getattr(runtime_config, "BACKTEST_REQUIRE_LOCAL_CSV", True))
 
         capture = io.StringIO()
         with contextlib.redirect_stdout(capture):
@@ -273,8 +276,21 @@ class _TerminalBacktestEngine:
                 timeframe=timeframe,
                 candles=candles,
                 fee_pct=fee_pct,
-                testnet=bool(getattr(runtime_config, "TESTNET", True)),
-                use_local_csv=True,
+                testnet=backtest_use_testnet,
+                use_local_csv=backtest_use_local_csv,
+            )
+        captured_output = str(capture.getvalue() or "")
+        captured_output_lower = captured_output.lower()
+        csv_fallback_happened = (
+            "arquivo local" in captured_output_lower
+            and "encontrado" in captured_output_lower
+            and "usando api" in captured_output_lower
+        )
+        if backtest_require_local_csv and backtest_use_local_csv and csv_fallback_happened:
+            raise RuntimeError(
+                "Backtest da dashboard bloqueado: CSV local nao encontrado em data/history. "
+                "Para manter comparabilidade com o backtest validado, envie os arquivos historicos "
+                "ou desative BACKTEST_REQUIRE_LOCAL_CSV."
             )
 
         self._trade_summary_df = self._build_trade_summary_df(trades, initial_balance)
@@ -308,6 +324,8 @@ class _TerminalBacktestEngine:
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "strategy_version": strategy_version,
+                "data_source": "csv_local" if backtest_use_local_csv and not csv_fallback_happened else "api",
+                "backtest_use_testnet": backtest_use_testnet,
                 "rsi_min": kwargs.get("rsi_min"),
                 "rsi_max": kwargs.get("rsi_max"),
                 "ai_assist_mode": kwargs.get("ai_assist_mode", "disabled"),
