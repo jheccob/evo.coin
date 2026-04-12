@@ -65,6 +65,8 @@ def _sqlite_to_postgres_sql(sql: str) -> str:
     )
     translated = translated.replace("AUTOINCREMENT", "")
     translated = translated.replace("BOOLEAN", "INTEGER")
+    translated = re.sub(r"\bDEFAULT\s+FALSE\b", "DEFAULT 0", translated, flags=re.IGNORECASE)
+    translated = re.sub(r"\bDEFAULT\s+TRUE\b", "DEFAULT 1", translated, flags=re.IGNORECASE)
     translated = translated.replace("datetime('now', ?)", "(NOW() + %s::interval)")
     translated = _SQLITE_LITERAL_DATETIME_PATTERN.sub(_replace_literal_datetime_now, translated)
     translated = _SQLITE_NOW_DATETIME_PATTERN.sub("NOW()", translated)
@@ -1155,6 +1157,18 @@ class TradingDatabase:
             )
             if cursor.fetchone() is None:
                 postgres_definition = str(column_definition).replace("BOOLEAN", "INTEGER")
+                postgres_definition = re.sub(
+                    r"\bDEFAULT\s+FALSE\b",
+                    "DEFAULT 0",
+                    postgres_definition,
+                    flags=re.IGNORECASE,
+                )
+                postgres_definition = re.sub(
+                    r"\bDEFAULT\s+TRUE\b",
+                    "DEFAULT 1",
+                    postgres_definition,
+                    flags=re.IGNORECASE,
+                )
                 try:
                     cursor.execute(
                         f"ALTER TABLE {table_name} ADD COLUMN {column_name} {postgres_definition}"
