@@ -83,6 +83,7 @@ def _sqlite_to_postgres_sql(sql: str) -> str:
             translated = stripped.rstrip(";") + " ON CONFLICT DO NOTHING"
 
     translated = translated.replace("?", "%s")
+    translated = re.sub(r"(?<!:)%s\s+IS\s+NULL", "%s::text IS NULL", translated, flags=re.IGNORECASE)
     return translated
 
 
