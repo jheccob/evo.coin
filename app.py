@@ -38,6 +38,7 @@ MAX_SIGNAL_DATA_AGE_SECONDS = int(os.getenv("MAX_SIGNAL_DATA_AGE_SECONDS", "180"
 _TELEGRAM_SERVICE_CLASS = None
 _TELEGRAM_SERVICE_AVAILABLE = None
 _BACKTEST_ENGINE_CLASS = None
+DASHBOARD_SESSION_QUERY_KEY = "workspace_session"
 
 
 class _UnavailableTelegramService:
@@ -557,6 +558,7 @@ def initialize_dashboard_session_state() -> None:
         "backtest_optimization_results": None,
         "backtest_robustness_results": None,
         "dashboard_user_auth": None,
+        "dashboard_user_session_token": "",
         "dashboard_user_login": "",
         "dashboard_user_password": "",
         "dashboard_user_auth_error": "",
@@ -572,6 +574,47 @@ def initialize_dashboard_session_state() -> None:
             st.session_state[key] = {}
         else:
             st.session_state[key] = default
+
+
+def _get_dashboard_query_param_value(key: str) -> str:
+    try:
+        raw_value = st.query_params.get(key, "")
+    except Exception:
+        return ""
+    if isinstance(raw_value, list):
+        raw_value = raw_value[0] if raw_value else ""
+    return str(raw_value or "").strip()
+
+
+def _set_dashboard_query_param_value(key: str, value: str) -> None:
+    try:
+        if value:
+            st.query_params[key] = value
+        elif key in st.query_params:
+            del st.query_params[key]
+    except Exception:
+        logger.debug("Falha ao atualizar query param %s.", key, exc_info=True)
+
+
+def _get_persistent_dashboard_session_token() -> str:
+    session_token = str(st.session_state.get("dashboard_user_session_token") or "").strip()
+    if session_token:
+        return session_token
+    query_token = _get_dashboard_query_param_value(DASHBOARD_SESSION_QUERY_KEY)
+    if query_token:
+        st.session_state.dashboard_user_session_token = query_token
+    return query_token
+
+
+def _set_persistent_dashboard_session_token(session_token: str) -> None:
+    normalized_token = str(session_token or "").strip()
+    st.session_state.dashboard_user_session_token = normalized_token
+    _set_dashboard_query_param_value(DASHBOARD_SESSION_QUERY_KEY, normalized_token)
+
+
+def _clear_persistent_dashboard_session_token() -> None:
+    st.session_state.dashboard_user_session_token = ""
+    _set_dashboard_query_param_value(DASHBOARD_SESSION_QUERY_KEY, "")
 
 
 def ensure_trading_runtime(selected_exchange: str):
@@ -872,7 +915,14 @@ def clear_dashboard_data_caches() -> None:
     get_cached_bot_runtime_db_state.clear()
 
 
-def clear_dashboard_user_session():
+def clear_dashboard_user_session(*, revoke_persistent: bool = True):
+    session_token = _get_persistent_dashboard_session_token()
+    if revoke_persistent and session_token:
+        try:
+            db.revoke_dashboard_user_session(session_token)
+        except Exception:
+            logger.warning("Falha ao revogar sessao persistente da dashboard.", exc_info=True)
+    _clear_persistent_dashboard_session_token()
     st.session_state.dashboard_user_auth = None
     st.session_state.dashboard_user_login = ""
     st.session_state.dashboard_user_password = ""
@@ -881,6 +931,22 @@ def clear_dashboard_user_session():
 
 def get_authenticated_dashboard_user():
     auth_payload = st.session_state.get("dashboard_user_auth")
+    if not auth_payload:
+        session_token = _get_persistent_dashboard_session_token()
+        if session_token:
+            try:
+                restored_auth = db.authenticate_dashboard_session(session_token)
+            except Exception:
+                restored_auth = None
+                logger.warning("Falha ao restaurar sessao persistente da dashboard.", exc_info=True)
+            if restored_auth:
+                st.session_state.dashboard_user_auth = restored_auth
+                st.session_state.dashboard_user_auth_error = ""
+                auth_payload = restored_auth
+            else:
+                clear_dashboard_user_session(revoke_persistent=False)
+                _clear_persistent_dashboard_session_token()
+                return None
     if not auth_payload:
         return None
 
@@ -910,6 +976,14 @@ def get_authenticated_dashboard_user():
             logger.warning("Falha ao carregar assinatura do usuário %s.", user_id, exc_info=True)
 
     return auth_payload
+
+
+def is_admin_dashboard_session_active() -> bool:
+    return bool(st.session_state.get("admin_authenticated"))
+
+
+def get_trader_bot_entrypoint() -> Path:
+    return Path(__file__).resolve().with_name("bot_runner.py")
 
 
 def get_or_init_admin_telegram_bot():
@@ -959,7 +1033,7 @@ def get_trader_bot_process_state():
         "pid": pid,
         "use_testnet": use_testnet,
         "mode_label": "Testnet" if use_testnet else "Conta Real",
-        "entrypoint": str(Path(__file__).resolve().with_name("start_telegram_bot.py")),
+        "entrypoint": str(get_trader_bot_entrypoint()),
         "managed_externally": embedded_runtime,
     }
 
@@ -1003,12 +1077,9 @@ def start_trader_bot_process(use_testnet: bool = True):
     if current_state["running"]:
         return True, f"Bot já está ativo (PID {current_state['pid']}) em {current_state.get('mode_label', 'modo desconhecido')}."
 
-    entrypoint = Path(__file__).resolve().with_name("start_telegram_bot.py")
+    entrypoint = get_trader_bot_entrypoint()
     if not entrypoint.exists():
         return False, f"Entrypoint não encontrado: {entrypoint}"
-
-    if not ProductionConfig.TELEGRAM_BOT_TOKEN:
-        return False, "Configure TELEGRAM_BOT_TOKEN antes de ligar o bot trader."
 
     preflight_ok, preflight_message = _validate_live_runtime_preflight(use_testnet=use_testnet)
     if not preflight_ok:
@@ -1063,6 +1134,118 @@ def stop_trader_bot_process():
     return True, f"Solicitação de parada enviada para o PID {pid}."
 
 
+def render_bot_telegram_notifications_panel(section_key: str = "bot_runtime_telegram"):
+    st.markdown("### 📱 Notificações Telegram")
+    st.caption("Opcional. O bot trader pode ser ligado sem Telegram; este bloco serve apenas para alertas e mensagens.")
+
+    telegram_service_available = is_telegram_service_available()
+    if not telegram_service_available:
+        st.warning("Biblioteca Telegram indisponível neste ambiente. As notificações ficam desativadas, mas o bot pode operar.")
+        st.session_state.telegram_notifications = False
+        return
+
+    telegram_bot = get_or_init_session_telegram_bot()
+    has_env_secrets = bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))
+    is_configured = bool(has_env_secrets or (telegram_bot and telegram_bot.is_configured()))
+
+    status_col1, status_col2, status_col3 = st.columns(3)
+    with status_col1:
+        st.metric("Telegram", "CONFIGURADO" if is_configured else "OPCIONAL")
+    with status_col2:
+        current_enabled = bool(st.session_state.get("telegram_notifications", False))
+        st.metric("Alertas", "ON" if current_enabled else "OFF")
+    with status_col3:
+        st.metric("Origem", "ENV" if has_env_secrets else ("SESSÃO" if is_configured else "NÃO CONFIGURADO"))
+
+    if is_configured:
+        toggle_label = "Ativar alertas Telegram"
+        st.session_state.telegram_notifications = st.checkbox(
+            toggle_label,
+            value=bool(st.session_state.get("telegram_notifications", False)),
+            key=f"{section_key}_enabled",
+            help="Liga/desliga envio de alertas operacionais pelo Telegram nesta sessão.",
+        )
+
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            if st.button("📤 Testar Telegram", key=f"{section_key}_test"):
+                try:
+                    success, message = run_async_task_sync(
+                        telegram_bot.send_custom_message("🧪 Teste das notificações do bot trader.")
+                    )
+                    if success:
+                        st.success("Mensagem de teste enviada com sucesso.")
+                    else:
+                        st.error(message)
+                except Exception as exc:
+                    st.error(f"Falha ao testar Telegram: {exc}")
+        with action_col2:
+            if not has_env_secrets and st.button("🧹 Limpar Configuração da Sessão", key=f"{section_key}_clear"):
+                telegram_bot.disable()
+                st.session_state.telegram_notifications = False
+                st.success("Configuração temporária do Telegram removida desta sessão.")
+                st.rerun()
+
+        if has_env_secrets:
+            st.caption("Telegram configurado por variáveis de ambiente. Para trocar os dados, ajuste o ambiente do deploy.")
+        else:
+            st.caption("Telegram configurado apenas nesta sessão da dashboard.")
+        return
+
+    with st.expander("Configurar Telegram nesta aba", expanded=False):
+        st.markdown(
+            """
+            1. Crie o bot no `@BotFather`
+            2. Obtenha o `Chat ID`
+            3. Salve aqui para receber alertas nesta sessão
+            """
+        )
+        tg_col1, tg_col2 = st.columns(2)
+        with tg_col1:
+            telegram_token = st.text_input(
+                "Token do Bot",
+                type="password",
+                key=f"{section_key}_token",
+                help="Token gerado pelo @BotFather.",
+            )
+        with tg_col2:
+            telegram_chat_id = st.text_input(
+                "Chat ID",
+                key=f"{section_key}_chat_id",
+                help="ID do chat ou canal que vai receber os alertas.",
+            )
+
+        action_col1, action_col2 = st.columns(2)
+        with action_col1:
+            if st.button("✅ Salvar Telegram", key=f"{section_key}_save"):
+                if telegram_token and telegram_chat_id:
+                    success, message = telegram_bot.configure(telegram_token, telegram_chat_id)
+                    if success:
+                        st.session_state.telegram_notifications = True
+                        st.success("Telegram configurado com sucesso para esta sessão.")
+                        st.rerun()
+                    else:
+                        st.error(message)
+                else:
+                    st.warning("Preencha Token e Chat ID.")
+        with action_col2:
+            if telegram_token and telegram_chat_id and st.button("📤 Testar Agora", key=f"{section_key}_test_temp"):
+                success, message = telegram_bot.configure(telegram_token, telegram_chat_id)
+                if success:
+                    try:
+                        sent, sent_message = run_async_task_sync(
+                            telegram_bot.send_custom_message("🧪 Teste das notificações do bot trader.")
+                        )
+                        if sent:
+                            st.success("Mensagem de teste enviada.")
+                        else:
+                            st.error(sent_message)
+                    except Exception as exc:
+                        st.error(f"Falha ao testar Telegram: {exc}")
+                else:
+                    st.error(message)
+
+
 def render_trader_bot_runtime_controls(
     section_key: str = "bot_trader_runtime",
     allow_start: bool = True,
@@ -1085,7 +1268,7 @@ def render_trader_bot_runtime_controls(
     with bot_runtime_col4:
         st.metric(
             "Entrypoint",
-            Path(trader_bot_state.get("entrypoint", "start_telegram_bot.py")).name,
+            Path(trader_bot_state.get("entrypoint", "bot_runner.py")).name,
         )
 
     if runtime_db_state:
@@ -1165,7 +1348,7 @@ def render_trader_bot_runtime_controls(
         st.warning(block_reason or "Runtime bloqueado para esta conta.")
 
     st.caption(
-        "Controle manual do processo local via start_telegram_bot.py. "
+        "Controle manual do processo local via bot_runner.py. "
         "Use para subir ou derrubar o bot trader sem sair da dashboard. "
         "O botão de ligar injeta TESTNET=true/false conforme o modo escolhido."
     )
@@ -2329,10 +2512,11 @@ def render_market_signal_history(symbol: str, timeframe: str, require_volume: bo
 
 def render_multiuser_workspace_tab():
     workspace_user = get_authenticated_dashboard_user()
+    admin_session_active = is_admin_dashboard_session_active()
     st.subheader("👤 Meu Workspace")
     st.caption("Área isolada por usuário para contas, risco, credenciais e monitoramento operacional.")
 
-    if not workspace_user:
+    if not workspace_user and not admin_session_active:
         st.info("Faça login na barra lateral para acessar seu workspace multiusuário.")
         st.markdown(
             """
@@ -2348,6 +2532,82 @@ def render_multiuser_workspace_tab():
             - faz login na barra lateral em `Workspace Multiusuário`
             """
         )
+        return
+
+    if not workspace_user and admin_session_active:
+        st.success("Sessão Admin ativa. Todas as ações da dashboard estão liberadas para uso operacional.")
+        st.info(
+            "O login do Workspace continua disponível apenas se você quiser simular a experiência do usuário final. "
+            "Como admin, você já pode operar e configurar o sistema sem esse login."
+        )
+        summary = {}
+        overview_rows: List[Dict[str, Any]] = []
+        try:
+            summary = db.get_multiuser_dashboard_summary()
+            overview_rows = db.get_multiuser_account_overview(limit=20)
+        except Exception as admin_workspace_exc:
+            st.warning(f"Não foi possível carregar o resumo multiusuário: {admin_workspace_exc}")
+
+        admin_col1, admin_col2, admin_col3, admin_col4, admin_col5 = st.columns(5)
+        with admin_col1:
+            st.metric("Contas Ativas", int(summary.get("active_accounts", 0) or 0))
+        with admin_col2:
+            st.metric("Paper Only", int(summary.get("paper_accounts", 0) or 0))
+        with admin_col3:
+            st.metric("Bloqueadas", int(summary.get("blocked_accounts", 0) or 0))
+        with admin_col4:
+            st.metric("Erros 24h", int(summary.get("operational_error_accounts", 0) or 0))
+        with admin_col5:
+            st.metric("Mismatch", int(summary.get("mismatch_accounts", 0) or 0))
+
+        shortcut_col1, shortcut_col2, shortcut_col3 = st.columns(3)
+        with shortcut_col1:
+            if st.button("Abrir Admin", key="workspace_admin_shortcut"):
+                st.session_state.default_tab = "admin"
+                st.session_state.dashboard_main_section = "👑 Admin"
+                st.rerun()
+        with shortcut_col2:
+            if st.button("Abrir Bot Trader", key="workspace_bot_shortcut"):
+                st.session_state.default_tab = "bot"
+                st.session_state.dashboard_main_section = "🤖 Bot Trader"
+                st.rerun()
+        with shortcut_col3:
+            if st.button("Abrir Mercado", key="workspace_market_shortcut"):
+                st.session_state.default_tab = "market"
+                st.session_state.dashboard_main_section = "📈 Mercado"
+                st.rerun()
+
+        if overview_rows:
+            st.markdown("### Visão Operacional das Contas")
+            overview_df = pd.DataFrame(overview_rows)
+            preferred_columns = [
+                "user_id",
+                "account_id",
+                "account_alias",
+                "exchange",
+                "status",
+                "live_enabled",
+                "paper_enabled",
+                "risk_mode",
+                "permission_status",
+                "token_status",
+                "reconciliation_status",
+                "open_positions",
+                "pending_orders",
+            ]
+            display_columns = [column for column in preferred_columns if column in overview_df.columns]
+            st.dataframe(overview_df[display_columns], use_container_width=True, hide_index=True)
+        else:
+            st.caption("Nenhuma conta operacional encontrada ainda. Você pode criá-las em `Admin > Contas`.")
+
+        with st.expander("Por que o login do Workspace continua aparecendo?", expanded=False):
+            st.markdown(
+                """
+                - `Admin` autenticado tem bypass global para operação e configuração
+                - `Workspace` continua existindo para representar a jornada do usuário final
+                - você só precisa usar o login do Workspace se quiser validar permissões e experiência do cliente
+                """
+            )
         return
 
     user_id = int(workspace_user["user_id"])
@@ -2832,6 +3092,7 @@ def render_multiuser_workspace_tab():
                 if changed:
                     refreshed_auth = dict(workspace_user)
                     refreshed_auth["require_password_change"] = False
+                    refreshed_auth["session_token"] = workspace_user.get("session_token")
                     st.session_state.dashboard_user_auth = refreshed_auth
                     st.success("Senha atualizada com sucesso.")
                 else:
@@ -2914,9 +3175,10 @@ def main():
         runtime_bootstrap_error = "Runtime de mercado indisponível no momento."
 
     if ProductionConfig.ENABLE_DASHBOARD_BACKGROUND_BOT:
-        logger.warning("ENABLE_DASHBOARD_BACKGROUND_BOT foi definido, mas o modo recomendado e executar o bot por start_telegram_bot.py")
+        logger.warning("ENABLE_DASHBOARD_BACKGROUND_BOT foi definido, mas o modo recomendado e executar o bot por bot_runner.py")
 
     dashboard_user = get_authenticated_dashboard_user()
+    admin_session_active = is_admin_dashboard_session_active()
     dashboard_sections = [
         ("workspace", "👤 Workspace"),
         ("market", "📈 Mercado"),
@@ -2934,7 +3196,12 @@ def main():
     }
     default_dashboard_section = legacy_dashboard_section_map.get(raw_default_dashboard_section, raw_default_dashboard_section)
     if default_dashboard_section not in {section_id for section_id, _ in dashboard_sections}:
-        default_dashboard_section = "workspace" if not dashboard_user else "market"
+        if dashboard_user:
+            default_dashboard_section = "market"
+        elif admin_session_active:
+            default_dashboard_section = "admin"
+        else:
+            default_dashboard_section = "workspace"
 
     if "market_view_mode" not in st.session_state:
         if raw_default_dashboard_section == "futures":
@@ -2944,7 +3211,7 @@ def main():
 
     default_dashboard_index = next(
         (index for index, (section_id, _) in enumerate(dashboard_sections) if section_id == default_dashboard_section),
-        0 if not dashboard_user else 1,
+        1 if dashboard_user else (4 if admin_session_active else 0),
     )
     sidebar_selected_dashboard_label = str(
         st.session_state.get("dashboard_main_section") or dashboard_section_labels[default_dashboard_index]
@@ -2991,19 +3258,37 @@ def main():
             clear_dashboard_user_session()
             st.rerun()
     else:
+        if admin_session_active:
+            st.sidebar.success("Sessão Admin ativa: acesso total liberado.")
+            st.sidebar.caption(
+                "O login do Workspace abaixo é opcional e serve apenas para testar a jornada do usuário final."
+            )
         with st.sidebar.form("dashboard_user_login_form"):
-            st.text_input("Login do Workspace", key="dashboard_user_login")
-            st.text_input("Senha do Workspace", type="password", key="dashboard_user_password")
+            login_value = st.text_input("Login do Workspace", key="dashboard_user_login")
+            password_value = st.text_input("Senha do Workspace", type="password", key="dashboard_user_password")
             if st.form_submit_button("Entrar no Workspace"):
+                st.session_state.dashboard_user_auth_error = ""
                 authenticated_user = db.authenticate_dashboard_user(
-                    login_name=st.session_state.get("dashboard_user_login"),
-                    password=st.session_state.get("dashboard_user_password"),
+                    login_name=login_value,
+                    password=password_value,
                 )
                 if authenticated_user:
-                    authenticated_user["expires_at"] = (
+                    session_expires_at = (
                         now_brazil() + timedelta(hours=ProductionConfig.DASHBOARD_USER_SESSION_TIMEOUT_HOURS)
                     ).isoformat()
+                    authenticated_user["expires_at"] = session_expires_at
+                    try:
+                        session_token = db.create_dashboard_user_session(
+                            user_id=int(authenticated_user["user_id"]),
+                            login_name=str(authenticated_user.get("login_name") or login_value),
+                            expires_at=session_expires_at,
+                        )
+                        authenticated_user["session_token"] = session_token
+                        _set_persistent_dashboard_session_token(session_token)
+                    except Exception:
+                        logger.warning("Falha ao criar sessao persistente da dashboard.", exc_info=True)
                     st.session_state.dashboard_user_auth = authenticated_user
+                    st.session_state.dashboard_user_login = ""
                     st.session_state.dashboard_user_password = ""
                     st.session_state.dashboard_user_auth_error = ""
                     st.rerun()
@@ -4077,86 +4362,8 @@ def main():
         except Exception:
             return 0
 
-    # Telegram Configuration Card (if not configured)
-    has_secrets_main = bool(os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"))
-    main_telegram_bot = None
-    if show_live_sidebar_controls and is_telegram_service_available():
-        main_telegram_bot = get_or_init_session_telegram_bot()
-
-    if show_live_sidebar_controls and main_telegram_bot and not main_telegram_bot.is_configured() and not has_secrets_main:
-        with st.expander("📱 Configurar Notificações Telegram", expanded=False):
-            st.markdown("Configure o bot do Telegram para receber alertas de sinais em tempo real!")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                telegram_token_main = st.text_input(
-                    "🤖 Token do Bot",
-                    type="password",
-                    placeholder="1234567890:ABC-def_GhIjKlMnOpQrStUvWxYz",
-                    help="1. Acesse @BotFather no Telegram\n2. Digite /newbot\n3. Siga as instruções\n4. Cole o token aqui",
-                    key="telegram_token_main"
-                )
-
-            with col2:
-                telegram_chat_id_main = st.text_input(
-                    "💬 Chat ID",
-                    placeholder="-1001234567890 ou 123456789",
-                    help="1. Adicione @userinfobot ao seu chat\n2. Digite /start\n3. Cole o Chat ID aqui",
-                    key="telegram_chat_id_main"
-                )
-
-            col1, col2, col3 = st.columns([1, 1, 2])
-
-            with col1:
-                if st.button("✅ Configurar", key="config_telegram_main"):
-                    if telegram_token_main and telegram_chat_id_main:
-                        success, message = main_telegram_bot.configure(
-                            telegram_token_main,
-                            telegram_chat_id_main
-                        )
-                        if success:
-                            st.session_state.telegram_notifications = True
-                            try:
-                                success, message = run_async_task_sync(
-                                    main_telegram_bot.test_connection()
-                                )
-                                if success:
-                                    st.success("✅ Telegram configurado com sucesso!")
-                                    st.rerun()
-                                else:
-                                    st.error(f"❌ Erro: {message}")
-                            except Exception as e:
-                                st.error(f"❌ Erro ao testar: {str(e)}")
-                        else:
-                            st.error(f"❌ {message}")
-                    else:
-                        st.warning("⚠️ Preencha ambos os campos")
-
-            with col2:
-                if telegram_token_main and telegram_chat_id_main:
-                    if st.button("📤 Testar", key="test_telegram_main"):
-                        temp_bot = main_telegram_bot
-                        success, message = temp_bot.configure(
-                            telegram_token_main,
-                            telegram_chat_id_main
-                        )
-                        if success:
-                            try:
-                                success, message = run_async_task_sync(
-                                    temp_bot.send_custom_message("🧪 Teste do bot de trading!")
-                                )
-                                if success:
-                                    st.success("✅ Mensagem enviada!")
-                                else:
-                                    st.error(f"❌ {message}")
-                            except Exception as e:
-                                st.error(f"❌ Erro: {str(e)}")
-                        else:
-                            st.error(f"❌ {message}")
-
-            with col3:
-                st.info("💡 **Como configurar:**\n1. Crie um bot no @BotFather\n2. Obtenha seu Chat ID no @userinfobot\n3. Configure aqui")
+    if show_live_sidebar_controls:
+        st.caption("Notificações Telegram foram movidas para a aba `Bot Trader`, junto com o runtime do bot.")
 
     # Status indicators for main symbol - renderizar apenas na visao de operacao de mercado
     futures_tab1 = futures_tab2 = futures_tab3 = None
@@ -4787,7 +4994,7 @@ def main():
         with context_col3:
             st.metric("Familia", runtime_family_label)
         with context_col4:
-            st.metric("Telegram Token", "OK" if ProductionConfig.TELEGRAM_BOT_TOKEN else "PENDENTE")
+            st.metric("Telegram", "ON" if st.session_state.get("telegram_notifications") else "OPCIONAL")
 
         st.caption(
             "A configuracao analitica acima serve como referencia da sessao atual da dashboard. "
@@ -4824,8 +5031,6 @@ def main():
             )
 
         if bot_view_mode == "Runtime":
-            if not ProductionConfig.TELEGRAM_BOT_TOKEN:
-                st.warning("Configure TELEGRAM_BOT_TOKEN antes de ligar o bot trader.")
             if not websocket_library_ready:
                 st.warning("Biblioteca websockets indisponível. O bot não deve ser ligado sem streaming ativo.")
             if bot_start_block_reason:
@@ -4837,6 +5042,7 @@ def main():
                     "`Sidebar -> Entrar no Workspace` ou `Admin -> Entrar`."
                 )
 
+            render_bot_telegram_notifications_panel(section_key="bot_runtime_notifications")
             st.markdown("### ▶️ Runtime")
             render_trader_bot_runtime_controls(
                 section_key="bot_hub",
@@ -4854,7 +5060,7 @@ def main():
                     f"Workspace ativo: {'sim' if workspace_session_active else 'nao'}\n\n"
                     f"Admin autenticado: {'sim' if admin_session_active else 'nao'}\n\n"
                     f"Sessão operadora: {operator_session_label}\n\n"
-                    f"Token do bot trader: {'ok' if ProductionConfig.TELEGRAM_BOT_TOKEN else 'pendente'}\n\n"
+                    f"Telegram opcional: {'configurado' if st.session_state.get('telegram_notifications') else 'nao configurado'}\n\n"
                     f"Biblioteca Telegram: {'ok' if telegram_library_ready else 'pendente'}\n\n"
                     f"Biblioteca WebSocket: {'ok' if websocket_library_ready else 'pendente'}\n\n"
                     f"Processo em execucao: {'sim' if bot_process_state.get('running') else 'nao'}"
@@ -4875,8 +5081,6 @@ def main():
                 st.warning("Biblioteca Telegram indisponível neste ambiente. O runtime pode subir sem comandos interativos completos.")
             if not websocket_library_ready:
                 st.warning("Biblioteca websockets indisponível. Sem ela o bot não mantém feed constante de candles.")
-            if not ProductionConfig.TELEGRAM_BOT_TOKEN:
-                st.warning("TELEGRAM_BOT_TOKEN ainda não está configurado no ambiente.")
             if bot_process_state.get("running"):
                 st.success(f"Bot trader ativo com PID {bot_process_state.get('pid')}.")
             else:
@@ -7772,7 +7976,7 @@ def main():
                 2. Entre com essa senha no bloco de autenticação Admin abaixo.
                 3. Usuários podem criar conta em `Sidebar -> Criar Conta Agora`.
                 4. Em `Visão Admin -> Acessos`, ajuste plano/assinatura (semanal, mensal, anual).
-                5. O bot só liga quando a assinatura estiver ativa.
+                5. O bot só exige assinatura ativa para usuários comuns; o Admin tem bypass operacional.
                 6. Em seguida, cadastre conta/risco/credenciais nas visões `Contas` e `Resumo`.
                 """
             )
@@ -8522,7 +8726,7 @@ def main():
                 with bot_runtime_col3:
                     st.metric(
                         "Entrypoint",
-                        Path(trader_bot_state.get("entrypoint", "start_telegram_bot.py")).name,
+                        Path(trader_bot_state.get("entrypoint", "bot_runner.py")).name,
                     )
 
                 st.caption(

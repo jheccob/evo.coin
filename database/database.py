@@ -909,6 +909,22 @@ class TradingDatabase:
 
         cursor.execute(
             '''
+            CREATE TABLE IF NOT EXISTS dashboard_user_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_token TEXT NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                login_name TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked BOOLEAN NOT NULL DEFAULT FALSE,
+                last_seen_at TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            '''
+        )
+
+        cursor.execute(
+            '''
             CREATE TABLE IF NOT EXISTS dashboard_user_subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL UNIQUE,
@@ -1146,6 +1162,12 @@ class TradingDatabase:
             '''
             CREATE INDEX IF NOT EXISTS idx_dashboard_user_access_login
             ON dashboard_user_access(login_name)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_user_sessions_lookup
+            ON dashboard_user_sessions(user_id, expires_at, revoked)
             '''
         )
         cursor.execute(
@@ -1559,6 +1581,29 @@ class TradingDatabase:
         finally:
             conn.close()
 
+    def _build_dashboard_auth_response(self, payload: Dict[str, Any], *, expires_at_override: Optional[Any] = None) -> Dict[str, Any]:
+        subscription_snapshot = self._build_subscription_snapshot(
+            plan_code=payload.get("subscription_plan_code"),
+            status=payload.get("subscription_status"),
+            started_at=payload.get("subscription_started_at"),
+            expires_at=payload.get("subscription_expires_at"),
+        )
+        response = {
+            "id": int(payload["id"]),
+            "user_id": int(payload["user_id"]),
+            "login_name": payload.get("login_name"),
+            "is_active": bool(payload.get("is_active")),
+            "require_password_change": bool(payload.get("require_password_change")),
+            "last_login_at": payload.get("last_login_at"),
+            "username": payload.get("telegram_username"),
+            "first_name": payload.get("telegram_first_name"),
+            "plan": payload.get("telegram_plan"),
+            "subscription": subscription_snapshot,
+        }
+        if expires_at_override is not None:
+            response["expires_at"] = self._to_utc_datetime(expires_at_override).isoformat()
+        return response
+
     def authenticate_dashboard_user(self, login_name: str, password: str) -> Optional[Dict[str, Any]]:
         normalized_login = self._normalize_dashboard_login_name(login_name)
         if not normalized_login or not password:
@@ -1610,25 +1655,135 @@ class TradingDatabase:
                 ''',
                 (last_login_at, int(payload["id"])),
             )
-            subscription_snapshot = self._build_subscription_snapshot(
-                plan_code=payload.get("subscription_plan_code"),
-                status=payload.get("subscription_status"),
-                started_at=payload.get("subscription_started_at"),
-                expires_at=payload.get("subscription_expires_at"),
+            payload["last_login_at"] = last_login_at
+            conn.commit()
+            return self._build_dashboard_auth_response(payload)
+        finally:
+            conn.close()
+
+    def create_dashboard_user_session(
+        self,
+        *,
+        user_id: int,
+        login_name: str,
+        expires_at: Any,
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        expires_dt = self._to_utc_datetime(expires_at)
+        if not expires_dt:
+            raise ValueError("expires_at invalido para sessao persistente da dashboard.")
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO dashboard_user_sessions (
+                    session_token, user_id, login_name, expires_at, revoked, last_seen_at, updated_at
+                ) VALUES (?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
+                ''',
+                (
+                    token,
+                    int(user_id),
+                    str(login_name),
+                    expires_dt.isoformat(),
+                    datetime.now(UTC).isoformat(),
+                ),
             )
             conn.commit()
-            return {
-                "id": int(payload["id"]),
-                "user_id": int(payload["user_id"]),
-                "login_name": payload.get("login_name"),
-                "is_active": bool(payload.get("is_active")),
-                "require_password_change": bool(payload.get("require_password_change")),
-                "last_login_at": last_login_at,
-                "username": payload.get("telegram_username"),
-                "first_name": payload.get("telegram_first_name"),
-                "plan": payload.get("telegram_plan"),
-                "subscription": subscription_snapshot,
-            }
+            return token
+        finally:
+            conn.close()
+
+    def authenticate_dashboard_session(self, session_token: str) -> Optional[Dict[str, Any]]:
+        normalized_token = str(session_token or "").strip()
+        if not normalized_token:
+            return None
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT
+                    session_row.session_token,
+                    session_row.expires_at AS session_expires_at,
+                    access.*,
+                    tu.username AS telegram_username,
+                    tu.first_name AS telegram_first_name,
+                    tu.plan AS telegram_plan,
+                    sub.plan_code AS subscription_plan_code,
+                    sub.status AS subscription_status,
+                    sub.started_at AS subscription_started_at,
+                    sub.expires_at AS subscription_expires_at
+                FROM dashboard_user_sessions session_row
+                JOIN dashboard_user_access access
+                  ON access.user_id = session_row.user_id
+                LEFT JOIN telegram_users tu
+                  ON tu.telegram_id = access.user_id
+                LEFT JOIN dashboard_user_subscriptions sub
+                  ON sub.user_id = access.user_id
+                WHERE session_row.session_token = ?
+                  AND session_row.revoked = 0
+                LIMIT 1
+                ''',
+                (normalized_token,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            payload = dict(row)
+            if not bool(payload.get("is_active")):
+                return None
+
+            expires_dt = self._to_utc_datetime(payload.get("session_expires_at"))
+            if not expires_dt or expires_dt <= datetime.now(UTC):
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_user_sessions
+                    SET revoked = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE session_token = ?
+                    ''',
+                    (normalized_token,),
+                )
+                conn.commit()
+                return None
+
+            current_seen = datetime.now(UTC).isoformat()
+            cursor.execute(
+                '''
+                UPDATE dashboard_user_sessions
+                SET last_seen_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE session_token = ?
+                ''',
+                (current_seen, normalized_token),
+            )
+            conn.commit()
+            response = self._build_dashboard_auth_response(payload, expires_at_override=expires_dt)
+            response["session_token"] = normalized_token
+            return response
+        finally:
+            conn.close()
+
+    def revoke_dashboard_user_session(self, session_token: str) -> bool:
+        normalized_token = str(session_token or "").strip()
+        if not normalized_token:
+            return False
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE dashboard_user_sessions
+                SET revoked = 1, updated_at = CURRENT_TIMESTAMP
+                WHERE session_token = ?
+                ''',
+                (normalized_token,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
