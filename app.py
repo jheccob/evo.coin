@@ -129,12 +129,6 @@ class _TerminalBacktestEngine:
         return max(500, min(estimated, 100000))
 
     @staticmethod
-    def _resolve_backtest_csv_reference_path(symbol: str, timeframe: str) -> Path:
-        from market_data import resolve_history_csv_path
-
-        return Path(resolve_history_csv_path(symbol, timeframe))
-
-    @staticmethod
     def _load_backtest_from_shared_stream(symbol: str, timeframe: str, candles: int) -> tuple[pd.DataFrame | None, str | None]:
         runtime_bot = st.session_state.get("trading_bot")
         if runtime_bot is None:
@@ -169,78 +163,54 @@ class _TerminalBacktestEngine:
             return None, None
 
     @classmethod
-    def _load_backtest_from_websocket_path(
+    def _load_backtest_market_series(
         cls,
         symbol: str,
         timeframe: str,
         candles: int,
         *,
         testnet: bool,
-        allow_csv_bootstrap: bool,
-        require_local_csv: bool,
     ) -> tuple[pd.DataFrame, str]:
         shared_df, shared_source = cls._load_backtest_from_shared_stream(symbol, timeframe, candles)
         if shared_df is not None:
             return shared_df, shared_source or "shared_websocket_buffer"
 
-        csv_reference_path = cls._resolve_backtest_csv_reference_path(symbol, timeframe)
-        if not allow_csv_bootstrap:
-            raise RuntimeError(
-                "Backtest da dashboard usa caminho websocket e bloqueia fallback REST. "
-                f"O buffer compartilhado nao tem {candles} candles para {symbol} {timeframe}. "
-                f"Suba o CSV historico em {csv_reference_path} ou habilite BACKTEST_USE_LOCAL_CSV."
-            )
-
-        if require_local_csv and not csv_reference_path.exists():
-            raise RuntimeError(
-                "Backtest da dashboard usa caminho websocket + bootstrap local e bloqueia fallback REST. "
-                f"Arquivo CSV obrigatorio nao encontrado: {csv_reference_path}. "
-                "Suba os historicos no volume antes de executar."
-            )
-
-        from market_data import fetch_historical_candles_from_csv
-        from trading_bot_websocket import StreamlinedTradingBot
+        from market_data import fetch_historical_candles
 
         try:
-            bootstrap_df = fetch_historical_candles_from_csv(symbol, timeframe, total_limit=candles)
-        except FileNotFoundError as exc:
+            historical_df = fetch_historical_candles(
+                symbol,
+                timeframe,
+                total_limit=candles,
+                testnet=bool(testnet),
+            )
+        except Exception as exc:
+            error_message = str(exc or "").strip()
+            lowered = error_message.lower()
+            if "451" in error_message or "restricted location" in lowered:
+                raise RuntimeError(
+                    "Backtest historico indisponivel neste ambiente: a Binance bloqueou o endpoint por regiao. "
+                    "Use a dashboard em um ambiente permitido ou rode o backtest localmente."
+                ) from exc
             raise RuntimeError(
-                "Backtest da dashboard usa caminho websocket + bootstrap local e bloqueia fallback REST. "
-                f"Arquivo CSV obrigatorio nao encontrado: {csv_reference_path}."
+                f"Falha ao carregar historico da exchange para {symbol} {timeframe}: {error_message or exc}"
             ) from exc
 
-        if bootstrap_df is None or bootstrap_df.empty or len(bootstrap_df) < candles:
+        if historical_df is None or historical_df.empty:
             raise RuntimeError(
-                "CSV historico insuficiente para o backtest solicitado. "
-                f"Necessario: {candles} candles | disponivel: {0 if bootstrap_df is None else len(bootstrap_df)}. "
-                f"Arquivo: {csv_reference_path}."
+                f"Nenhum candle historico retornado pela exchange para {symbol} {timeframe}."
             )
 
-        temp_stream = StreamlinedTradingBot(
-            symbol=symbol,
-            timeframe=timeframe,
-            max_candles=max(candles, 300),
-            testnet=bool(testnet),
-            allow_rest_fallback=False,
-            bootstrap_df=bootstrap_df,
-        )
-        try:
-            df = temp_stream.get_market_data(
-                limit=candles,
-                timeout=2.0,
-                include_current_candle=False,
-            )
-        finally:
-            with contextlib.suppress(Exception):
-                temp_stream.stop()
-
-        if df is None or df.empty or len(df) < candles:
-            raise RuntimeError(
-                "Falha ao montar a serie historica pelo caminho websocket + bootstrap local. "
-                f"Esperado: {candles} candles | retornado: {0 if df is None else len(df)}."
+        if len(historical_df) < candles:
+            logger.warning(
+                "Historico retornado abaixo do solicitado para backtest %s %s: solicitado=%s retornado=%s",
+                symbol,
+                timeframe,
+                candles,
+                len(historical_df),
             )
 
-        return df.reset_index(drop=True), "websocket_bootstrap_csv"
+        return historical_df.reset_index(drop=True), "exchange_historical_api"
 
     @staticmethod
     def _build_trade_summary_df(trades, initial_balance: float) -> pd.DataFrame:
@@ -382,17 +352,12 @@ class _TerminalBacktestEngine:
         fee_pct = float(kwargs.get("fee_pct", getattr(runtime_config, "FEE_PCT", 0.08)) or 0.08)
         candles = int(kwargs.get("candles") or self._estimate_candles(timeframe, start_date, end_date))
         backtest_use_testnet = bool(getattr(runtime_config, "BACKTEST_USE_TESTNET", False))
-        backtest_use_local_csv = bool(getattr(runtime_config, "BACKTEST_USE_LOCAL_CSV", True))
-        backtest_require_local_csv = bool(getattr(runtime_config, "BACKTEST_REQUIRE_LOCAL_CSV", True))
-        csv_reference_path = self._resolve_backtest_csv_reference_path(symbol, timeframe)
 
-        backtest_df, backtest_data_source = self._load_backtest_from_websocket_path(
+        backtest_df, backtest_data_source = self._load_backtest_market_series(
             symbol=symbol,
             timeframe=timeframe,
             candles=candles,
             testnet=backtest_use_testnet,
-            allow_csv_bootstrap=backtest_use_local_csv,
-            require_local_csv=backtest_require_local_csv,
         )
 
         capture = io.StringIO()
@@ -404,7 +369,7 @@ class _TerminalBacktestEngine:
                     candles=candles,
                     fee_pct=fee_pct,
                     testnet=backtest_use_testnet,
-                    use_local_csv=backtest_use_local_csv,
+                    use_local_csv=False,
                     preloaded_df=backtest_df,
                 )
         except Exception:
@@ -5115,8 +5080,8 @@ def main():
             "Não representa sinal operacional ao vivo."
         )
         st.caption(
-            f"Origem de dados da dashboard: caminho websocket com buffer compartilhado e/ou bootstrap local em {AppConfig.HISTORY_DATA_DIR}. "
-            "Fallback REST histórico fica bloqueado para preservar comparabilidade e evitar erro 451/403."
+            "Origem de dados da dashboard: buffer websocket compartilhado quando houver candles suficientes; "
+            "caso contrario, historico direto da exchange. CSV local nao e mais obrigatorio."
         )
         backtest_engine = get_or_init_backtest_engine()
         max_backtest_days = 730
@@ -8113,7 +8078,8 @@ def main():
                     st.metric("Arquivos Históricos", len(list_history_data_files(limit=500)))
 
                 st.caption(
-                    "Use este bloco para popular o volume persistente do Railway com os CSVs usados no bootstrap do bot e no backtest da dashboard."
+                    "Use este bloco apenas se quiser manter arquivos historicos auxiliares no volume. "
+                    "O bot e o backtest nao dependem mais de CSV local por padrao."
                 )
 
                 history_files = list_history_data_files(limit=200)
@@ -8122,7 +8088,7 @@ def main():
                 else:
                     st.info(
                         f"Nenhum histórico encontrado em {history_dir}. "
-                        "Envie pelo menos o arquivo do ativo/timeframe principal antes de rodar backtests longos."
+                        "Isso nao bloqueia mais o runtime do bot. So use arquivos aqui se quiser manter historicos auxiliares."
                     )
 
                 uploaded_history_files = st.file_uploader(

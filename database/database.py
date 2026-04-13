@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 from typing import List, Dict, Optional, Any
 from utils.timezone_utils import get_brazil_datetime_naive, format_brazil_time
@@ -38,6 +39,26 @@ _SQLITE_NOW_DATETIME_PATTERN = re.compile(
 def _looks_like_postgres_url(database_url: str) -> bool:
     normalized = str(database_url or "").strip().lower()
     return normalized.startswith(("postgres://", "postgresql://"))
+
+
+def _safe_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _safe_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _replace_literal_datetime_now(match: re.Match) -> str:
@@ -190,6 +211,14 @@ class TradingDatabase:
         self.db_path = db_path
         self.database_url = str(os.getenv("DATABASE_URL", "")).strip()
         self.backend = "postgres" if _looks_like_postgres_url(self.database_url) else "sqlite"
+        self.postgres_connect_timeout_sec = max(2, _safe_env_int("POSTGRES_CONNECT_TIMEOUT_SEC", 10))
+        self.postgres_connect_retries = max(1, _safe_env_int("POSTGRES_CONNECT_RETRIES", 10))
+        self.postgres_retry_delay_sec = max(0.5, _safe_env_float("POSTGRES_RETRY_DELAY_SEC", 3.0))
+        self.postgres_retry_backoff = max(1.0, _safe_env_float("POSTGRES_RETRY_BACKOFF", 1.5))
+        self.postgres_retry_max_delay_sec = max(
+            self.postgres_retry_delay_sec,
+            _safe_env_float("POSTGRES_RETRY_MAX_DELAY_SEC", 15.0),
+        )
         if self.backend == "postgres" and psycopg is None:
             print(
                 "[database] DATABASE_URL detectada, mas psycopg nao esta disponivel. "
@@ -200,12 +229,59 @@ class TradingDatabase:
         if self.backend == "sqlite":
             os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
         self.init_database()
+
+    @staticmethod
+    def _is_retryable_postgres_error(exc: Exception) -> bool:
+        message = str(exc or "").strip().lower()
+        retryable_tokens = (
+            "temporary failure in name resolution",
+            "name or service not known",
+            "could not translate host name",
+            "connection refused",
+            "connection timed out",
+            "timeout expired",
+            "server closed the connection unexpectedly",
+            "network is unreachable",
+            "could not connect",
+            "connection is bad",
+            "connection reset",
+            "connection failed",
+        )
+        return any(token in message for token in retryable_tokens)
+
+    def _connect_postgres_with_retry(self):
+        last_exc: Optional[Exception] = None
+        delay = float(self.postgres_retry_delay_sec)
+
+        for attempt in range(1, int(self.postgres_connect_retries) + 1):
+            try:
+                conn = psycopg.connect(
+                    self.database_url,
+                    connect_timeout=int(self.postgres_connect_timeout_sec),
+                )
+                return _PostgresConnection(conn)
+            except Exception as exc:
+                last_exc = exc
+                is_retryable = self._is_retryable_postgres_error(exc)
+                if attempt >= int(self.postgres_connect_retries) or not is_retryable:
+                    break
+
+                print(
+                    "[database] falha ao conectar no postgres "
+                    f"(tentativa {attempt}/{self.postgres_connect_retries}): {exc}. "
+                    f"Nova tentativa em {delay:.1f}s.",
+                    flush=True,
+                )
+                time.sleep(delay)
+                delay = min(delay * float(self.postgres_retry_backoff), float(self.postgres_retry_max_delay_sec))
+
+        assert last_exc is not None
+        raise last_exc
     
     def get_connection(self):
         """Criar conexao com banco de dados"""
         if self.backend == "postgres":
-            conn = psycopg.connect(self.database_url)
-            return _PostgresConnection(conn)
+            return self._connect_postgres_with_retry()
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row  # Para retornar dicionarios
         self._configure_sqlite_connection(conn)

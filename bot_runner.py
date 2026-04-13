@@ -493,14 +493,14 @@ def _load_bootstrap_candles():
         )
         print(f"Bootstrap local carregado: {len(bootstrap_df)} candles.")
         return bootstrap_df
-    except FileNotFoundError as exc:
-        if bool(getattr(config, "BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP", True)):
-            raise RuntimeError(
-                f"Bootstrap do bot bloqueado: CSV local obrigatorio nao encontrado em {getattr(config, 'HISTORY_DATA_DIR', 'data/history')} "
-                f"para {config.SYMBOL} {config.TIMEFRAME}. "
-                "Suba o arquivo historico correspondente ou desative BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP."
-            ) from exc
-        print("Aviso: CSV de bootstrap nao encontrado. Bot iniciara apenas com buffer do websocket.")
+    except FileNotFoundError:
+        if bool(getattr(config, "BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP", False)):
+            print(
+                "Aviso: BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP estava ativo, mas o runtime atual nao exige mais CSV obrigatorio. "
+                "O bot iniciara apenas com buffer do websocket."
+            )
+        else:
+            print("Aviso: CSV de bootstrap nao encontrado. Bot iniciara apenas com buffer do websocket.")
         return None
 
 
@@ -740,6 +740,19 @@ def main() -> None:
 
                 time.sleep(config.POLL_SECONDS)
             except Exception as e:
+                error_message = str(e or "")
+                if "Sem dados no websocket e fallback REST desativado" in error_message:
+                    print("Aguardando aquecimento do feed websocket...")
+                    _persist_runtime_state(
+                        snapshot=runtime_snapshot,
+                        status="waiting_websocket_buffer",
+                        timestamp_value=ultimo_timestamp,
+                        position=posicao_atual,
+                        risk_state=risk_state,
+                        last_error=error_message,
+                    )
+                    time.sleep(min(max(int(config.POLL_SECONDS), 2), 10))
+                    continue
                 print("Erro:", e)
                 _persist_runtime_state(
                     snapshot=runtime_snapshot,

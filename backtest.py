@@ -6,7 +6,7 @@ from datetime import timezone
 import pandas as pd
 
 import config
-from market_data import fetch_historical_candles, fetch_historical_candles_from_csv
+from market_data import fetch_historical_candles
 from position_manager import create_position, evaluate_open_position
 from strategy_engine import StrategyParams, calculate_indicators, generate_entry_signal
 
@@ -37,20 +37,16 @@ def run_backtest(
     candles: int,
     fee_pct: float,
     testnet: bool = False,
-    use_local_csv: bool = True,
+    use_local_csv: bool = False,
     preloaded_df: pd.DataFrame | None = None,
 ):
     params = StrategyParams()
 
     if preloaded_df is not None:
         df = preloaded_df.copy()
-    elif use_local_csv:
-        try:
-            df = fetch_historical_candles_from_csv(symbol, timeframe, total_limit=candles)
-        except FileNotFoundError:
-            print("Aviso: arquivo local não encontrado. Usando API...")
-            df = fetch_historical_candles(symbol, timeframe, total_limit=candles, testnet=testnet)
     else:
+        if use_local_csv:
+            print("Aviso: modo atual do backtest ignora CSV local e usa historico direto da exchange.")
         df = fetch_historical_candles(symbol, timeframe, total_limit=candles, testnet=testnet)
 
     df = calculate_indicators(df, params)
@@ -193,14 +189,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use-local-csv",
         action="store_true",
-        default=True,
-        help="Usar dados locais CSV (padrão: True)",
+        default=False,
+        help="Compatibilidade legada; o modo atual usa historico direto da exchange.",
     )
     parser.add_argument(
         "--no-local-csv",
         dest="use_local_csv",
         action="store_false",
-        help="Usar API em vez de CSV local",
+        help="Mantem o modo atual sem CSV local.",
     )
     args = parser.parse_args()
 
@@ -212,3 +208,4 @@ if __name__ == "__main__":
         testnet=args.testnet,
         use_local_csv=args.use_local_csv,
     )
+
