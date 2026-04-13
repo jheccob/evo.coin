@@ -9,6 +9,10 @@ import traceback
 from pathlib import Path
 
 
+def _get_bot_entrypoint(repo_root: Path) -> Path:
+    return repo_root / "bot_runner.py"
+
+
 def _run_dashboard(repo_root: Path) -> int:
     port = str(os.getenv("PORT", "8501")).strip() or "8501"
     cmd = [
@@ -30,7 +34,7 @@ def _run_dashboard(repo_root: Path) -> int:
 
 
 def _run_bot(repo_root: Path) -> int:
-    runpy.run_path(str(repo_root / "start_telegram_bot.py"), run_name="__main__")
+    runpy.run_path(str(_get_bot_entrypoint(repo_root)), run_name="__main__")
     return 0
 
 
@@ -39,7 +43,7 @@ def _run_all(repo_root: Path) -> int:
     Executa bot e dashboard no mesmo container.
     Mantem o dashboard no foreground e finaliza o bot no shutdown.
     """
-    bot_entrypoint = repo_root / "start_telegram_bot.py"
+    bot_entrypoint = _get_bot_entrypoint(repo_root)
     os.environ["TRADER_BOT_EMBEDDED"] = "1"
     print(f"[railway] starting bot process from: {bot_entrypoint}", flush=True)
     bot_process = subprocess.Popen(
@@ -77,7 +81,7 @@ def main() -> int:
 
     if mode in {"all", "both", "full"}:
         return _run_all(repo_root)
-    if mode in {"bot", "trader", "telegram"}:
+    if mode in {"bot", "trader", "telegram", "runner", "bot_runner"}:
         return _run_bot(repo_root)
     return _run_dashboard(repo_root)
 
