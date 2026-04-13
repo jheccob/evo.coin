@@ -323,6 +323,32 @@ class TradingDatabase:
                 telegram_error TEXT
             )
         ''')
+
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS backtest_websocket_candles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                candle_timestamp TEXT NOT NULL,
+                open REAL NOT NULL,
+                high REAL NOT NULL,
+                low REAL NOT NULL,
+                close REAL NOT NULL,
+                volume REAL NOT NULL,
+                source TEXT DEFAULT 'dashboard_websocket',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol, timeframe, candle_timestamp)
+            )
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_backtest_websocket_candles_lookup
+            ON backtest_websocket_candles(symbol, timeframe, candle_timestamp)
+            '''
+        )
         
         # Tabela para configurações
         cursor.execute('''
@@ -1354,6 +1380,150 @@ class TradingDatabase:
                 pass
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return [str(raw_value)]
+
+    def store_backtest_websocket_candles(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        candles: List[Dict[str, Any]],
+        source: str = "dashboard_websocket",
+    ) -> int:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_timeframe = str(timeframe or "").strip().lower()
+        if not normalized_symbol or not normalized_timeframe:
+            return 0
+
+        prepared_rows = []
+        for candle in candles or []:
+            timestamp_raw = candle.get("timestamp")
+            if timestamp_raw in (None, ""):
+                continue
+            candle_timestamp = self._to_utc_datetime(timestamp_raw)
+            if not candle_timestamp:
+                continue
+            try:
+                prepared_rows.append(
+                    (
+                        normalized_symbol,
+                        normalized_timeframe,
+                        candle_timestamp.isoformat(),
+                        float(candle.get("open", 0.0) or 0.0),
+                        float(candle.get("high", 0.0) or 0.0),
+                        float(candle.get("low", 0.0) or 0.0),
+                        float(candle.get("close", 0.0) or 0.0),
+                        float(candle.get("volume", 0.0) or 0.0),
+                        str(source or "dashboard_websocket"),
+                    )
+                )
+            except Exception:
+                continue
+
+        if not prepared_rows:
+            return 0
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            inserted = 0
+            for row in prepared_rows:
+                cursor.execute(
+                    '''
+                    INSERT OR IGNORE INTO backtest_websocket_candles (
+                        symbol, timeframe, candle_timestamp, open, high, low, close, volume, source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''',
+                    row,
+                )
+                inserted += max(0, int(cursor.rowcount or 0))
+            conn.commit()
+            return inserted
+        finally:
+            conn.close()
+
+    def get_backtest_websocket_candles(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        start_timestamp: Any = None,
+        end_timestamp: Any = None,
+    ) -> List[Dict[str, Any]]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_timeframe = str(timeframe or "").strip().lower()
+        start_value = None
+        end_value = None
+        if start_timestamp not in (None, ""):
+            parsed_start = self._to_utc_datetime(start_timestamp)
+            start_value = parsed_start.isoformat() if parsed_start else None
+        if end_timestamp not in (None, ""):
+            parsed_end = self._to_utc_datetime(end_timestamp)
+            end_value = parsed_end.isoformat() if parsed_end else None
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT symbol, timeframe, candle_timestamp, open, high, low, close, volume, source
+                FROM backtest_websocket_candles
+                WHERE symbol = ?
+                  AND timeframe = ?
+                  AND (? IS NULL OR candle_timestamp >= ?)
+                  AND (? IS NULL OR candle_timestamp <= ?)
+                ORDER BY candle_timestamp ASC
+                ''',
+                (
+                    normalized_symbol,
+                    normalized_timeframe,
+                    start_value,
+                    start_value,
+                    end_value,
+                    end_value,
+                ),
+            )
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def get_backtest_websocket_candle_coverage(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+    ) -> Dict[str, Any]:
+        normalized_symbol = str(symbol or "").strip().upper()
+        normalized_timeframe = str(timeframe or "").strip().lower()
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT
+                    COUNT(*) AS total,
+                    MIN(candle_timestamp) AS first_timestamp,
+                    MAX(candle_timestamp) AS last_timestamp
+                FROM backtest_websocket_candles
+                WHERE symbol = ?
+                  AND timeframe = ?
+                ''',
+                (normalized_symbol, normalized_timeframe),
+            )
+            raw_row = cursor.fetchone()
+            if raw_row is None:
+                row = {}
+            elif isinstance(raw_row, dict):
+                row = raw_row
+            else:
+                row = dict(raw_row)
+            return {
+                "total": int(row.get("total") or 0),
+                "first_timestamp": row.get("first_timestamp"),
+                "last_timestamp": row.get("last_timestamp"),
+            }
+        finally:
+            conn.close()
 
     def upsert_bot_runtime_state(self, runtime_data: Dict[str, Any]) -> int:
         runtime_key = str(runtime_data.get("runtime_key") or "").strip()

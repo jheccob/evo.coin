@@ -129,7 +129,96 @@ class _TerminalBacktestEngine:
         return max(500, min(estimated, 100000))
 
     @staticmethod
-    def _load_backtest_from_shared_stream(symbol: str, timeframe: str, candles: int) -> tuple[pd.DataFrame | None, str | None]:
+    def _normalize_backtest_candle_df(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        if df is None or df.empty:
+            return None
+
+        working_df = df.copy()
+        if "timestamp" not in working_df.columns:
+            return None
+        working_df["timestamp"] = pd.to_datetime(working_df["timestamp"], utc=True, errors="coerce")
+        for column in ["open", "high", "low", "close", "volume"]:
+            if column not in working_df.columns:
+                return None
+            working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
+        if "is_closed" in working_df.columns:
+            working_df = working_df[working_df["is_closed"].fillna(False).astype(bool)]
+        working_df = working_df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+        if working_df.empty:
+            return None
+        working_df = (
+            working_df.sort_values("timestamp")
+            .drop_duplicates(subset=["timestamp"], keep="last")
+            .reset_index(drop=True)
+        )
+        return working_df
+
+    @staticmethod
+    def _get_backtest_stream_clients() -> dict:
+        if "backtest_stream_clients" not in st.session_state:
+            st.session_state.backtest_stream_clients = {}
+        return st.session_state.backtest_stream_clients
+
+    @classmethod
+    def _get_or_init_backtest_stream_client(
+        cls,
+        *,
+        symbol: str,
+        timeframe: str,
+        testnet: bool,
+        max_candles: int,
+    ):
+        from trading_bot_websocket import StreamlinedTradingBot
+
+        stream_key = f"{symbol}|{timeframe}|{int(bool(testnet))}"
+        clients = cls._get_backtest_stream_clients()
+        existing_client = clients.get(stream_key)
+        if existing_client is not None:
+            current_capacity = int(getattr(existing_client, "max_candles", 0) or 0)
+            if current_capacity >= max_candles:
+                return existing_client
+            with contextlib.suppress(Exception):
+                existing_client.stop()
+
+        stream_client = StreamlinedTradingBot(
+            symbol=symbol,
+            timeframe=timeframe,
+            max_candles=max(max_candles, 500),
+            testnet=bool(testnet),
+            allow_rest_fallback=False,
+            bootstrap_df=None,
+        )
+        clients[stream_key] = stream_client
+        return stream_client
+
+    @classmethod
+    def _persist_backtest_candle_frame(
+        cls,
+        *,
+        symbol: str,
+        timeframe: str,
+        df: pd.DataFrame | None,
+        source: str,
+    ) -> int:
+        normalized_df = cls._normalize_backtest_candle_df(df)
+        if normalized_df is None or normalized_df.empty:
+            return 0
+        candle_rows = normalized_df[["timestamp", "open", "high", "low", "close", "volume"]].to_dict("records")
+        return db.store_backtest_websocket_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candle_rows,
+            source=source,
+        )
+
+    @staticmethod
+    def _load_backtest_from_shared_stream(
+        symbol: str,
+        timeframe: str,
+        candles: int,
+        *,
+        allow_partial: bool = False,
+    ) -> tuple[pd.DataFrame | None, str | None]:
         runtime_bot = st.session_state.get("trading_bot")
         if runtime_bot is None:
             return None, None
@@ -142,17 +231,24 @@ class _TerminalBacktestEngine:
             status = stream_client.get_current_status() or {}
             available_candles = int(status.get("candles") or 0)
             client_capacity = int(getattr(stream_client, "max_candles", 0) or 0)
-            if available_candles < candles or client_capacity < candles:
+            if available_candles <= 0 or client_capacity <= 0:
+                return None, None
+
+            request_limit = min(max(50, int(candles or 0)), available_candles, client_capacity)
+            if not allow_partial and request_limit < candles:
                 return None, None
 
             df = stream_client.get_market_data(
-                limit=candles,
+                limit=request_limit,
                 timeout=2.0,
                 include_current_candle=False,
             )
-            if df is None or df.empty or len(df) < candles:
+            normalized_df = _TerminalBacktestEngine._normalize_backtest_candle_df(df)
+            if normalized_df is None or normalized_df.empty:
                 return None, None
-            return df.reset_index(drop=True), "shared_websocket_buffer"
+            if not allow_partial and len(normalized_df) < candles:
+                return None, None
+            return normalized_df.reset_index(drop=True), "shared_websocket_buffer"
         except Exception:
             logger.warning(
                 "Falha ao reutilizar buffer websocket compartilhado para backtest %s %s.",
@@ -163,6 +259,110 @@ class _TerminalBacktestEngine:
             return None, None
 
     @classmethod
+    def sync_backtest_websocket_feed(
+        cls,
+        *,
+        symbol: str,
+        timeframe: str,
+        testnet: bool,
+        snapshot_limit: int = 1200,
+    ) -> dict:
+        inserted_total = 0
+        shared_snapshot, shared_source = cls._load_backtest_from_shared_stream(
+            symbol,
+            timeframe,
+            snapshot_limit,
+            allow_partial=True,
+        )
+        if shared_snapshot is not None:
+            inserted_total += cls._persist_backtest_candle_frame(
+                symbol=symbol,
+                timeframe=timeframe,
+                df=shared_snapshot,
+                source=shared_source or "shared_websocket_buffer",
+            )
+
+        dedicated_client = cls._get_or_init_backtest_stream_client(
+            symbol=symbol,
+            timeframe=timeframe,
+            testnet=bool(testnet),
+            max_candles=max(snapshot_limit, 1500),
+        )
+        dedicated_status = dedicated_client.get_current_status() or {}
+        dedicated_snapshot = None
+        with contextlib.suppress(Exception):
+            dedicated_snapshot = dedicated_client.get_market_data(
+                limit=min(max(snapshot_limit, 300), int(getattr(dedicated_client, "max_candles", snapshot_limit) or snapshot_limit)),
+                timeout=1.5,
+                include_current_candle=False,
+            )
+        inserted_total += cls._persist_backtest_candle_frame(
+            symbol=symbol,
+            timeframe=timeframe,
+            df=dedicated_snapshot,
+            source="backtest_public_websocket",
+        )
+
+        coverage = db.get_backtest_websocket_candle_coverage(symbol=symbol, timeframe=timeframe)
+        return {
+            "inserted": int(inserted_total),
+            "coverage": coverage,
+            "shared_available": 0 if shared_snapshot is None else int(len(shared_snapshot)),
+            "stream_status": dedicated_status,
+        }
+
+    @classmethod
+    def _load_backtest_from_persisted_websocket(
+        cls,
+        *,
+        symbol: str,
+        timeframe: str,
+        candles: int,
+        start_date,
+        end_date,
+    ) -> tuple[pd.DataFrame | None, dict]:
+        timeframe_delta = timedelta(minutes=cls._timeframe_to_minutes(timeframe))
+        warmup_candles = max(250, min(600, int(candles * 0.2) if candles > 0 else 250))
+        start_ts = pd.to_datetime(start_date, errors="coerce", utc=True)
+        end_ts = pd.to_datetime(end_date, errors="coerce", utc=True)
+        query_start = start_ts - (timeframe_delta * warmup_candles) if not pd.isna(start_ts) else None
+        query_end = end_ts + timeframe_delta if not pd.isna(end_ts) else None
+
+        rows = db.get_backtest_websocket_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_timestamp=query_start,
+            end_timestamp=query_end,
+        )
+        coverage = db.get_backtest_websocket_candle_coverage(symbol=symbol, timeframe=timeframe)
+        if not rows:
+            return None, coverage
+
+        df = pd.DataFrame(rows)
+        if "candle_timestamp" in df.columns and "timestamp" not in df.columns:
+            df = df.rename(columns={"candle_timestamp": "timestamp"})
+        normalized_df = cls._normalize_backtest_candle_df(df)
+        if normalized_df is None or normalized_df.empty:
+            return None, coverage
+
+        if start_ts is not None and not pd.isna(start_ts):
+            required_period_start = start_ts
+            first_timestamp = normalized_df["timestamp"].iloc[0]
+            if first_timestamp > required_period_start:
+                return None, coverage
+
+        if end_ts is not None and not pd.isna(end_ts):
+            required_period_end = end_ts
+            last_timestamp = normalized_df["timestamp"].iloc[-1]
+            if last_timestamp < required_period_end:
+                return None, coverage
+
+        if len(normalized_df) < max(300, min(candles, len(normalized_df))):
+            return None, coverage
+
+        return normalized_df.reset_index(drop=True), coverage
+
+    @classmethod
     def _load_backtest_market_series(
         cls,
         symbol: str,
@@ -170,47 +370,46 @@ class _TerminalBacktestEngine:
         candles: int,
         *,
         testnet: bool,
+        start_date,
+        end_date,
     ) -> tuple[pd.DataFrame, str]:
-        shared_df, shared_source = cls._load_backtest_from_shared_stream(symbol, timeframe, candles)
-        if shared_df is not None:
-            return shared_df, shared_source or "shared_websocket_buffer"
-
-        from market_data import fetch_historical_candles
-
-        try:
-            historical_df = fetch_historical_candles(
-                symbol,
-                timeframe,
-                total_limit=candles,
-                testnet=bool(testnet),
+        cls.sync_backtest_websocket_feed(
+            symbol=symbol,
+            timeframe=timeframe,
+            testnet=bool(testnet),
+            snapshot_limit=min(max(candles, 600), 3000),
+        )
+        shared_df, shared_source = cls._load_backtest_from_shared_stream(
+            symbol,
+            timeframe,
+            candles,
+            allow_partial=False,
+        )
+        if shared_df is not None and len(shared_df) >= candles:
+            cls._persist_backtest_candle_frame(
+                symbol=symbol,
+                timeframe=timeframe,
+                df=shared_df,
+                source=shared_source or "shared_websocket_buffer",
             )
-        except Exception as exc:
-            error_message = str(exc or "").strip()
-            lowered = error_message.lower()
-            if "451" in error_message or "restricted location" in lowered:
-                raise RuntimeError(
-                    "Backtest historico indisponivel neste ambiente: a Binance bloqueou o endpoint por regiao. "
-                    "Use a dashboard em um ambiente permitido ou rode o backtest localmente."
-                ) from exc
-            raise RuntimeError(
-                f"Falha ao carregar historico da exchange para {symbol} {timeframe}: {error_message or exc}"
-            ) from exc
+            return shared_df.reset_index(drop=True), "shared_websocket_buffer"
 
-        if historical_df is None or historical_df.empty:
-            raise RuntimeError(
-                f"Nenhum candle historico retornado pela exchange para {symbol} {timeframe}."
-            )
+        persisted_df, coverage = cls._load_backtest_from_persisted_websocket(
+            symbol=symbol,
+            timeframe=timeframe,
+            candles=candles,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if persisted_df is not None:
+            return persisted_df.reset_index(drop=True), "persisted_public_websocket_db"
 
-        if len(historical_df) < candles:
-            logger.warning(
-                "Historico retornado abaixo do solicitado para backtest %s %s: solicitado=%s retornado=%s",
-                symbol,
-                timeframe,
-                candles,
-                len(historical_df),
-            )
-
-        return historical_df.reset_index(drop=True), "exchange_historical_api"
+        raise RuntimeError(
+            "Ainda nao ha historico suficiente da WebSocket publica para este backtest. "
+            f"Cobertura atual em banco: {int((coverage or {}).get('total') or 0)} candles "
+            f"de {(coverage or {}).get('first_timestamp') or '-'} ate {(coverage or {}).get('last_timestamp') or '-'}. "
+            "Deixe a dashboard acumular candles desta WebSocket por mais tempo ou reduza o periodo solicitado."
+        )
 
     @staticmethod
     def _build_trade_summary_df(trades, initial_balance: float) -> pd.DataFrame:
@@ -358,6 +557,8 @@ class _TerminalBacktestEngine:
             timeframe=timeframe,
             candles=candles,
             testnet=backtest_use_testnet,
+            start_date=start_date,
+            end_date=end_date,
         )
 
         capture = io.StringIO()
@@ -5080,8 +5281,8 @@ def main():
             "Não representa sinal operacional ao vivo."
         )
         st.caption(
-            "Origem de dados da dashboard: buffer websocket compartilhado quando houver candles suficientes; "
-            "caso contrario, historico direto da exchange. CSV local nao e mais obrigatorio."
+            "Origem de dados desta aba: mesma WebSocket publica da Binance usada pela dashboard. "
+            "Os candles fechados sao acumulados no banco e o backtest passa a usar esse historico persistido."
         )
         backtest_engine = get_or_init_backtest_engine()
         max_backtest_days = 730
@@ -5279,6 +5480,28 @@ def main():
                     index=2,
                     help="O motor lê o mercado exatamente neste timeframe.",
                     key="bt_timeframe"
+                )
+                import config as runtime_config
+
+                websocket_backtest_status = backtest_engine.sync_backtest_websocket_feed(
+                    symbol=bt_symbol,
+                    timeframe=bt_timeframe,
+                    testnet=bool(getattr(runtime_config, "BACKTEST_USE_TESTNET", False)),
+                    snapshot_limit=min(max(int(getattr(AppConfig, "MAX_CANDLES", 1200) or 1200), 600), 3000),
+                )
+                websocket_coverage = websocket_backtest_status.get("coverage") or {}
+                websocket_stream_status = websocket_backtest_status.get("stream_status") or {}
+                ws_col1, ws_col2, ws_col3 = st.columns(3)
+                with ws_col1:
+                    st.metric("Candles WS no Banco", int(websocket_coverage.get("total") or 0))
+                with ws_col2:
+                    st.metric("Buffer Compartilhado", int(websocket_backtest_status.get("shared_available") or 0))
+                with ws_col3:
+                    st.metric("Feed Backtest", "ON" if websocket_stream_status.get("connected") else "AQUECENDO")
+                st.caption(
+                    f"Cobertura acumulada: {websocket_coverage.get('first_timestamp') or '-'} "
+                    f"até {websocket_coverage.get('last_timestamp') or '-'} | "
+                    f"endpoint: {websocket_stream_status.get('provider') or '-'}"
                 )
 
                 context_timeframe_options = [tf for tf in ["5m", "15m", "30m", "1h", "4h", "1d"] if tf != bt_timeframe]
@@ -6125,6 +6348,11 @@ def main():
                     # Mensagens de ajuda específicas
                     if "Dados insuficientes" in error_msg:
                         st.warning("⚠️ **Solução**: Tente um período maior (mínimo 7 dias) ou um timeframe menor")
+                    elif "Ainda nao ha historico suficiente da WebSocket publica" in error_msg:
+                        st.warning(
+                            "⚠️ **Solução**: esta aba agora usa apenas candles acumulados da mesma WebSocket pública da dashboard. "
+                            "Reduza o período solicitado ou deixe a dashboard acumular mais histórico antes de rodar."
+                        )
                     elif "API" in error_msg or "connection" in error_msg.lower():
                         st.warning("⚠️ **Solução**: Verifique sua conexão com a internet e tente novamente")
                     elif "Rate limit" in error_msg or "limit" in error_msg.lower():
@@ -6159,6 +6387,12 @@ def main():
             st.caption(f"Cenário exibido: {result_symbol} {result_timeframe}")
             if result_strategy_version:
                 st.caption(f"Versão da estratégia: {result_strategy_version}")
+            result_data_source = str(result_meta.get('data_source') or "-")
+            data_source_label = {
+                "shared_websocket_buffer": "buffer WebSocket compartilhado da dashboard",
+                "persisted_public_websocket_db": "histórico persistido da WebSocket pública no banco",
+            }.get(result_data_source, result_data_source)
+            st.caption(f"Fonte de dados: {data_source_label}")
             if result_ai_mode in {"shadow", "filter"}:
                 st.caption(
                     f"IA integrada: {result_ai_mode} | piso {result_ai_min_prob:.2f} | "
