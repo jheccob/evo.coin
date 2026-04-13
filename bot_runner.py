@@ -513,6 +513,172 @@ def _validate_stream_runtime_ready(stream_status: dict) -> None:
         )
 
 
+def _get_pending_candle_indexes(df, ultimo_timestamp) -> list[int]:
+    if df is None or df.empty:
+        return []
+
+    if ultimo_timestamp is None:
+        return []
+
+    pending_indexes: list[int] = []
+    for idx, candle_timestamp in enumerate(df["timestamp"].tolist()):
+        if candle_timestamp > ultimo_timestamp:
+            pending_indexes.append(idx)
+    return pending_indexes
+
+
+def _process_closed_candle(
+    *,
+    df,
+    candle_index: int,
+    params,
+    posicao_atual,
+    risk_state: dict,
+    runtime_snapshot: dict,
+    live_execution_service,
+    risk_management_service,
+    live_execution_context,
+):
+    candle_slice = df.iloc[: candle_index + 1]
+    timestamp_atual = candle_slice["timestamp"].iloc[-1]
+    preco = float(candle_slice["close"].iloc[-1])
+
+    _roll_daily_state(risk_state, timestamp_atual)
+    print(f"Novo candle detectado | preco: {preco:.2f}")
+
+    if posicao_atual is not None:
+        position_before_management = posicao_atual
+        gestao = evaluate_open_position(posicao_atual, preco, timestamp_atual)
+        if gestao["action"] == "close":
+            trade = gestao["closed_position"]
+            if _live_execution_enabled():
+                try:
+                    exit_quantity = float(position_before_management.get("quantity", 0.0) or 0.0)
+                    if exit_quantity <= 0:
+                        raise RuntimeError("Posicao live sem quantity valida para fechamento.")
+                    exit_result = live_execution_service.submit_market_order(
+                        context=live_execution_context,
+                        symbol=config.SYMBOL,
+                        timeframe=config.TIMEFRAME,
+                        strategy_version=runtime_snapshot.get("strategy_version"),
+                        signal_side=_opposite_signal_for_position(position_before_management),
+                        quantity=exit_quantity,
+                        reduce_only=True,
+                        source="bot_runner_exit",
+                        testnet=bool(config.TESTNET),
+                        leverage=int(getattr(config, "LEVERAGE", 1) or 1),
+                        metadata={
+                            "reason": trade.get("reason"),
+                            "entry_price": position_before_management.get("entry_price"),
+                            "best_price": position_before_management.get("best_price"),
+                        },
+                    )
+                    posicao_atual = None
+                    print(
+                        "Saida live:",
+                        trade["reason"],
+                        "| resultado %:",
+                        round(trade["gross_pct"], 4),
+                        "| order:",
+                        exit_result.get("exchange_order_id"),
+                    )
+                    _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
+                except Exception as live_exit_error:
+                    posicao_atual = position_before_management
+                    print("Falha ao enviar saida live:", live_exit_error)
+            else:
+                posicao_atual = None
+                print("Saida:", trade["reason"], "| resultado %:", round(trade["gross_pct"], 4))
+                _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
+        else:
+            posicao_atual = gestao["position"]
+            if gestao["action"] == "partial":
+                print("Parcial atingida; break-even e trailing ativados.")
+
+    resultado = generate_entry_signal(candle_slice, params)
+    print("Sinal:", resultado["signal"], "| motivo:", resultado["reason"])
+
+    if posicao_atual is None and resultado["signal"] in {"buy", "sell"}:
+        can_enter, block_reason = _entry_allowed(risk_state)
+        if not can_enter:
+            print("Entrada bloqueada:", block_reason)
+        elif _live_execution_enabled():
+            live_plan = _build_live_entry_plan(
+                execution_service=live_execution_service,
+                risk_management_service=risk_management_service,
+                context=live_execution_context,
+                signal_side=resultado["signal"],
+                entry_price=preco,
+            )
+            if not live_plan.get("allowed", False):
+                print("Entrada live bloqueada:", live_plan.get("reason"))
+            else:
+                execution_result = live_execution_service.submit_market_order(
+                    context=live_execution_context,
+                    symbol=config.SYMBOL,
+                    timeframe=config.TIMEFRAME,
+                    strategy_version=runtime_snapshot.get("strategy_version"),
+                    signal_side=resultado["signal"],
+                    quantity=float(live_plan.get("quantity", 0.0) or 0.0),
+                    reduce_only=False,
+                    source="bot_runner_entry",
+                    testnet=bool(config.TESTNET),
+                    leverage=int(getattr(config, "LEVERAGE", 1) or 1),
+                    metadata={
+                        "account_balance": live_plan.get("account_balance"),
+                        "risk_amount": live_plan.get("risk_amount"),
+                        "position_notional": live_plan.get("position_notional"),
+                        "stop_loss_price": live_plan.get("stop_loss_price"),
+                    },
+                )
+                posicao_atual = create_position(
+                    resultado["signal"],
+                    entry_price=preco,
+                    timestamp=timestamp_atual,
+                    atr=float(resultado["atr"]),
+                )
+                posicao_atual.update(
+                    {
+                        "quantity": float(
+                            execution_result.get("quantity") or live_plan.get("quantity") or 0.0
+                        ),
+                        "execution_mode": "live",
+                        "client_order_id": execution_result.get("client_order_id"),
+                        "exchange_order_id": execution_result.get("exchange_order_id"),
+                        "exchange_position_side": _signal_to_position_side(resultado["signal"]),
+                    }
+                )
+                print(
+                    "Entrada live:",
+                    posicao_atual["side"],
+                    "| preco:",
+                    round(posicao_atual["entry_price"], 2),
+                    "| qty:",
+                    round(float(posicao_atual.get("quantity", 0.0) or 0.0), 6),
+                )
+        else:
+            posicao_atual = create_position(
+                resultado["signal"],
+                entry_price=preco,
+                timestamp=timestamp_atual,
+                atr=float(resultado["atr"]),
+            )
+            print("Entrada:", posicao_atual["side"], "| preco:", round(posicao_atual["entry_price"], 2))
+
+    status_label = "position_open" if posicao_atual is not None else "signal_processed"
+    _persist_runtime_state(
+        snapshot=runtime_snapshot,
+        status=status_label,
+        timestamp_value=timestamp_atual,
+        signal=resultado,
+        position=posicao_atual,
+        risk_state=risk_state,
+        last_price=preco,
+    )
+    print("------")
+    return timestamp_atual, posicao_atual, resultado
+
+
 def main() -> None:
     _validate_real_mode_guards()
     runtime_snapshot = _print_runtime_baseline_snapshot()
@@ -592,151 +758,33 @@ def main() -> None:
                         risk_state=risk_state,
                         last_price=preco,
                     )
-                elif timestamp_atual != ultimo_timestamp:
-                    ultimo_timestamp = timestamp_atual
-                    _roll_daily_state(risk_state, timestamp_atual)
-                    print(f"Novo candle detectado | preco: {preco:.2f}")
-
-                    if posicao_atual is not None:
-                        position_before_management = posicao_atual
-                        gestao = evaluate_open_position(posicao_atual, preco, timestamp_atual)
-                        if gestao["action"] == "close":
-                            trade = gestao["closed_position"]
-                            if _live_execution_enabled():
-                                try:
-                                    exit_quantity = float(position_before_management.get("quantity", 0.0) or 0.0)
-                                    if exit_quantity <= 0:
-                                        raise RuntimeError("Posicao live sem quantity valida para fechamento.")
-                                    exit_result = live_execution_service.submit_market_order(
-                                        context=live_execution_context,
-                                        symbol=config.SYMBOL,
-                                        timeframe=config.TIMEFRAME,
-                                        strategy_version=runtime_snapshot.get("strategy_version"),
-                                        signal_side=_opposite_signal_for_position(position_before_management),
-                                        quantity=exit_quantity,
-                                        reduce_only=True,
-                                        source="bot_runner_exit",
-                                        testnet=bool(config.TESTNET),
-                                        leverage=int(getattr(config, "LEVERAGE", 1) or 1),
-                                        metadata={
-                                            "reason": trade.get("reason"),
-                                            "entry_price": position_before_management.get("entry_price"),
-                                            "best_price": position_before_management.get("best_price"),
-                                        },
-                                    )
-                                    posicao_atual = None
-                                    print(
-                                        "Saida live:",
-                                        trade["reason"],
-                                        "| resultado %:",
-                                        round(trade["gross_pct"], 4),
-                                        "| order:",
-                                        exit_result.get("exchange_order_id"),
-                                    )
-                                    _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
-                                except Exception as live_exit_error:
-                                    posicao_atual = position_before_management
-                                    print("Falha ao enviar saida live:", live_exit_error)
-                            else:
-                                posicao_atual = None
-                                print("Saida:", trade["reason"], "| resultado %:", round(trade["gross_pct"], 4))
-                                _update_risk_circuit_breaker(risk_state, trade, timestamp_atual)
-                        else:
-                            posicao_atual = gestao["position"]
-                            if gestao["action"] == "partial":
-                                print("Parcial atingida; break-even e trailing ativados.")
-
-                    resultado = generate_entry_signal(df, params)
-                    print("Sinal:", resultado["signal"], "| motivo:", resultado["reason"])
-
-                    if posicao_atual is None and resultado["signal"] in {"buy", "sell"}:
-                        can_enter, block_reason = _entry_allowed(risk_state)
-                        if not can_enter:
-                            print("Entrada bloqueada:", block_reason)
-                        elif _live_execution_enabled():
-                            live_plan = _build_live_entry_plan(
-                                execution_service=live_execution_service,
-                                risk_management_service=risk_management_service,
-                                context=live_execution_context,
-                                signal_side=resultado["signal"],
-                                entry_price=preco,
-                            )
-                            if not live_plan.get("allowed", False):
-                                print("Entrada live bloqueada:", live_plan.get("reason"))
-                            else:
-                                execution_result = live_execution_service.submit_market_order(
-                                    context=live_execution_context,
-                                    symbol=config.SYMBOL,
-                                    timeframe=config.TIMEFRAME,
-                                    strategy_version=runtime_snapshot.get("strategy_version"),
-                                    signal_side=resultado["signal"],
-                                    quantity=float(live_plan.get("quantity", 0.0) or 0.0),
-                                    reduce_only=False,
-                                    source="bot_runner_entry",
-                                    testnet=bool(config.TESTNET),
-                                    leverage=int(getattr(config, "LEVERAGE", 1) or 1),
-                                    metadata={
-                                        "account_balance": live_plan.get("account_balance"),
-                                        "risk_amount": live_plan.get("risk_amount"),
-                                        "position_notional": live_plan.get("position_notional"),
-                                        "stop_loss_price": live_plan.get("stop_loss_price"),
-                                    },
-                                )
-                                posicao_atual = create_position(
-                                    resultado["signal"],
-                                    entry_price=preco,
-                                    timestamp=timestamp_atual,
-                                    atr=float(resultado["atr"]),
-                                )
-                                posicao_atual.update(
-                                    {
-                                        "quantity": float(
-                                            execution_result.get("quantity") or live_plan.get("quantity") or 0.0
-                                        ),
-                                        "execution_mode": "live",
-                                        "client_order_id": execution_result.get("client_order_id"),
-                                        "exchange_order_id": execution_result.get("exchange_order_id"),
-                                        "exchange_position_side": _signal_to_position_side(resultado["signal"]),
-                                    }
-                                )
-                                print(
-                                    "Entrada live:",
-                                    posicao_atual["side"],
-                                    "| preco:",
-                                    round(posicao_atual["entry_price"], 2),
-                                    "| qty:",
-                                    round(float(posicao_atual.get("quantity", 0.0) or 0.0), 6),
-                                )
-                        else:
-                            posicao_atual = create_position(
-                                resultado["signal"],
-                                entry_price=preco,
-                                timestamp=timestamp_atual,
-                                atr=float(resultado["atr"]),
-                            )
-                            print("Entrada:", posicao_atual["side"], "| preco:", round(posicao_atual["entry_price"], 2))
-
-                    status_label = "position_open" if posicao_atual is not None else "signal_processed"
-                    _persist_runtime_state(
-                        snapshot=runtime_snapshot,
-                        status=status_label,
-                        timestamp_value=timestamp_atual,
-                        signal=resultado,
-                        position=posicao_atual,
-                        risk_state=risk_state,
-                        last_price=preco,
-                    )
-                    print("------")
                 else:
-                    print("Sem candle novo. Aguardando...")
-                    _persist_runtime_state(
-                        snapshot=runtime_snapshot,
-                        status="idle_same_candle",
-                        timestamp_value=timestamp_atual,
-                        position=posicao_atual,
-                        risk_state=risk_state,
-                        last_price=preco,
-                    )
+                    pending_indexes = _get_pending_candle_indexes(df, ultimo_timestamp)
+                    if pending_indexes:
+                        if len(pending_indexes) > 1:
+                            print(f"Gap detectado | candles pendentes: {len(pending_indexes)} | retomando processamento sequencial...")
+                        for candle_index in pending_indexes:
+                            ultimo_timestamp, posicao_atual, _ = _process_closed_candle(
+                                df=df,
+                                candle_index=candle_index,
+                                params=params,
+                                posicao_atual=posicao_atual,
+                                risk_state=risk_state,
+                                runtime_snapshot=runtime_snapshot,
+                                live_execution_service=live_execution_service,
+                                risk_management_service=risk_management_service,
+                                live_execution_context=live_execution_context,
+                            )
+                    else:
+                        print("Sem candle novo. Aguardando...")
+                        _persist_runtime_state(
+                            snapshot=runtime_snapshot,
+                            status="idle_same_candle",
+                            timestamp_value=timestamp_atual,
+                            position=posicao_atual,
+                            risk_state=risk_state,
+                            last_price=preco,
+                        )
 
                 time.sleep(config.POLL_SECONDS)
             except Exception as e:

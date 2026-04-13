@@ -31,6 +31,19 @@ def _normalize_stream_timeframe(timeframe: str) -> str:
     return raw if raw in allowed else "15m"
 
 
+def _timeframe_to_milliseconds(timeframe: str) -> int:
+    normalized = _normalize_stream_timeframe(timeframe)
+    unit = normalized[-1]
+    value = int(normalized[:-1] or "1")
+    if unit == "m":
+        return value * 60 * 1000
+    if unit == "h":
+        return value * 60 * 60 * 1000
+    if unit == "d":
+        return value * 24 * 60 * 60 * 1000
+    return 15 * 60 * 1000
+
+
 def _candles_to_dataframe(rows: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "is_closed"])
@@ -64,6 +77,7 @@ class StreamlinedTradingBot:
         self.max_candles = max(200, int(max_candles))
         self.testnet = bool(testnet)
         self.allow_rest_fallback = bool(allow_rest_fallback)
+        self._timeframe_ms = _timeframe_to_milliseconds(self.timeframe)
 
         self._stream_symbol = _normalize_stream_symbol(symbol)
         self._lock = threading.RLock()
@@ -76,6 +90,11 @@ class StreamlinedTradingBot:
         self._last_price: Optional[float] = None
         self._last_message_at: float = 0.0
         self._last_closed_timestamp: Optional[int] = None
+        self._last_gap_detected_ms: int = 0
+        self._reconnect_count: int = 0
+        self._last_reconnect_at: float = 0.0
+        self._last_gap_repair_at: float = 0.0
+        self._last_gap_repair_error: Optional[str] = None
         self._connected = False
         self.last_error: Optional[str] = None
         self.provider = "binance_websocket"
@@ -126,6 +145,7 @@ class StreamlinedTradingBot:
         }
 
         with self._lock:
+            previous_closed_timestamp = self._last_closed_timestamp
             if ts not in self._candles_by_ts:
                 self._ordered_ts.append(ts)
             self._candles_by_ts[ts] = row
@@ -136,7 +156,54 @@ class StreamlinedTradingBot:
             self._last_price = row["close"]
             self._last_message_at = time.time()
             if row["is_closed"]:
+                if previous_closed_timestamp and ts > previous_closed_timestamp + self._timeframe_ms:
+                    self._last_gap_detected_ms = ts - previous_closed_timestamp
                 self._last_closed_timestamp = ts
+
+    def _repair_recent_gap(self) -> None:
+        # Usa um snapshot REST curto apenas para preencher candles fechados recentes
+        # perdidos durante queda de conectividade; o fluxo principal continua sendo WS.
+        repair_limit = min(max(self.max_candles, 300), 1000)
+        try:
+            repair_df = fetch_candles(
+                self.symbol,
+                self.timeframe,
+                limit=repair_limit,
+                testnet=self.testnet,
+            )
+            if repair_df is None or repair_df.empty:
+                return
+            repair_df = repair_df.copy()
+            if "timestamp" not in repair_df.columns:
+                return
+            repair_df["timestamp"] = pd.to_datetime(repair_df["timestamp"], utc=True, errors="coerce")
+            for column in ("open", "high", "low", "close", "volume"):
+                if column not in repair_df.columns:
+                    return
+                repair_df[column] = pd.to_numeric(repair_df[column], errors="coerce")
+            repair_df = repair_df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+            if repair_df.empty:
+                return
+            repair_df = repair_df.sort_values("timestamp").tail(repair_limit)
+            for _, row in repair_df.iterrows():
+                timestamp_ms = int(pd.Timestamp(row["timestamp"]).timestamp() * 1000)
+                self._upsert_kline(
+                    {
+                        "k": {
+                            "t": timestamp_ms,
+                            "o": float(row["open"]),
+                            "h": float(row["high"]),
+                            "l": float(row["low"]),
+                            "c": float(row["close"]),
+                            "v": float(row["volume"]),
+                            "x": True,
+                        }
+                    }
+                )
+            self._last_gap_repair_at = time.time()
+            self._last_gap_repair_error = None
+        except Exception as exc:
+            self._last_gap_repair_error = str(exc)
 
     def _seed_from_dataframe(self, bootstrap_df: Optional[pd.DataFrame]) -> None:
         if bootstrap_df is None or bootstrap_df.empty:
@@ -203,8 +270,11 @@ class StreamlinedTradingBot:
                         self.last_error = None
                         self.provider = "binance_websocket"
                         self._active_endpoint = endpoint_name
+                        self._reconnect_count += 1
+                        self._last_reconnect_at = time.time()
                     self._ready_event.set()
                     retry_seconds = 2
+                    self._repair_recent_gap()
 
                     while not self._stop_event.is_set():
                         try:
@@ -251,6 +321,11 @@ class StreamlinedTradingBot:
                 "last_price": self._last_price,
                 "last_message_age_sec": message_age,
                 "last_closed_timestamp": self._last_closed_timestamp,
+                "gap_detected_ms": self._last_gap_detected_ms,
+                "reconnect_count": self._reconnect_count,
+                "last_reconnect_at": self._last_reconnect_at,
+                "last_gap_repair_at": self._last_gap_repair_at,
+                "last_gap_repair_error": self._last_gap_repair_error,
                 "last_error": self.last_error,
             }
 

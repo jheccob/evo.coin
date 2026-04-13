@@ -140,6 +140,35 @@ class StrategyTests(unittest.TestCase):
                 }
             )
 
+    def test_get_pending_candle_indexes_returns_all_candles_after_last_processed(self):
+        df = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-12T00:00:00+00:00")},
+                {"timestamp": pd.Timestamp("2026-04-12T00:15:00+00:00")},
+                {"timestamp": pd.Timestamp("2026-04-12T00:30:00+00:00")},
+                {"timestamp": pd.Timestamp("2026-04-12T00:45:00+00:00")},
+            ]
+        )
+
+        pending_indexes = bot_runner._get_pending_candle_indexes(
+            df,
+            pd.Timestamp("2026-04-12T00:15:00+00:00"),
+        )
+
+        self.assertEqual(pending_indexes, [2, 3])
+
+    def test_get_pending_candle_indexes_returns_empty_without_previous_timestamp(self):
+        df = pd.DataFrame(
+            [
+                {"timestamp": pd.Timestamp("2026-04-12T00:00:00+00:00")},
+                {"timestamp": pd.Timestamp("2026-04-12T00:15:00+00:00")},
+            ]
+        )
+
+        pending_indexes = bot_runner._get_pending_candle_indexes(df, None)
+
+        self.assertEqual(pending_indexes, [])
+
     def test_single_user_execution_context_uses_config_defaults(self):
         with mock.patch.object(config, "SINGLE_USER_RUNTIME_USER_ID", 9):
             with mock.patch.object(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "env-main"):
