@@ -33,22 +33,56 @@ class LiveExecutionService:
         return bool(config.TESTNET if testnet is None else testnet)
 
     @staticmethod
+    def _exchange_request_params(
+        extra: Optional[Dict[str, Any]] = None,
+        *,
+        exchange_name: str = "binanceusdm",
+    ) -> Dict[str, Any]:
+        params = dict(extra or {})
+        normalized_exchange = ExchangeConfig.normalize_exchange_name(exchange_name)
+        client_order_id = str(params.pop("clientOrderId", "") or params.pop("newClientOrderId", "") or "").strip()
+        if client_order_id:
+            if normalized_exchange == "binanceusdm":
+                params.setdefault("newClientOrderId", client_order_id)
+            else:
+                params.setdefault("clientOrderId", client_order_id)
+        recv_window = int(getattr(config, "BINANCE_RECV_WINDOW_MS", 60000) or 60000)
+        if normalized_exchange == "binanceusdm" and recv_window > 0:
+            params.setdefault("recvWindow", recv_window)
+        return params
+
+    @staticmethod
     def _uses_env_credentials(context: Dict[str, Any]) -> bool:
         source = str(context.get("credential_source") or "").strip().lower()
         return bool(context.get("use_env_credentials")) or source == "env"
 
     @staticmethod
     def _load_env_credentials(context: Dict[str, Any]) -> Dict[str, str]:
-        api_key = str(context.get("api_key") or os.getenv("BINANCE_API_KEY", "")).strip()
-        api_secret = str(context.get("api_secret") or os.getenv("BINANCE_SECRET_KEY", "")).strip()
+        exchange_name = ExchangeConfig.normalize_exchange_name(
+            str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+        )
+        if exchange_name == "bybit":
+            api_key_env = "BYBIT_TESTNET_API_KEY" if config.TESTNET else "BYBIT_API_KEY"
+            api_secret_env = "BYBIT_TESTNET_SECRET_KEY" if config.TESTNET else "BYBIT_SECRET_KEY"
+            fallback_api_key_env = "BYBIT_API_KEY"
+            fallback_api_secret_env = "BYBIT_SECRET_KEY"
+        else:
+            api_key_env = "BINANCE_TESTNET_API_KEY" if config.TESTNET else "BINANCE_API_KEY"
+            api_secret_env = "BINANCE_TESTNET_SECRET_KEY" if config.TESTNET else "BINANCE_SECRET_KEY"
+            fallback_api_key_env = "BINANCE_API_KEY"
+            fallback_api_secret_env = "BINANCE_SECRET_KEY"
+        api_key = str(context.get("api_key") or os.getenv(api_key_env, "") or os.getenv(fallback_api_key_env, "")).strip()
+        api_secret = str(
+            context.get("api_secret") or os.getenv(api_secret_env, "") or os.getenv(fallback_api_secret_env, "")
+        ).strip()
         if not api_key or not api_secret:
             raise RuntimeError(
-                "Execucao live do runner exige BINANCE_API_KEY e BINANCE_SECRET_KEY configurados."
+                f"Execucao live do runner exige {api_key_env} e {api_secret_env} configurados."
             )
         return {
             "user_id": int(context.get("user_id", 0) or 0),
             "account_id": str(context.get("account_id") or "env-primary"),
-            "exchange": str(context.get("exchange_name") or context.get("exchange") or "binanceusdm"),
+            "exchange": exchange_name,
             "api_key_ref": "env_api_key",
             "token_ref": "env_secret_key",
             "credential_alias": str(context.get("account_alias") or context.get("account_id") or "env-primary"),
@@ -134,6 +168,117 @@ class LiveExecutionService:
         except (TypeError, ValueError):
             return float(default)
 
+    @staticmethod
+    def _safe_float_or_none(value: Any) -> Optional[float]:
+        if value in (None, ""):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _weighted_trade_price(trades: List[Dict[str, Any]]) -> tuple[float, float]:
+        total_qty = 0.0
+        total_notional = 0.0
+        for trade in trades or []:
+            info = trade.get("info") or {}
+            qty = LiveExecutionService._safe_float_or_none(
+                trade.get("amount")
+                or trade.get("filled")
+                or trade.get("quantity")
+                or info.get("qty")
+                or info.get("executedQty")
+            )
+            price = LiveExecutionService._safe_float_or_none(
+                trade.get("price")
+                or trade.get("average")
+                or info.get("price")
+                or info.get("avgPrice")
+            )
+            if qty is None or qty <= 0 or price is None or price <= 0:
+                continue
+            total_qty += qty
+            total_notional += qty * price
+        if total_qty <= 0 or total_notional <= 0:
+            return 0.0, 0.0
+        return total_notional / total_qty, total_qty
+
+    def _resolve_order_fill_details(
+        self,
+        exchange,
+        *,
+        resolved_symbol: str,
+        order: Dict[str, Any],
+        client_order_id: str,
+    ) -> Dict[str, Any]:
+        info = order.get("info") or {}
+        order_id = str(order.get("id") or info.get("orderId") or "").strip()
+        candidates: List[tuple[str, Dict[str, Any]]] = [("create_order", order)]
+
+        if order_id and hasattr(exchange, "fetch_order"):
+            try:
+                fetched_order = exchange.fetch_order(order_id, resolved_symbol)
+            except Exception:
+                fetched_order = None
+            if isinstance(fetched_order, dict):
+                candidates.append(("fetch_order", fetched_order))
+
+        for source_name, candidate in candidates:
+            candidate_info = candidate.get("info") or {}
+            fill_price = self._safe_float_or_none(
+                candidate.get("average")
+                or candidate.get("price")
+                or candidate_info.get("avgPrice")
+                or candidate_info.get("price")
+            )
+            fill_qty = self._safe_float_or_none(
+                candidate.get("filled")
+                or candidate.get("amount")
+                or candidate_info.get("executedQty")
+                or candidate_info.get("origQty")
+            )
+            if fill_price is not None and fill_price > 0:
+                return {
+                    "price": float(fill_price),
+                    "quantity": float(fill_qty or 0.0),
+                    "source": source_name,
+                    "order_status": self._normalize_order_status(
+                        candidate.get("status") or candidate_info.get("status")
+                    ),
+                }
+
+        if hasattr(exchange, "fetch_my_trades"):
+            try:
+                recent_trades = exchange.fetch_my_trades(resolved_symbol, limit=25) or []
+            except Exception:
+                recent_trades = []
+            matched_trades = []
+            for trade in recent_trades:
+                trade_info = trade.get("info") or {}
+                trade_order_id = str(trade.get("order") or trade_info.get("orderId") or "").strip()
+                trade_client_order_id = str(trade_info.get("clientOrderId") or "").strip()
+                if order_id and trade_order_id == order_id:
+                    matched_trades.append(trade)
+                    continue
+                if client_order_id and trade_client_order_id == client_order_id:
+                    matched_trades.append(trade)
+            weighted_price, weighted_qty = self._weighted_trade_price(matched_trades)
+            if weighted_price > 0:
+                return {
+                    "price": float(weighted_price),
+                    "quantity": float(weighted_qty),
+                    "source": "fetch_my_trades",
+                    "order_status": self._normalize_order_status(order.get("status") or info.get("status")),
+                }
+
+        return {
+            "price": 0.0,
+            "quantity": 0.0,
+            "source": "unresolved",
+            "order_status": self._normalize_order_status(order.get("status") or info.get("status")),
+        }
+
     def _normalize_ccxt_order(
         self,
         order: Dict[str, Any],
@@ -173,21 +318,28 @@ class LiveExecutionService:
         strategy_version: Optional[str],
     ) -> Optional[Dict[str, Any]]:
         info = position.get("info") or {}
-        raw_qty = (
-            position.get("contracts")
-            or position.get("contractSize")
-            or info.get("positionAmt")
-            or position.get("contracts")
-            or 0.0
-        )
-        quantity = abs(self._safe_float(raw_qty))
+        signed_qty = self._safe_float_or_none(info.get("positionAmt"))
+        raw_contracts = self._safe_float_or_none(position.get("contracts"))
+        if signed_qty is not None:
+            quantity = abs(float(signed_qty))
+        elif raw_contracts is not None:
+            quantity = abs(float(raw_contracts))
+        else:
+            quantity = abs(
+                self._safe_float(
+                    position.get("amount")
+                    or position.get("size")
+                    or position.get("positionAmt")
+                    or 0.0
+                )
+            )
         if quantity <= 0:
             return None
 
         raw_side = str(position.get("side") or "").strip().lower()
         if raw_side not in {"long", "short"}:
-            signed_qty = self._safe_float(info.get("positionAmt"))
-            raw_side = "long" if signed_qty >= 0 else "short"
+            signed_qty_value = self._safe_float(info.get("positionAmt"))
+            raw_side = "long" if signed_qty_value >= 0 else "short"
 
         return {
             "user_id": int(context["user_id"]),
@@ -283,6 +435,102 @@ class LiveExecutionService:
             "used": round(used, 8),
             "environment": "testnet" if self._resolve_testnet(testnet) else "mainnet",
         }
+
+    @classmethod
+    def _extract_market_rules(cls, market: Dict[str, Any]) -> Dict[str, float]:
+        def _positive_min(*values: float) -> float:
+            positives = [float(value) for value in values if float(value or 0.0) > 0.0]
+            return min(positives) if positives else 0.0
+
+        market = market or {}
+        limits = market.get("limits") or {}
+        amount_limits = limits.get("amount") or {}
+        cost_limits = limits.get("cost") or {}
+        price_limits = limits.get("price") or {}
+        precision = market.get("precision") or {}
+        info = market.get("info") or {}
+        filters = info.get("filters") or []
+
+        min_qty = 0.0
+        min_notional = 0.0
+        step_size = 0.0
+        min_price_tick = 0.0
+
+        try:
+            min_qty = float(amount_limits.get("min") or 0.0)
+        except (TypeError, ValueError):
+            min_qty = 0.0
+        try:
+            min_notional = float(cost_limits.get("min") or 0.0)
+        except (TypeError, ValueError):
+            min_notional = 0.0
+        try:
+            min_price_tick = float(price_limits.get("min") or 0.0)
+        except (TypeError, ValueError):
+            min_price_tick = 0.0
+
+        amount_precision = precision.get("amount")
+        if amount_precision is not None:
+            try:
+                step_size = 10 ** (-int(amount_precision))
+            except (TypeError, ValueError, OverflowError):
+                step_size = 0.0
+
+        for raw_filter in filters:
+            if not isinstance(raw_filter, dict):
+                continue
+            filter_type = str(raw_filter.get("filterType") or "").upper()
+            if filter_type == "LOT_SIZE":
+                try:
+                    min_qty = max(min_qty, float(raw_filter.get("minQty") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    step_size = _positive_min(step_size, float(raw_filter.get("stepSize") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+            elif filter_type in {"MIN_NOTIONAL", "NOTIONAL"}:
+                try:
+                    min_notional = max(
+                        min_notional,
+                        float(raw_filter.get("minNotional") or raw_filter.get("notional") or 0.0),
+                    )
+                except (TypeError, ValueError):
+                    pass
+            elif filter_type == "PRICE_FILTER":
+                try:
+                    min_price_tick = _positive_min(min_price_tick, float(raw_filter.get("tickSize") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+
+        return {
+            "min_qty": round(min_qty, 12),
+            "min_notional": round(min_notional, 8),
+            "qty_step": round(step_size, 12),
+            "min_price_tick": round(min_price_tick, 12),
+            "contract_size": cls._safe_float(market.get("contractSize"), 0.0),
+        }
+
+    def fetch_symbol_trading_rules(
+        self,
+        context: Dict[str, Any],
+        *,
+        symbol: str,
+        testnet: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
+        markets = exchange.load_markets() or {}
+        resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
+        market = markets.get(resolved_symbol) or {}
+        rules = self._extract_market_rules(market)
+        rules.update(
+            {
+                "symbol": symbol,
+                "exchange_symbol": resolved_symbol,
+                "exchange_id": str(getattr(exchange, "id", "unknown") or "unknown"),
+            }
+        )
+        return rules
 
     def validate_account_connection(self, context: Dict[str, Any], *, testnet: Optional[bool] = None) -> Dict[str, Any]:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -386,7 +634,15 @@ class LiveExecutionService:
             precise_quantity = resolved_quantity
             if hasattr(exchange, "amount_to_precision"):
                 precise_quantity = float(exchange.amount_to_precision(resolved_symbol, resolved_quantity))
-            params = {"newClientOrderId": client_order_id}
+            if precise_quantity <= 0:
+                raise ValueError(
+                    "Quantidade invalida apos arredondamento da exchange "
+                    f"({resolved_quantity} -> {precise_quantity})."
+                )
+            params = self._exchange_request_params(
+                {"clientOrderId": client_order_id},
+                exchange_name=str(context.get("exchange_name") or context.get("exchange") or "binanceusdm"),
+            )
             if reduce_only:
                 params["reduceOnly"] = True
             order = exchange.create_order(
@@ -397,6 +653,12 @@ class LiveExecutionService:
                 None,
                 params,
             )
+            fill_details = self._resolve_order_fill_details(
+                exchange,
+                resolved_symbol=resolved_symbol,
+                order=order,
+                client_order_id=client_order_id,
+            )
             normalized_order = self._normalize_ccxt_order(
                 order,
                 context=context,
@@ -405,6 +667,11 @@ class LiveExecutionService:
                 strategy_version=strategy_version,
                 source=source,
             )
+            if float(fill_details.get("price") or 0.0) > 0:
+                normalized_order["price"] = float(fill_details["price"])
+            if float(fill_details.get("quantity") or 0.0) > 0:
+                normalized_order["quantity"] = float(fill_details["quantity"])
+            normalized_order["status"] = str(fill_details.get("order_status") or normalized_order.get("status") or "unknown")
             order_id = self.database.upsert_user_live_order(normalized_order)
             event_id = self._save_execution_event(
                 context=context,
@@ -419,6 +686,8 @@ class LiveExecutionService:
                     "client_order_id": client_order_id,
                     "exchange_order_id": normalized_order.get("exchange_order_id"),
                     "quantity": precise_quantity,
+                    "fill_price": normalized_order.get("price"),
+                    "fill_price_source": fill_details.get("source"),
                     "source": source,
                     "metadata": metadata or {},
                 },
@@ -431,6 +700,25 @@ class LiveExecutionService:
                 testnet=testnet,
                 source=f"{source}_post_order",
             )
+            fill_price = float(normalized_order.get("price") or 0.0)
+            fill_price_source = str(fill_details.get("source") or "unresolved")
+            if fill_price <= 0 and not bool(reduce_only):
+                try:
+                    live_positions = self.database.get_user_live_positions(
+                        user_id=int(context["user_id"]),
+                        account_id=str(context["account_id"]),
+                        status="open",
+                    )
+                except Exception:
+                    live_positions = []
+                target_positions = [
+                    row
+                    for row in (live_positions or [])
+                    if str(row.get("symbol") or "").strip().upper() == str(symbol or "").strip().upper()
+                ]
+                if len(target_positions) == 1:
+                    fill_price = self._safe_float(target_positions[0].get("entry_price"))
+                    fill_price_source = "reconciliation_position"
             return {
                 "ok": True,
                 "order_id": order_id,
@@ -438,7 +726,9 @@ class LiveExecutionService:
                 "client_order_id": client_order_id,
                 "exchange_order_id": normalized_order.get("exchange_order_id"),
                 "order_status": normalized_order.get("status"),
-                "quantity": precise_quantity,
+                "price": fill_price,
+                "fill_price_source": fill_price_source,
+                "quantity": float(normalized_order.get("quantity") or precise_quantity),
                 "reconciliation": reconciliation,
             }
         except Exception as exc:
@@ -459,6 +749,355 @@ class LiveExecutionService:
                 },
             )
             raise
+
+    def _submit_conditional_market_order(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        signal_side: str,
+        quantity: float,
+        stop_price: float,
+        order_type: str,
+        source: str,
+        testnet: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        resolved_side = self._normalize_signal_to_order_side(signal_side)
+        resolved_quantity = self._safe_float(quantity)
+        resolved_stop_price = self._safe_float(stop_price)
+        if resolved_quantity <= 0:
+            raise ValueError("Quantidade invalida para ordem condicional.")
+        if resolved_stop_price <= 0:
+            raise ValueError("stop_price invalido para ordem condicional.")
+
+        exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
+        resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
+        client_order_id = self._build_client_order_id(context, symbol, resolved_side)
+
+        precise_quantity = resolved_quantity
+        precise_stop_price = resolved_stop_price
+        if hasattr(exchange, "amount_to_precision"):
+            precise_quantity = float(exchange.amount_to_precision(resolved_symbol, resolved_quantity))
+        if hasattr(exchange, "price_to_precision"):
+            precise_stop_price = float(exchange.price_to_precision(resolved_symbol, resolved_stop_price))
+
+        exchange_name = str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+        params = self._exchange_request_params(
+            {
+                "clientOrderId": client_order_id,
+                "stopPrice": precise_stop_price,
+                "reduceOnly": True,
+                "workingType": "MARK_PRICE",
+            },
+            exchange_name=exchange_name,
+        )
+        order = exchange.create_order(
+            resolved_symbol,
+            order_type,
+            resolved_side,
+            precise_quantity,
+            None,
+            params,
+        )
+        normalized_order = self._normalize_ccxt_order(
+            order,
+            context=context,
+            symbol=symbol,
+            timeframe=None,
+            strategy_version=None,
+            source=source,
+        )
+        order_id = self.database.upsert_user_live_order(normalized_order)
+        event_id = self._save_execution_event(
+            context=context,
+            symbol=symbol,
+            timeframe="*",
+            strategy_version="conditional_order",
+            event_type="conditional_order_submitted",
+            event_status="ok",
+            message=f"Ordem condicional {order_type} enviada com sucesso.",
+            details={
+                "client_order_id": client_order_id,
+                "exchange_order_id": normalized_order.get("exchange_order_id"),
+                "quantity": precise_quantity,
+                "stop_price": precise_stop_price,
+                "source": source,
+                "metadata": metadata or {},
+            },
+        )
+        return {
+            "ok": True,
+            "order_id": order_id,
+            "event_id": event_id,
+            "client_order_id": client_order_id,
+            "exchange_order_id": normalized_order.get("exchange_order_id"),
+            "order_status": normalized_order.get("status"),
+            "price": normalized_order.get("price"),
+            "quantity": precise_quantity,
+            "stop_price": precise_stop_price,
+        }
+
+    def submit_stop_market_order(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        side: str,
+        stop_price: float,
+        quantity: float,
+        testnet: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        exchange_name = ExchangeConfig.normalize_exchange_name(
+            str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+        )
+        order_type = "stopMarket" if exchange_name == "bybit" else "STOP_MARKET"
+        return self._submit_conditional_market_order(
+            context=context,
+            symbol=symbol,
+            signal_side=side,
+            quantity=quantity,
+            stop_price=stop_price,
+            order_type=order_type,
+            source="live_execution_stop_market",
+            testnet=testnet,
+            metadata=metadata,
+        )
+
+    def submit_take_profit_market_order(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        side: str,
+        stop_price: float,
+        quantity: float,
+        testnet: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self._submit_conditional_market_order(
+            context=context,
+            symbol=symbol,
+            signal_side=side,
+            quantity=quantity,
+            stop_price=stop_price,
+            order_type="TAKE_PROFIT_MARKET",
+            source="live_execution_take_profit_market",
+            testnet=testnet,
+            metadata=metadata,
+        )
+
+    def cancel_order(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        order_id: str,
+        testnet: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        resolved_order_id = str(order_id or "").strip()
+        if not resolved_order_id:
+            raise ValueError("order_id obrigatorio para cancelamento.")
+
+        exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
+        resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
+        exchange.cancel_order(
+            resolved_order_id,
+            resolved_symbol,
+            params=self._exchange_request_params(
+                exchange_name=str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+            ),
+        )
+        event_id = self._save_execution_event(
+            context=context,
+            symbol=symbol,
+            timeframe="*",
+            strategy_version="cancel_order",
+            event_type="cancel_order",
+            event_status="ok",
+            message=f"Ordem {resolved_order_id} cancelada com sucesso.",
+            details={"exchange_order_id": resolved_order_id},
+        )
+        return {"ok": True, "event_id": event_id, "exchange_order_id": resolved_order_id}
+
+    @staticmethod
+    def _is_unknown_order_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        return "unknown order" in message or "-2011" in message
+
+    @staticmethod
+    def _order_matches_stop_market(order: Dict[str, Any], *, side: Optional[str] = None) -> bool:
+        info = order.get("info") or {}
+        raw_type = str(order.get("type") or info.get("type") or "").replace("_", "").lower()
+        if raw_type not in {"stopmarket", "stop_market"} and "stopmarket" not in raw_type:
+            return False
+        if side:
+            order_side = str(order.get("side") or info.get("side") or "").strip().lower()
+            if order_side and order_side != str(side).strip().lower():
+                return False
+        return True
+
+    def cancel_open_stop_market_orders(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        side: Optional[str] = None,
+        testnet: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
+        resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
+        if not hasattr(exchange, "fetch_open_orders"):
+            return {"ok": True, "cancelled": 0, "skipped": "fetch_open_orders_unavailable"}
+
+        open_orders = exchange.fetch_open_orders(resolved_symbol) or []
+        cancelled = 0
+        cancelled_ids: List[str] = []
+        for order in open_orders:
+            if not self._order_matches_stop_market(order, side=side):
+                continue
+            order_id = str(order.get("id") or (order.get("info") or {}).get("orderId") or "").strip()
+            if not order_id:
+                continue
+            exchange.cancel_order(
+                order_id,
+                resolved_symbol,
+                params=self._exchange_request_params(
+                    exchange_name=str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+                ),
+            )
+            cancelled += 1
+            cancelled_ids.append(order_id)
+
+        if cancelled:
+            self._save_execution_event(
+                context=context,
+                symbol=symbol,
+                timeframe="*",
+                strategy_version="cancel_open_stop_market_orders",
+                event_type="cancel_open_stop_market_orders",
+                event_status="ok",
+                message=f"Stops STOP_MARKET pendentes cancelados antes da substituicao ({cancelled}).",
+                details={"cancelled": cancelled, "order_ids": cancelled_ids, "side": side},
+            )
+        return {"ok": True, "cancelled": cancelled, "order_ids": cancelled_ids}
+
+    def replace_stop_market_order(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        side: str,
+        stop_price: float,
+        quantity: float,
+        previous_order_id: Optional[str] = None,
+        testnet: Optional[bool] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        cancel_result = None
+        cancel_error = None
+        resolved_previous_order_id = str(previous_order_id or "").strip()
+        if resolved_previous_order_id:
+            try:
+                cancel_result = self.cancel_order(
+                    context=context,
+                    symbol=symbol,
+                    order_id=resolved_previous_order_id,
+                    testnet=testnet,
+                )
+            except Exception as exc:
+                cancel_error = str(exc)
+                if not self._is_unknown_order_error(exc):
+                    self._save_execution_event(
+                        context=context,
+                        symbol=symbol,
+                        timeframe="*",
+                        strategy_version="replace_stop_market_order",
+                        event_type="cancel_previous_stop_error",
+                        event_status="error",
+                        message=f"Substituicao abortada: falha ao cancelar stop anterior {resolved_previous_order_id}: {exc}",
+                        details={
+                            "previous_order_id": resolved_previous_order_id,
+                            "stop_price": float(stop_price or 0.0),
+                        },
+                    )
+                    raise RuntimeError(
+                        f"Substituicao de stop abortada; stop anterior nao foi cancelado: {exc}"
+                    ) from exc
+                self._save_execution_event(
+                    context=context,
+                    symbol=symbol,
+                    timeframe="*",
+                    strategy_version="replace_stop_market_order",
+                    event_type="cancel_previous_stop_error",
+                    event_status="warning",
+                    message=f"Falha ao cancelar stop anterior {resolved_previous_order_id}: {exc}",
+                    details={
+                        "previous_order_id": resolved_previous_order_id,
+                        "stop_price": float(stop_price or 0.0),
+                    },
+                )
+
+        sweep_result = self.cancel_open_stop_market_orders(
+            context=context,
+            symbol=symbol,
+            side=side,
+            testnet=testnet,
+        )
+        new_order = self.submit_stop_market_order(
+            context=context,
+            symbol=symbol,
+            side=side,
+            stop_price=stop_price,
+            quantity=quantity,
+            testnet=testnet,
+            metadata=metadata,
+        )
+        return {
+            **new_order,
+            "previous_order_id": resolved_previous_order_id or None,
+            "previous_cancelled": bool(cancel_result),
+            "previous_cancel_error": cancel_error,
+            "stale_stops_cancelled": int(sweep_result.get("cancelled", 0) or 0),
+        }
+
+    def cancel_all_symbol_orders(
+        self,
+        *,
+        context: Dict[str, Any],
+        symbol: str,
+        testnet: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
+        resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
+        open_orders = exchange.fetch_open_orders(resolved_symbol) if hasattr(exchange, "fetch_open_orders") else []
+
+        cancelled = 0
+        for order in open_orders or []:
+            order_id = order.get("id") or (order.get("info") or {}).get("orderId")
+            if not order_id:
+                continue
+            exchange.cancel_order(
+                order_id,
+                resolved_symbol,
+                params=self._exchange_request_params(
+                    exchange_name=str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
+                ),
+            )
+            cancelled += 1
+
+        self._save_execution_event(
+            context=context,
+            symbol=symbol,
+            timeframe="*",
+            strategy_version="cancel_orders",
+            event_type="cancel_symbol_orders",
+            event_status="ok",
+            message=f"Cancelamento de ordens pendentes concluido ({cancelled}).",
+            details={"cancelled": cancelled},
+        )
+        return {"ok": True, "cancelled": cancelled}
 
     def reconcile_account_state(
         self,

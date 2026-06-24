@@ -2,6 +2,7 @@ import unittest
 from unittest import mock
 
 import config
+from services.risk_management_service import RiskManagementService
 from services.live_execution_service import LiveExecutionService
 from services.multiuser_runtime_service import MultiUserRuntimeService
 
@@ -75,6 +76,154 @@ class LiveExecutionServiceTests(unittest.TestCase):
         exchange.create_order.assert_called_once()
         self.database.upsert_user_live_order.assert_called_once()
 
+    def test_submit_market_order_blocks_zero_after_exchange_precision(self):
+        exchange = mock.Mock()
+        exchange.id = "binanceusdm"
+        exchange.load_markets.return_value = {"BTC/USDT:USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT:USDT"}}
+        exchange.amount_to_precision.return_value = "0.000"
+        self.database.save_user_execution_event.return_value = 501
+
+        with mock.patch.object(self.service, "_build_authenticated_exchange", return_value=(exchange, {})):
+            with self.assertRaises(ValueError) as ctx:
+                self.service.submit_market_order(
+                    context=self.context,
+                    symbol="BTC/USDT",
+                    timeframe="15m",
+                    strategy_version="test-v1",
+                    signal_side="buy",
+                    quantity=0.0004,
+                    testnet=True,
+                )
+
+        self.assertIn("apos arredondamento", str(ctx.exception))
+        exchange.create_order.assert_not_called()
+
+    def test_replace_stop_market_order_cancels_before_submitting_new_stop(self):
+        call_order = []
+
+        with (
+            mock.patch.object(
+                self.service,
+                "cancel_order",
+                side_effect=lambda **kwargs: call_order.append("cancel_previous") or {"ok": True},
+            ) as cancel_order,
+            mock.patch.object(
+                self.service,
+                "cancel_open_stop_market_orders",
+                side_effect=lambda **kwargs: call_order.append("sweep_stale") or {"ok": True, "cancelled": 0},
+            ) as sweep_orders,
+            mock.patch.object(
+                self.service,
+                "submit_stop_market_order",
+                side_effect=lambda **kwargs: call_order.append("submit_new") or {"ok": True, "exchange_order_id": "stop-2"},
+            ) as submit_stop,
+        ):
+            result = self.service.replace_stop_market_order(
+                context=self.context,
+                symbol="BTC/USDT",
+                side="sell",
+                stop_price=61000.0,
+                quantity=0.001,
+                previous_order_id="stop-1",
+                testnet=True,
+            )
+
+        self.assertEqual(result["exchange_order_id"], "stop-2")
+        self.assertEqual(call_order, ["cancel_previous", "sweep_stale", "submit_new"])
+        cancel_order.assert_called_once()
+        sweep_orders.assert_called_once()
+        submit_stop.assert_called_once()
+
+    def test_replace_stop_market_order_aborts_when_previous_cancel_fails(self):
+        with (
+            mock.patch.object(self.service, "cancel_order", side_effect=RuntimeError("network timeout")),
+            mock.patch.object(self.service, "cancel_open_stop_market_orders") as sweep_orders,
+            mock.patch.object(self.service, "submit_stop_market_order") as submit_stop,
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.service.replace_stop_market_order(
+                    context=self.context,
+                    symbol="BTC/USDT",
+                    side="sell",
+                    stop_price=61000.0,
+                    quantity=0.001,
+                    previous_order_id="stop-1",
+                    testnet=True,
+                )
+
+        self.assertIn("Substituicao de stop abortada", str(ctx.exception))
+        sweep_orders.assert_not_called()
+        submit_stop.assert_not_called()
+
+    def test_replace_stop_market_order_sweeps_when_previous_order_is_unknown(self):
+        call_order = []
+
+        with (
+            mock.patch.object(
+                self.service,
+                "cancel_order",
+                side_effect=RuntimeError('binanceusdm {"code":-2011,"msg":"Unknown order sent."}'),
+            ),
+            mock.patch.object(
+                self.service,
+                "cancel_open_stop_market_orders",
+                side_effect=lambda **kwargs: call_order.append("sweep_stale") or {"ok": True, "cancelled": 3},
+            ),
+            mock.patch.object(
+                self.service,
+                "submit_stop_market_order",
+                side_effect=lambda **kwargs: call_order.append("submit_new") or {"ok": True, "exchange_order_id": "stop-2"},
+            ),
+        ):
+            result = self.service.replace_stop_market_order(
+                context=self.context,
+                symbol="BTC/USDT",
+                side="sell",
+                stop_price=61000.0,
+                quantity=0.001,
+                previous_order_id="missing-stop",
+                testnet=True,
+            )
+
+        self.assertEqual(result["exchange_order_id"], "stop-2")
+        self.assertEqual(result["stale_stops_cancelled"], 3)
+        self.assertEqual(call_order, ["sweep_stale", "submit_new"])
+
+    def test_exchange_request_params_are_exchange_specific(self):
+        binance_params = self.service._exchange_request_params(
+            {"clientOrderId": "abc-1"},
+            exchange_name="binanceusdm",
+        )
+        bybit_params = self.service._exchange_request_params(
+            {"clientOrderId": "abc-2"},
+            exchange_name="bybit",
+        )
+
+        self.assertEqual(binance_params["newClientOrderId"], "abc-1")
+        self.assertIn("recvWindow", binance_params)
+        self.assertEqual(bybit_params["clientOrderId"], "abc-2")
+        self.assertNotIn("recvWindow", bybit_params)
+        self.assertNotIn("newClientOrderId", bybit_params)
+
+    def test_bybit_stop_market_uses_ccxt_stop_market_type(self):
+        bybit_context = {**self.context, "exchange_name": "bybit", "exchange": "bybit"}
+        with mock.patch.object(
+            self.service,
+            "_submit_conditional_market_order",
+            return_value={"ok": True, "exchange_order_id": "bybit-stop"},
+        ) as submit_conditional:
+            result = self.service.submit_stop_market_order(
+                context=bybit_context,
+                symbol="BTC/USDT",
+                side="sell",
+                stop_price=61000.0,
+                quantity=0.001,
+                testnet=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(submit_conditional.call_args.kwargs["order_type"], "stopMarket")
+
     def test_reconcile_account_state_syncs_open_orders_and_positions(self):
         exchange = mock.Mock()
         exchange.id = "binanceusdm"
@@ -121,6 +270,67 @@ class LiveExecutionServiceTests(unittest.TestCase):
         self.database.sync_user_live_orders_snapshot.assert_called_once()
         self.database.sync_user_live_positions_snapshot.assert_called_once()
 
+    def test_reconcile_account_state_ignores_flat_position_amt_even_with_contract_size(self):
+        exchange = mock.Mock()
+        exchange.id = "binanceusdm"
+        exchange.has = {"fetchPositions": True}
+        exchange.load_markets.return_value = {"BTC/USDT:USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT:USDT"}}
+        exchange.fetch_open_orders.return_value = []
+        exchange.fetch_positions.return_value = [
+            {
+                "side": "long",
+                "contracts": 0,
+                "contractSize": 1,
+                "entryPrice": 0.0,
+                "markPrice": 0.0,
+                "unrealizedPnl": 0.0,
+                "info": {"positionAmt": "0", "entryPrice": "0", "markPrice": "0"},
+            }
+        ]
+        self.database.sync_user_live_orders_snapshot.return_value = []
+        self.database.sync_user_live_positions_snapshot.return_value = []
+        self.database.save_user_execution_event.return_value = 700
+
+        with mock.patch.object(self.service, "_build_authenticated_exchange", return_value=(exchange, {})):
+            result = self.service.reconcile_account_state(
+                context=self.context,
+                symbol="BTC/USDT",
+                timeframe="15m",
+                strategy_version="test-v1",
+                testnet=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["positions_open"], 0)
+
+    def test_live_circuit_breaker_uses_live_summary(self):
+        database = mock.Mock()
+        database.get_daily_live_guardrail_summary.return_value = {
+            "closed_trades": 2,
+            "realized_pnl": -25.0,
+            "realized_pnl_pct": -2.5,
+            "consecutive_losses": 1,
+        }
+        database.get_daily_paper_guardrail_summary.return_value = {
+            "closed_trades": 99,
+            "realized_pnl": 999.0,
+            "realized_pnl_pct": 9.99,
+            "consecutive_losses": 0,
+        }
+        risk_service = RiskManagementService(database=database)
+
+        result = risk_service.evaluate_circuit_breaker(
+            symbol="BTC/USDT",
+            timeframe="15m",
+            strategy_version="live-v1",
+            execution_scope="live",
+            live_context={"user_id": 7, "account_id": "acct-1"},
+        )
+
+        self.assertFalse(result["allowed"])
+        database.get_daily_live_guardrail_summary.assert_called_once()
+        database.get_daily_paper_guardrail_summary.assert_not_called()
+
     def test_env_credentials_path_builds_authenticated_exchange(self):
         env_context = {
             "user_id": 0,
@@ -145,6 +355,79 @@ class LiveExecutionServiceTests(unittest.TestCase):
         self.assertEqual(credentials["api_secret"], "env-secret")
         self.assertEqual(exchange.id, "binanceusdm")
         exchange_factory.assert_called_once()
+
+    def test_fetch_symbol_trading_rules_reads_market_limits_and_filters(self):
+        exchange = mock.Mock()
+        exchange.id = "binanceusdm"
+        exchange.load_markets.return_value = {
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "limits": {"amount": {"min": 0.001}, "cost": {"min": 5.0}},
+                "precision": {"amount": 3},
+                "info": {
+                    "filters": [
+                        {"filterType": "LOT_SIZE", "minQty": "0.001", "stepSize": "0.001"},
+                        {"filterType": "MIN_NOTIONAL", "minNotional": "5"},
+                        {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                    ]
+                },
+            }
+        }
+
+        with mock.patch.object(self.service, "_build_authenticated_exchange", return_value=(exchange, {})):
+            rules = self.service.fetch_symbol_trading_rules(self.context, symbol="BTC/USDT", testnet=True)
+
+        self.assertEqual(rules["exchange_symbol"], "BTC/USDT:USDT")
+        self.assertEqual(rules["min_qty"], 0.001)
+        self.assertEqual(rules["min_notional"], 5.0)
+        self.assertEqual(rules["qty_step"], 0.001)
+        self.assertEqual(rules["min_price_tick"], 0.1)
+
+    def test_risk_operability_detects_bankroll_below_exchange_minimum(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=100.0,
+            stop_loss_pct=1.5,
+            risk_pct=0.25,
+            quantity=0.01,
+            position_notional=1.0,
+            trading_rules={"min_qty": 0.05, "min_notional": 5.0},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertGreater(result["min_required_balance"], 0.0)
+
+    def test_risk_operability_uses_rounded_quantity_after_step(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=100.0,
+            stop_loss_pct=1.5,
+            risk_pct=0.25,
+            quantity=0.0109,
+            position_notional=1.09,
+            trading_rules={"min_qty": 0.011, "min_notional": 1.10, "qty_step": 0.001},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["rounded_quantity"], 0.01)
+
+    def test_risk_operability_reports_min_balance_for_allocation_sizing(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=62500.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            quantity=0.004,
+            position_notional=250.0,
+            trading_rules={"min_qty": 0.001, "min_notional": 100.0, "qty_step": 0.001},
+            leverage=10,
+            sizing_mode="allocation",
+            margin_allocation_pct=100.0,
+        )
+
+        self.assertTrue(result["allowed"])
+        self.assertAlmostEqual(result["min_required_balance"], 10.0, places=4)
 
 
 class MultiUserRuntimeExecutionTests(unittest.TestCase):

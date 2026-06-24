@@ -2,6 +2,7 @@
 .gitignore
 .venv
 venv
+.venv_*
 __pycache__
 *.pyc
 .pytest_cache
@@ -11,7 +12,17 @@ pytest-cache-files-*
 .streamlit
 logs
 *.log
+log_signals.csv
 users.json
-data
-reports
 tests
+ia/artifacts
+ia/__pycache__
+data/*
+!data/models/
+!data/models/runtime_model.tflite
+!data/models/runtime_model_metadata.json
+reports/*
+!reports/validation/
+!reports/validation/symbol_approvals.json
+!reports/validation/symbol_strategy_overrides.json
+!reports/validation/saved_strategy_profiles.json

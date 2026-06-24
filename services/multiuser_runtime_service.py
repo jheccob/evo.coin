@@ -132,10 +132,14 @@ class MultiUserRuntimeService:
             strategy_version=strategy_version,
             account_balance=float(context.get("capital_base") or ProductionConfig.PAPER_ACCOUNT_BALANCE),
             risk_per_trade_pct=float(risk_profile.get("max_risk_per_trade") or ProductionConfig.RISK_PER_TRADE_PCT),
-            max_open_trades=int(risk_profile.get("allowed_position_count") or ProductionConfig.MAX_OPEN_PAPER_TRADES),
-            max_open_trades_per_symbol=ProductionConfig.MAX_OPEN_PAPER_TRADES_PER_SYMBOL,
+            max_open_trades=int(risk_profile.get("allowed_position_count") or ProductionConfig.MAX_OPEN_REAL_TRADES),
+            max_open_trades_per_symbol=int(
+                risk_profile.get("allowed_position_count") or ProductionConfig.MAX_OPEN_REAL_TRADES
+            ),
             max_portfolio_open_risk_pct=float(risk_profile.get("max_portfolio_open_risk_pct") or ProductionConfig.MAX_PORTFOLIO_OPEN_RISK_PCT),
             runtime_allowed=True,
+            execution_scope="live",
+            live_context=context,
         )
 
         if not risk_plan.get("allowed", False):

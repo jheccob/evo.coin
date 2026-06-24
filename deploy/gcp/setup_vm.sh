@@ -11,12 +11,17 @@ SERVICE_FILE="/etc/systemd/system/trading-bot.service"
 
 echo "==> Atualizando pacotes base"
 sudo apt-get update
-sudo apt-get install -y python3 python3-venv python3-pip git
+sudo apt-get install -y python3 python3-venv python3-pip git build-essential python3-dev
 
 echo "==> Criando ambiente virtual em $VENV_DIR"
-python3 -m venv "$VENV_DIR"
+[[ -d "$VENV_DIR" ]] || python3 -m venv "$VENV_DIR"
+
 "$PYTHON_BIN" -m pip install --upgrade pip
-"$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements_railway.txt"
+if [[ -f "$APP_DIR/requirements.txt" ]]; then
+  "$PYTHON_BIN" -m pip install -r "$APP_DIR/requirements.txt"
+else
+  echo "ERRO: $APP_DIR/requirements.txt nao encontrado!" && exit 1
+fi
 
 if [[ ! -f "$ENV_FILE" ]]; then
   echo "==> Criando arquivo de ambiente em $ENV_FILE"

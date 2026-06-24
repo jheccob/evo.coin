@@ -1027,6 +1027,28 @@ class TradingDatabase:
 
         cursor.execute(
             '''
+            CREATE TABLE IF NOT EXISTS dashboard_device_licenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                license_scope TEXT NOT NULL DEFAULT 'workspace',
+                device_fingerprint_hash TEXT,
+                ip_hash TEXT,
+                first_seen_ip_hash TEXT,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                bind_ip BOOLEAN NOT NULL DEFAULT TRUE,
+                bind_device BOOLEAN NOT NULL DEFAULT TRUE,
+                first_seen_at TEXT,
+                last_seen_at TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, license_scope)
+            )
+            '''
+        )
+
+        cursor.execute(
+            '''
             CREATE TABLE IF NOT EXISTS dashboard_user_subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL UNIQUE,
@@ -1270,6 +1292,12 @@ class TradingDatabase:
             '''
             CREATE INDEX IF NOT EXISTS idx_dashboard_user_sessions_lookup
             ON dashboard_user_sessions(user_id, expires_at, revoked)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_dashboard_device_licenses_lookup
+            ON dashboard_device_licenses(user_id, license_scope, is_active)
             '''
         )
         cursor.execute(
@@ -2030,6 +2058,198 @@ class TradingDatabase:
             )
             conn.commit()
             return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _hash_license_value(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return ""
+        secret = str(getattr(ProductionConfig, "CREDENTIAL_ENCRYPTION_KEY", "") or os.getenv("CREDENTIAL_ENCRYPTION_KEY", "") or "")
+        salt = secret or "evo-coin-local-license-salt"
+        return hashlib.sha256(f"{salt}:{normalized}".encode("utf-8")).hexdigest()
+
+    def validate_dashboard_device_license(
+        self,
+        *,
+        user_id: int,
+        ip_address: Optional[str] = None,
+        device_fingerprint: Optional[str] = None,
+        scope: str = "workspace",
+        auto_bind: bool = True,
+        bind_ip: bool = True,
+        bind_device: bool = True,
+    ) -> Dict[str, Any]:
+        resolved_scope = str(scope or "workspace").strip().lower() or "workspace"
+        ip_hash = self._hash_license_value(ip_address)
+        device_hash = self._hash_license_value(device_fingerprint)
+        now_iso = datetime.now(UTC).isoformat()
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM dashboard_device_licenses
+                WHERE user_id = ? AND license_scope = ?
+                LIMIT 1
+                ''',
+                (int(user_id), resolved_scope),
+            )
+            row = cursor.fetchone()
+            if not row:
+                if not auto_bind:
+                    return {
+                        "allowed": False,
+                        "reason": "license_not_bound",
+                        "status": "missing",
+                    }
+                cursor.execute(
+                    '''
+                    INSERT INTO dashboard_device_licenses (
+                        user_id, license_scope, device_fingerprint_hash, ip_hash,
+                        first_seen_ip_hash, is_active, bind_ip, bind_device,
+                        first_seen_at, last_seen_at, notes, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ''',
+                    (
+                        int(user_id),
+                        resolved_scope,
+                        device_hash or None,
+                        ip_hash or None,
+                        ip_hash or None,
+                        int(bool(bind_ip)),
+                        int(bool(bind_device)),
+                        now_iso,
+                        now_iso,
+                        "Auto-bind do primeiro acesso autorizado.",
+                    ),
+                )
+                conn.commit()
+                return {
+                    "allowed": True,
+                    "reason": "license_auto_bound",
+                    "status": "bound",
+                    "bound_now": True,
+                    "ip_bound": bool(ip_hash),
+                    "device_bound": bool(device_hash),
+                }
+
+            payload = dict(row)
+            if not bool(payload.get("is_active")):
+                return {
+                    "allowed": False,
+                    "reason": "license_inactive",
+                    "status": "inactive",
+                }
+
+            requires_ip = bool(payload.get("bind_ip")) and bool(bind_ip)
+            requires_device = bool(payload.get("bind_device")) and bool(bind_device)
+            expected_ip_hash = str(payload.get("ip_hash") or payload.get("first_seen_ip_hash") or "")
+            expected_device_hash = str(payload.get("device_fingerprint_hash") or "")
+
+            if requires_ip and expected_ip_hash and ip_hash and ip_hash != expected_ip_hash:
+                return {
+                    "allowed": False,
+                    "reason": "ip_mismatch",
+                    "status": "blocked",
+                }
+            if requires_device and expected_device_hash and device_hash and device_hash != expected_device_hash:
+                return {
+                    "allowed": False,
+                    "reason": "device_mismatch",
+                    "status": "blocked",
+                }
+
+            if (requires_ip and not expected_ip_hash and ip_hash) or (requires_device and not expected_device_hash and device_hash):
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_device_licenses
+                    SET ip_hash = COALESCE(ip_hash, ?),
+                        first_seen_ip_hash = COALESCE(first_seen_ip_hash, ?),
+                        device_fingerprint_hash = COALESCE(device_fingerprint_hash, ?),
+                        last_seen_at = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (
+                        ip_hash or None,
+                        ip_hash or None,
+                        device_hash or None,
+                        now_iso,
+                        int(payload["id"]),
+                    ),
+                )
+            else:
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_device_licenses
+                    SET last_seen_at = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    ''',
+                    (now_iso, int(payload["id"])),
+                )
+            conn.commit()
+            return {
+                "allowed": True,
+                "reason": "license_valid",
+                "status": "valid",
+                "bound_now": False,
+                "ip_bound": bool(expected_ip_hash or ip_hash),
+                "device_bound": bool(expected_device_hash or device_hash),
+                "last_seen_at": now_iso,
+            }
+        finally:
+            conn.close()
+
+    def reset_dashboard_device_license(self, user_id: int, scope: str = "workspace") -> bool:
+        resolved_scope = str(scope or "workspace").strip().lower() or "workspace"
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                DELETE FROM dashboard_device_licenses
+                WHERE user_id = ? AND license_scope = ?
+                ''',
+                (int(user_id), resolved_scope),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def list_dashboard_device_licenses(self, limit: int = 200) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT
+                    lic.id,
+                    lic.user_id,
+                    access.login_name,
+                    lic.license_scope,
+                    lic.is_active,
+                    lic.bind_ip,
+                    lic.bind_device,
+                    CASE WHEN lic.ip_hash IS NOT NULL AND lic.ip_hash <> '' THEN 1 ELSE 0 END AS has_ip_binding,
+                    CASE WHEN lic.device_fingerprint_hash IS NOT NULL AND lic.device_fingerprint_hash <> '' THEN 1 ELSE 0 END AS has_device_binding,
+                    lic.first_seen_at,
+                    lic.last_seen_at,
+                    lic.notes,
+                    lic.updated_at
+                FROM dashboard_device_licenses lic
+                LEFT JOIN dashboard_user_access access
+                  ON access.user_id = lic.user_id
+                ORDER BY lic.updated_at DESC
+                LIMIT ?
+                ''',
+                (int(limit),),
+            )
+            return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
 
@@ -3792,6 +4012,257 @@ class TradingDatabase:
         finally:
             conn.close()
 
+    def _get_user_live_realization_events(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+        session_date: Optional[datetime] = None,
+        ascending: bool = False,
+    ) -> List[Dict[str, Any]]:
+        event_types = (
+            "live_trade_partial",
+            "live_trade_closed",
+            "live_trade_reconciled_closed",
+        )
+        params: List[Any] = [
+            int(user_id),
+            str(account_id),
+            symbol,
+            symbol,
+            timeframe,
+            timeframe,
+            strategy_version,
+            strategy_version,
+            *event_types,
+        ]
+        where_parts = [
+            "user_id = ?",
+            "account_id = ?",
+            "(? IS NULL OR symbol = ?)",
+            "(? IS NULL OR timeframe = ?)",
+            "(? IS NULL OR strategy_version = ?)",
+            f"event_type IN ({', '.join('?' for _ in event_types)})",
+        ]
+
+        if session_date is not None:
+            reference_dt = session_date
+            if hasattr(reference_dt, "to_pydatetime"):
+                reference_dt = reference_dt.to_pydatetime()
+            day_start = reference_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1)
+            where_parts.append("created_at >= ?")
+            where_parts.append("created_at < ?")
+            params.extend([day_start.isoformat(), day_end.isoformat()])
+
+        order_clause = "ASC" if ascending else "DESC"
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                SELECT *
+                FROM user_execution_events
+                WHERE {' AND '.join(where_parts)}
+                ORDER BY created_at {order_clause}, id {order_clause}
+                ''',
+                tuple(params),
+            )
+            events: List[Dict[str, Any]] = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                item["details_json"] = self._decode_json_field(item.get("details_json"), {})
+                events.append(item)
+            return events
+        finally:
+            conn.close()
+
+    def get_user_live_portfolio_risk_summary(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT
+                    COUNT(*) AS open_trades,
+                    COALESCE(SUM(quantity * entry_price), 0) AS total_open_position_notional
+                FROM user_live_positions
+                WHERE user_id = ?
+                  AND account_id = ?
+                  AND lower(status) = 'open'
+                  AND (? IS NULL OR exchange = ?)
+                  AND (? IS NULL OR symbol = ?)
+                  AND (? IS NULL OR timeframe = ?)
+                  AND (? IS NULL OR strategy_version = ?)
+                ''',
+                (
+                    int(user_id),
+                    str(account_id),
+                    exchange,
+                    exchange,
+                    symbol,
+                    symbol,
+                    timeframe,
+                    timeframe,
+                    strategy_version,
+                    strategy_version,
+                ),
+            )
+            row = dict(cursor.fetchone() or {})
+            return {
+                "open_trades": int(row.get("open_trades", 0) or 0),
+                "total_open_risk_pct": 0.0,
+                "total_open_risk_amount": 0.0,
+                "total_open_position_notional": round(
+                    float(row.get("total_open_position_notional", 0.0) or 0.0),
+                    2,
+                ),
+            }
+        finally:
+            conn.close()
+
+    def get_daily_live_guardrail_summary(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+        session_date: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        reference_dt = session_date or get_brazil_datetime_naive()
+        if hasattr(reference_dt, "to_pydatetime"):
+            reference_dt = reference_dt.to_pydatetime()
+
+        events = self._get_user_live_realization_events(
+            user_id=int(user_id),
+            account_id=str(account_id),
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_version=strategy_version,
+            session_date=reference_dt,
+            ascending=False,
+        )
+        detail_rows = [event.get("details_json") or {} for event in events]
+        reference_balance = max(
+            (float(details.get("account_reference_balance", 0.0) or 0.0) for details in detail_rows),
+            default=0.0,
+        )
+        realized_pnl = sum(float(details.get("realized_pnl", 0.0) or 0.0) for details in detail_rows)
+        gross_contribution_pct = sum(
+            float(
+                details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0
+            )
+            for details in detail_rows
+        )
+        realized_pnl_pct = (
+            (realized_pnl / reference_balance) * 100.0
+            if reference_balance > 0
+            else gross_contribution_pct
+        )
+
+        consecutive_losses = 0
+        for details in detail_rows:
+            contribution = float(
+                details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0
+            )
+            if contribution < 0:
+                consecutive_losses += 1
+                continue
+            break
+
+        return {
+            "session_date": reference_dt.replace(hour=0, minute=0, second=0, microsecond=0).date().isoformat(),
+            "closed_trades": len(detail_rows),
+            "wins": sum(
+                1
+                for details in detail_rows
+                if float(details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0) > 0
+            ),
+            "losses": sum(
+                1
+                for details in detail_rows
+                if float(details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0) < 0
+            ),
+            "flats": sum(
+                1
+                for details in detail_rows
+                if float(details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0) == 0
+            ),
+            "realized_pnl": round(realized_pnl, 2),
+            "realized_pnl_pct": round(realized_pnl_pct, 4),
+            "reference_balance": round(reference_balance, 2),
+            "consecutive_losses": consecutive_losses,
+        }
+
+    def get_live_drawdown_summary(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        strategy_version: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        events = self._get_user_live_realization_events(
+            user_id=int(user_id),
+            account_id=str(account_id),
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_version=strategy_version,
+            ascending=True,
+        )
+        detail_rows = [event.get("details_json") or {} for event in events]
+        starting_balance = max(
+            (float(details.get("account_reference_balance", 0.0) or 0.0) for details in detail_rows),
+            default=0.0,
+        )
+        if starting_balance <= 0:
+            return {
+                "closed_trades": len(detail_rows),
+                "current_drawdown_pct": 0.0,
+                "max_drawdown_pct": 0.0,
+                "reference_balance": 0.0,
+            }
+
+        equity = starting_balance
+        peak_equity = starting_balance
+        current_drawdown_pct = 0.0
+        max_drawdown_pct = 0.0
+        for details in detail_rows:
+            realized_pnl = float(details.get("realized_pnl", 0.0) or 0.0)
+            if realized_pnl == 0.0:
+                position_notional = float(details.get("planned_position_notional", 0.0) or 0.0)
+                gross_contribution = float(
+                    details.get("gross_pct_contribution", details.get("gross_pct", 0.0)) or 0.0
+                )
+                realized_pnl = position_notional * gross_contribution / 100.0
+            equity += realized_pnl
+            peak_equity = max(peak_equity, equity)
+            if peak_equity > 0:
+                current_drawdown_pct = max(((peak_equity - equity) / peak_equity) * 100.0, 0.0)
+                max_drawdown_pct = max(max_drawdown_pct, current_drawdown_pct)
+
+        return {
+            "closed_trades": len(detail_rows),
+            "current_drawdown_pct": round(current_drawdown_pct, 4),
+            "max_drawdown_pct": round(max_drawdown_pct, 4),
+            "reference_balance": round(starting_balance, 2),
+        }
+
     def list_eligible_accounts_for_runtime(
         self,
         symbol: Optional[str] = None,
@@ -5153,6 +5624,49 @@ class TradingDatabase:
             ORDER BY created_at DESC
             LIMIT ?
         ''', (symbol, symbol, timeframe, timeframe, strategy_version, strategy_version, limit))
+        trades = [dict(row) for row in cursor.fetchall()]
+        conn.close()
+        return trades
+
+    def get_paper_trades_between(
+        self,
+        start_timestamp,
+        end_timestamp,
+        symbol: str = None,
+        timeframe: str = None,
+        strategy_version: str = None,
+        limit: int = 500,
+    ) -> List[Dict]:
+        """Buscar paper trades ativos ou encerrados dentro de uma janela de tempo."""
+        start_value = None if start_timestamp in (None, "") else str(start_timestamp)
+        end_value = None if end_timestamp in (None, "") else str(end_timestamp)
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''
+            SELECT * FROM paper_trades
+            WHERE (? IS NULL OR COALESCE(exit_timestamp, entry_timestamp, created_at) >= ?)
+              AND (? IS NULL OR entry_timestamp < ?)
+              AND (? IS NULL OR symbol = ?)
+              AND (? IS NULL OR timeframe = ?)
+              AND (? IS NULL OR strategy_version = ?)
+            ORDER BY COALESCE(exit_timestamp, entry_timestamp, created_at) DESC, id DESC
+            LIMIT ?
+            ''',
+            (
+                start_value,
+                start_value,
+                end_value,
+                end_value,
+                symbol,
+                symbol,
+                timeframe,
+                timeframe,
+                strategy_version,
+                strategy_version,
+                int(limit),
+            ),
+        )
         trades = [dict(row) for row in cursor.fetchall()]
         conn.close()
         return trades

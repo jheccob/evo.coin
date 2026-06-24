@@ -8,16 +8,39 @@ pytest-cache-files-*/
 # Virtual environments
 venv/
 .venv/
+.venv_*/
+.env
+.env.*
+!.env.example
 
 # Local app state
 users.json
 data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/desktop_runtime_credentials.json
+data/desktop_ui_state.json
 data/history/
+data/models/runtime_learning_memory.json
 ia/datasets/*.csv
 logs/
 *.log
+log_signals.csv
+tmp_*.json
 reports/backtests/*_horizon_matrix.json
 reports/backtests/*_horizon_matrix.jsonl
+reports/backtests/*.json
+reports/backtests/*.jsonl
+reports/backtests/*.txt
+reports/experiments/
+reports/*.md
+reports/validation/*.md
+reports/validation/*.json
+!reports/validation/saved_strategy_profiles.json
+!reports/validation/symbol_approvals.json
+!reports/validation/symbol_strategy_overrides.json
+ia/artifacts/
+ia/__pycache__/
 
 # Streamlit
 .streamlit/

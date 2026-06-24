@@ -8,7 +8,7 @@ from typing import Optional
 
 import pandas as pd
 
-from config import ProductionConfig
+from config import BOT_WEBSOCKET_TIMEOUT_SEC, ProductionConfig
 from market_data import fetch_candles
 
 try:
@@ -78,6 +78,7 @@ class StreamlinedTradingBot:
         self.testnet = bool(testnet)
         self.allow_rest_fallback = bool(allow_rest_fallback)
         self._timeframe_ms = _timeframe_to_milliseconds(self.timeframe)
+        self._stale_stream_timeout_sec = max(float(BOT_WEBSOCKET_TIMEOUT_SEC or 25.0), 20.0)
 
         self._stream_symbol = _normalize_stream_symbol(symbol)
         self._lock = threading.RLock()
@@ -95,6 +96,8 @@ class StreamlinedTradingBot:
         self._last_reconnect_at: float = 0.0
         self._last_gap_repair_at: float = 0.0
         self._last_gap_repair_error: Optional[str] = None
+        self._last_rest_refresh_at: float = 0.0
+        self._last_rest_refresh_error: Optional[str] = None
         self._connected = False
         self.last_error: Optional[str] = None
         self.provider = "binance_websocket"
@@ -205,6 +208,130 @@ class StreamlinedTradingBot:
         except Exception as exc:
             self._last_gap_repair_error = str(exc)
 
+    @staticmethod
+    def _format_timestamp_label(timestamp_ms: Optional[int]) -> str:
+        if timestamp_ms is None:
+            return "desconhecido"
+        try:
+            return pd.to_datetime(timestamp_ms, unit="ms", utc=True).isoformat()
+        except Exception:
+            return str(timestamp_ms)
+
+    def _latest_snapshot_timestamp_ms(
+        self,
+        rows: list[dict],
+        *,
+        include_current_candle: bool,
+    ) -> Optional[int]:
+        if not rows:
+            return None
+
+        selected_rows = rows
+        if not include_current_candle:
+            selected_rows = [row for row in rows if bool(row.get("is_closed"))]
+            if not selected_rows and len(rows) > 1:
+                selected_rows = rows[:-1]
+
+        if not selected_rows:
+            return None
+
+        try:
+            return int(selected_rows[-1].get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return None
+
+    def _rows_need_refresh(
+        self,
+        rows: list[dict],
+        *,
+        include_current_candle: bool,
+    ) -> bool:
+        latest_ts = self._latest_snapshot_timestamp_ms(
+            rows,
+            include_current_candle=include_current_candle,
+        )
+        if latest_ts is None or latest_ts <= 0:
+            return True
+
+        now = time.time()
+        last_message_age = None
+        if self._last_message_at:
+            last_message_age = max(0.0, now - self._last_message_at)
+
+        stream_inactive = (
+            (not self._connected)
+            or self._last_message_at <= 0.0
+            or (
+                last_message_age is not None
+                and last_message_age >= self._stale_stream_timeout_sec
+            )
+        )
+        if not stream_inactive:
+            return False
+
+        candle_age_sec = max(0.0, now - (latest_ts / 1000.0))
+        max_stale_age_sec = max((self._timeframe_ms / 1000.0) * 2.0, self._stale_stream_timeout_sec)
+        return candle_age_sec > max_stale_age_sec
+
+    def _refresh_rows_from_rest(self, *, limit: int) -> pd.DataFrame:
+        requested = max(50, min(int(limit or 200), self.max_candles))
+        try:
+            refresh_df = fetch_candles(
+                self.symbol,
+                self.timeframe,
+                limit=requested,
+                testnet=self.testnet,
+            )
+        except Exception as exc:
+            self._last_rest_refresh_error = str(exc)
+            raise
+
+        if refresh_df is None or refresh_df.empty:
+            self._last_rest_refresh_error = "Fallback REST retornou sem candles."
+            raise RuntimeError(self._last_rest_refresh_error)
+
+        working_df = refresh_df.copy()
+        if "timestamp" not in working_df.columns:
+            self._last_rest_refresh_error = "Fallback REST retornou candles sem timestamp."
+            raise RuntimeError(self._last_rest_refresh_error)
+
+        working_df["timestamp"] = pd.to_datetime(working_df["timestamp"], utc=True, errors="coerce")
+        for column in ("open", "high", "low", "close", "volume"):
+            if column not in working_df.columns:
+                self._last_rest_refresh_error = f"Fallback REST retornou candles sem coluna {column}."
+                raise RuntimeError(self._last_rest_refresh_error)
+            working_df[column] = pd.to_numeric(working_df[column], errors="coerce")
+
+        working_df = working_df.dropna(subset=["timestamp", "open", "high", "low", "close", "volume"])
+        if working_df.empty:
+            self._last_rest_refresh_error = "Fallback REST retornou candles invalidos."
+            raise RuntimeError(self._last_rest_refresh_error)
+
+        working_df = working_df.sort_values("timestamp").tail(requested).reset_index(drop=True)
+        working_df["is_closed"] = True
+        for _, row in working_df.iterrows():
+            timestamp_ms = int(pd.Timestamp(row["timestamp"]).timestamp() * 1000)
+            self._upsert_kline(
+                {
+                    "k": {
+                        "t": timestamp_ms,
+                        "o": float(row["open"]),
+                        "h": float(row["high"]),
+                        "l": float(row["low"]),
+                        "c": float(row["close"]),
+                        "v": float(row["volume"]),
+                        "x": True,
+                    }
+                }
+            )
+
+        now = time.time()
+        self._last_rest_refresh_at = now
+        self._last_rest_refresh_error = None
+        self._last_gap_repair_at = now
+        self._last_gap_repair_error = None
+        return working_df
+
     def _seed_from_dataframe(self, bootstrap_df: Optional[pd.DataFrame]) -> None:
         if bootstrap_df is None or bootstrap_df.empty:
             return
@@ -260,8 +387,7 @@ class StreamlinedTradingBot:
                 websocket = connect(
                     ws_url,
                     open_timeout=10,
-                    ping_interval=20,
-                    ping_timeout=20,
+                    ping_interval=None,
                     close_timeout=5,
                 )
                 with websocket:
@@ -280,6 +406,13 @@ class StreamlinedTradingBot:
                         try:
                             raw_payload = websocket.recv(timeout=1)
                         except TimeoutError:
+                            last_message_age = None
+                            if self._last_message_at:
+                                last_message_age = max(0.0, time.time() - self._last_message_at)
+                            if last_message_age is not None and last_message_age >= self._stale_stream_timeout_sec:
+                                raise TimeoutError(
+                                    f"Stream sem mensagens por {last_message_age:.1f}s; reconectando websocket."
+                                )
                             continue
                         payload = json.loads(raw_payload)
                         if isinstance(payload, dict):
@@ -326,6 +459,8 @@ class StreamlinedTradingBot:
                 "last_reconnect_at": self._last_reconnect_at,
                 "last_gap_repair_at": self._last_gap_repair_at,
                 "last_gap_repair_error": self._last_gap_repair_error,
+                "last_rest_refresh_at": self._last_rest_refresh_at,
+                "last_rest_refresh_error": self._last_rest_refresh_error,
                 "last_error": self.last_error,
             }
 
@@ -347,6 +482,33 @@ class StreamlinedTradingBot:
         while not rows and time.time() < deadline and not self._stop_event.is_set():
             time.sleep(0.1)
             rows = self._snapshot_rows()
+
+        if rows and self._rows_need_refresh(rows, include_current_candle=include_current_candle):
+            latest_label = self._format_timestamp_label(
+                self._latest_snapshot_timestamp_ms(
+                    rows,
+                    include_current_candle=include_current_candle,
+                )
+            )
+            if not self.allow_rest_fallback:
+                raise RuntimeError(
+                    "Buffer de mercado desatualizado "
+                    f"(ultimo candle {latest_label}) e fallback REST desativado."
+                )
+
+            self._refresh_rows_from_rest(limit=requested)
+            rows = self._snapshot_rows()
+            if self._rows_need_refresh(rows, include_current_candle=include_current_candle):
+                refreshed_label = self._format_timestamp_label(
+                    self._latest_snapshot_timestamp_ms(
+                        rows,
+                        include_current_candle=include_current_candle,
+                    )
+                )
+                raise RuntimeError(
+                    "Feed de mercado desatualizado apos fallback REST "
+                    f"(ultimo candle {refreshed_label})."
+                )
 
         if rows:
             selected_rows = rows[-requested:]

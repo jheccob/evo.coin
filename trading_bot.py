@@ -2,14 +2,11 @@ import pandas as pd
 import logging
 from typing import Dict, Iterable, Optional
 from ai_model import AIModel
-from indicators import TechnicalIndicators
-from config import AppConfig, ProductionConfig
+from config import AppConfig
 from market_state_engine import MarketStateEngine
 from trading_core import market_data as trading_market_data
+from trading_core import runtime_snapshot
 from trading_core.block_debug import emit_block_debug
-from trading_core import pipeline_engine as trading_pipeline_engine
-from trading_core import pipeline_v2
-from trading_core import signal_engine as trading_signal_engine
 from trading_core.constants import MAX_STREAM_CLIENTS, STREAM_CLIENT_STALE_SECONDS
 logger = logging.getLogger(__name__)
 
@@ -29,7 +26,6 @@ class TradingBot:
         self.rsi_period = AppConfig.DEFAULT_RSI_PERIOD
         self.rsi_min = AppConfig.DEFAULT_RSI_MIN
         self.rsi_max = AppConfig.DEFAULT_RSI_MAX
-        self.indicators = TechnicalIndicators()
         self.market_state_engine = MarketStateEngine()
         self.ai_model = AIModel()
         self._cache_data = {}
@@ -47,8 +43,8 @@ class TradingBot:
         self._last_candidate_signal = "NEUTRO"
         self._last_signal_pipeline = None
 
-        logger.info("🚀 TradingBot inicializado com BINANCE WEBSOCKET PÚBLICO")
-        logger.info("📡 Usando dados em tempo real sem necessidade de credenciais")
+        logger.info("TradingBot inicializado com Binance WebSocket publico")
+        logger.info("Usando dados em tempo real sem necessidade de credenciais")
 
     def _load_exchange(self):
         if self._exchange is None:
@@ -77,31 +73,38 @@ class TradingBot:
         if symbol and symbol != self.symbol:
             self.symbol = symbol
             changed = True
-            logger.info(f"✓ Symbol atualizado para: {self.symbol}")
+            logger.info("Symbol atualizado para: %s", self.symbol)
 
         if timeframe and timeframe != self.timeframe:
             self.timeframe = timeframe
             changed = True
-            logger.info(f"✓ Timeframe atualizado para: {self.timeframe}")
+            logger.info("Timeframe atualizado para: %s", self.timeframe)
 
         if rsi_period is not None and rsi_period != self.rsi_period:
             self.rsi_period = rsi_period
             changed = True
-            logger.info(f"✓ RSI Period atualizado para: {self.rsi_period}")
+            logger.info("RSI period atualizado para: %s", self.rsi_period)
 
         if rsi_min is not None and rsi_min != self.rsi_min:
             self.rsi_min = rsi_min
             changed = True
-            logger.info(f"✓ RSI Min atualizado para: {self.rsi_min}")
+            logger.info("RSI min atualizado para: %s", self.rsi_min)
 
         if rsi_max is not None and rsi_max != self.rsi_max:
             self.rsi_max = rsi_max
             changed = True
-            logger.info(f"✓ RSI Max atualizado para: {self.rsi_max}")
+            logger.info("RSI max atualizado para: %s", self.rsi_max)
 
         # Só mostrar configuração final se algo mudou
         if changed:
-            logger.info(f"📊 Configuração atualizada: {self.symbol} {self.timeframe} RSI({self.rsi_period}) {self.rsi_min}-{self.rsi_max}")
+            logger.info(
+                "Configuracao atualizada: %s %s RSI(%s) %s-%s",
+                self.symbol,
+                self.timeframe,
+                self.rsi_period,
+                self.rsi_min,
+                self.rsi_max,
+            )
 
         return changed
 
@@ -165,7 +168,7 @@ class TradingBot:
 
         for endpoint in endpoints:
             try:
-                logger.info(f"🌐 Tentando endpoint: {endpoint}")
+                logger.info("Tentando endpoint publico: %s", endpoint)
                 response = requests.get(endpoint, timeout=10)
                 response.raise_for_status()
                 ohlcv_data = response.json()
@@ -188,11 +191,11 @@ class TradingBot:
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
 
-                logger.info(f"📊 Dados públicos obtidos: {len(df)} candles")
+                logger.info("Dados publicos obtidos: %s candles", len(df))
                 return df
 
             except Exception as e:
-                logger.warning(f"⚠️ Falha no endpoint {endpoint} -> {e}")
+                logger.warning("Falha no endpoint %s -> %s", endpoint, e)
                 continue
 
         raise ConnectionError("Não foi possível obter dados públicos de nenhum endpoint Binance")
@@ -292,238 +295,14 @@ class TradingBot:
         stop_loss_pct: Optional[float] = None,
         take_profit_pct: Optional[float] = None,
     ) -> Dict[str, object]:
-        working_df = pipeline_v2._prefer_closed_candles(self, df)
-        if working_df.empty:
-            reason = "Sem candles suficientes para leitura do motor EMA/RSI."
-            neutral_market_state = pipeline_v2._build_wait_market_state(reason)
-            return {
-                "analysis": {
-                    "signal": "NEUTRO",
-                    "side": None,
-                    "reason": reason,
-                    "market_bias": "neutral",
-                    "atr_pct": 0.0,
-                    "confirmation_state": "weak",
-                    "price_location": "mid_range",
-                    "entry_score": 0.0,
-                    "scenario_score": 0.0,
-                    "market_pattern": None,
-                    "setup_type": None,
-                    "market_state": "neutral_chop",
-                    "structure_state": "flat",
-                    "entry_quality": "bad",
-                },
-                "context_evaluation": {
-                    "market_bias": "neutral",
-                    "bias": "neutral",
-                    "context_strength": 0.0,
-                    "is_tradeable": False,
-                    "reason": reason,
-                },
-                "regime_evaluation": {
-                    "timeframe": timeframe or self.timeframe,
-                    "regime": "range",
-                    "regime_score": 0.0,
-                    "market_bias": "neutral",
-                    "adx": 0.0,
-                    "atr_pct": 0.0,
-                    "ema_distance_pct": 0.0,
-                    "ema_slope": 0.0,
-                    "volatility_state": "low_volatility",
-                    "trend_state": "range",
-                    "parabolic": False,
-                    "legacy_regime": "ranging",
-                    "price_above_ema_200": False,
-                    "is_tradeable": False,
-                    "has_minimum_history": False,
-                    "notes": [reason],
-                    "reason": reason,
-                },
-                "structure_evaluation": {
-                    "structure_state": "flat",
-                    "structure_quality": 0.0,
-                    "price_location": "mid_range",
-                    "notes": [reason],
-                    "breakout_pressure": False,
-                    "breakout_pressure_side": "",
-                    "trend_bias": "neutral",
-                    "timeframe": timeframe or self.timeframe,
-                    "has_minimum_history": False,
-                },
-                "confirmation_evaluation": {
-                    "confirmation_state": "weak",
-                    "confirmation_score": 0.0,
-                    "hypothesis_side": None,
-                    "notes": [reason],
-                    "conflicts": [reason],
-                    "has_minimum_history": False,
-                },
-                "entry_evaluation": {
-                    "entry_quality": "bad",
-                    "entry_score": 0.0,
-                    "objective_passed": False,
-                    "objective_quality": "bad",
-                    "market_pattern": None,
-                    "setup_type": None,
-                    "rr_estimate": 0.0,
-                    "rejection_reason": reason,
-                    "notes": [reason],
-                    "minimum_scenario_score": 6.0,
-                    "entry_reason": None,
-                    "has_minimum_history": False,
-                },
-                "scenario_evaluation": {
-                    "scenario_score": 0.0,
-                    "scenario_grade": "D",
-                    "pullback_intensity": "not_applicable",
-                    "pullback_score": 0.0,
-                    "notes": [reason],
-                    "has_minimum_history": False,
-                },
-                "market_state_evaluation": neutral_market_state,
-                "trade_decision": {
-                    "action": "wait",
-                    "confidence": 0.0,
-                    "market_bias": "neutral",
-                    "market_state": "neutral_chop",
-                    "execution_mode": "standby",
-                    "market_pattern": None,
-                    "setup_type": None,
-                    "entry_reason": None,
-                    "block_reason": reason,
-                    "invalid_if": None,
-                },
-            }
-
-        working_df = pipeline_v2._ensure_indicator_columns(self, working_df)
-        buy_threshold, sell_threshold = pipeline_v2._resolve_resume_thresholds(self)
-        analysis = pipeline_v2._analyze_resume_signal(
-            working_df,
-            buy_threshold=buy_threshold,
-            sell_threshold=sell_threshold,
+        return runtime_snapshot.build_runtime_snapshot(
+            self,
+            df=df,
+            timeframe=timeframe,
+            context_df=context_df,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
         )
-        context_evaluation = pipeline_v2._build_resume_context_evaluation(
-            self,
-            context_df=context_df,
-            buy_threshold=buy_threshold,
-            sell_threshold=sell_threshold,
-        ) or {
-            "market_bias": analysis["market_bias"],
-            "bias": analysis["market_bias"],
-            "context_strength": 6.0 if analysis["market_bias"] in {"bullish", "bearish"} else 3.0,
-            "is_tradeable": analysis["market_bias"] in {"bullish", "bearish"},
-            "reason": analysis["reason"],
-        }
-        regime_evaluation = pipeline_v2._build_resume_regime_evaluation(
-            working_df,
-            timeframe=timeframe or self.timeframe,
-        )
-
-        rr_estimate = float(analysis.get("rr_estimate", 0.0) or 0.0)
-        if rr_estimate <= 0 and float(stop_loss_pct or 0.0) > 0 and float(take_profit_pct or 0.0) > 0:
-            rr_estimate = float(take_profit_pct) / float(stop_loss_pct)
-        elif rr_estimate <= 0 and float(ProductionConfig.DEFAULT_LIVE_STOP_LOSS_PCT or 0.0) > 0:
-            rr_estimate = (
-                float(ProductionConfig.DEFAULT_LIVE_TAKE_PROFIT_PCT)
-                / float(ProductionConfig.DEFAULT_LIVE_STOP_LOSS_PCT)
-            )
-
-        structure_evaluation = {
-            "structure_state": analysis["structure_state"],
-            "structure_quality": 7.0 if analysis["signal"] in {"COMPRA", "VENDA"} else 4.0,
-            "price_location": analysis["price_location"],
-            "notes": [analysis["reason"]],
-            "breakout_pressure": False,
-            "breakout_pressure_side": "",
-            "trend_bias": analysis["market_bias"],
-            "timeframe": timeframe or self.timeframe,
-            "has_minimum_history": True,
-        }
-        confirmation_state = analysis["confirmation_state"]
-        confirmation_evaluation = {
-            "confirmation_state": confirmation_state,
-            "confirmation_score": 7.4 if confirmation_state == "confirmed" else 5.6 if confirmation_state == "waiting" else 3.5,
-            "hypothesis_side": analysis["market_bias"] if analysis["market_bias"] in {"bullish", "bearish"} else None,
-            "notes": [analysis["reason"]],
-            "conflicts": [] if analysis["signal"] in {"COMPRA", "VENDA"} else [analysis["reason"]],
-            "has_minimum_history": True,
-        }
-        objective_gate = pipeline_v2._evaluate_indicator_objective_gate(
-            analysis=analysis,
-            context_evaluation=context_evaluation,
-        )
-        entry_evaluation = {
-            "entry_quality": analysis["entry_quality"] if objective_gate["objective_passed"] else "bad",
-            "entry_score": round(float(analysis["entry_score"]), 2),
-            "objective_passed": bool(objective_gate["objective_passed"]),
-            "objective_quality": str(objective_gate["objective_quality"]),
-            "market_pattern": analysis.get("market_pattern"),
-            "setup_type": analysis.get("setup_type"),
-            "signal_direction": objective_gate["signal_direction"],
-            "context_bias": objective_gate["context_bias"],
-            "context_aligned": bool(objective_gate["context_aligned"]),
-            "context_tradeable": bool(objective_gate["context_tradeable"]),
-            "passes_score_floor": bool(objective_gate["passes_score_floor"]),
-            "failed_flags": list(objective_gate["failed_flags"]),
-            "critical_failed_flags": list(objective_gate["critical_failed_flags"]),
-            "rr_estimate": round(float(rr_estimate), 2),
-            "structural_stop_price": analysis.get("structural_stop_price"),
-            "structural_take_profit_price": analysis.get("structural_take_profit_price"),
-            "risk_distance_pct": float(analysis.get("risk_distance_pct", 0.0) or 0.0),
-            "target_distance_pct": float(analysis.get("target_distance_pct", 0.0) or 0.0),
-            "rejection_reason": (
-                None
-                if bool(objective_gate["objective_passed"])
-                else objective_gate["rejection_reason"] or analysis["reason"]
-            ),
-            "notes": [analysis["reason"]],
-            "minimum_scenario_score": 6.0,
-            "entry_reason": analysis["reason"] if bool(objective_gate["objective_passed"]) else None,
-            "invalid_if": analysis.get("invalid_if"),
-            "target_reason": analysis.get("target_reason"),
-            "has_minimum_history": True,
-        }
-        scenario_score = max(float(analysis["scenario_score"]), float(analysis["entry_score"]) - 0.2)
-        scenario_evaluation = {
-            "scenario_score": round(float(scenario_score), 2),
-            "scenario_grade": "A" if scenario_score >= 7.5 else "B" if scenario_score >= 6.4 else "C" if scenario_score >= 5.0 else "D",
-            "pullback_intensity": "not_applicable",
-            "pullback_score": 0.0,
-            "notes": [analysis["reason"]],
-            "has_minimum_history": True,
-        }
-        market_state_evaluation = self.evaluate_market_state(
-            context_result=context_evaluation,
-            regime_result=regime_evaluation,
-            structure_result=structure_evaluation,
-            confirmation_result=confirmation_evaluation,
-            entry_result=entry_evaluation,
-            scenario_score_result=scenario_evaluation,
-        )
-        trade_decision = trading_signal_engine.make_trade_decision(
-            self,
-            context_result=context_evaluation,
-            structure_result=structure_evaluation,
-            confirmation_result=confirmation_evaluation,
-            entry_result=entry_evaluation,
-            hard_block_result={"hard_block": False, "block_reason": None, "block_source": None, "notes": []},
-            scenario_score_result=scenario_evaluation,
-            risk_result=None,
-            regime_result=regime_evaluation,
-        )
-        return {
-            "analysis": analysis,
-            "context_evaluation": context_evaluation,
-            "regime_evaluation": regime_evaluation,
-            "structure_evaluation": structure_evaluation,
-            "confirmation_evaluation": confirmation_evaluation,
-            "entry_evaluation": entry_evaluation,
-            "scenario_evaluation": scenario_evaluation,
-            "market_state_evaluation": market_state_evaluation,
-            "trade_decision": trade_decision,
-        }
 
     def evaluate_market_regime(
         self,
@@ -904,27 +683,86 @@ class TradingBot:
         risk_result: Optional[Dict[str, object]] = None,
         regime_result: Optional[Dict[str, object]] = None,
     ) -> Dict[str, object]:
-        return trading_signal_engine.make_trade_decision(
-            self,
-            context_result=context_result,
-            structure_result=structure_result,
-            confirmation_result=confirmation_result,
-            entry_result=entry_result,
-            hard_block_result=hard_block_result,
-            scenario_score_result=scenario_score_result,
-            risk_result=risk_result,
-            regime_result=regime_result,
-        )
+        del structure_result, confirmation_result
+        context_result = context_result or {}
+        entry_result = entry_result or {}
+        hard_block_result = hard_block_result or {}
+        scenario_score_result = scenario_score_result or {}
+        risk_result = risk_result or {}
+        regime_result = regime_result or {}
+
+        block_reason = None
+        action = "wait"
+        if hard_block_result.get("hard_block"):
+            emit_block_debug(
+                "signal_engine.hard_block",
+                block_source=hard_block_result.get("block_source"),
+                block_reason=hard_block_result.get("block_reason"),
+                entry_score=entry_result.get("entry_score"),
+                scenario_score=scenario_score_result.get("scenario_score"),
+            )
+            block_reason = hard_block_result.get("block_reason") or "Hard block ativo."
+        elif risk_result and not bool(risk_result.get("allowed", True)):
+            emit_block_debug(
+                "signal_engine.risk_block",
+                risk_reason=risk_result.get("risk_reason") or risk_result.get("reason"),
+                risk_allowed=risk_result.get("allowed"),
+                risk_score=risk_result.get("risk_score"),
+                signal_direction=entry_result.get("signal_direction"),
+            )
+            block_reason = risk_result.get("risk_reason") or risk_result.get("reason") or "Risco bloqueou a operacao."
+        elif not bool(entry_result.get("objective_passed")):
+            emit_block_debug(
+                "signal_engine.objective_gate_block",
+                objective_passed=entry_result.get("objective_passed"),
+                rejection_reason=entry_result.get("rejection_reason"),
+                failed_flags=entry_result.get("failed_flags"),
+                entry_score=entry_result.get("entry_score"),
+                signal_direction=entry_result.get("signal_direction"),
+                context_bias=entry_result.get("context_bias"),
+            )
+            block_reason = entry_result.get("rejection_reason") or "Setup nao aprovado."
+        else:
+            signal_direction = str(entry_result.get("signal_direction") or "").upper()
+            if signal_direction == "COMPRA":
+                action = "buy"
+            elif signal_direction == "VENDA":
+                action = "sell"
+
+        entry_score = float(entry_result.get("entry_score", 0.0) or 0.0)
+        scenario_score = float(scenario_score_result.get("scenario_score", 0.0) or 0.0)
+        confidence = round(min((entry_score * 0.6) + (scenario_score * 0.4), 10.0), 2)
+
+        market_pattern = entry_result.get("market_pattern") or entry_result.get("setup_type")
+        return {
+            "action": action,
+            "confidence": confidence,
+            "market_bias": context_result.get("market_bias") or regime_result.get("market_bias") or "neutral",
+            "market_state": regime_result.get("regime") or "range",
+            "execution_mode": "ready" if action in {"buy", "sell"} else "standby",
+            "market_pattern": market_pattern,
+            "setup_type": market_pattern,
+            "entry_reason": entry_result.get("entry_reason") if action in {"buy", "sell"} else None,
+            "block_reason": block_reason,
+            "invalid_if": entry_result.get("invalid_if"),
+        }
 
     def _clear_hard_block(self):
-        trading_pipeline_engine.clear_hard_block(self)
+        self._last_hard_block_evaluation = {"hard_block": False, "block_reason": None, "block_source": None, "notes": []}
 
     def _set_hard_block(self, block_reason: str, block_source: str = "signal_engine") -> str:
-        return trading_pipeline_engine.set_hard_block(
-            self,
-            block_reason=block_reason,
+        emit_block_debug(
+            "pipeline_engine.set_hard_block",
             block_source=block_source,
+            block_reason=block_reason,
         )
+        self._last_hard_block_evaluation = {
+            "hard_block": True,
+            "block_reason": block_reason,
+            "block_source": block_source,
+            "notes": [block_reason],
+        }
+        return block_reason
 
     # Pipeline De Sinal
 
@@ -932,7 +770,14 @@ class TradingBot:
     def _normalize_market_pattern_allowlist(
         allowed_market_patterns: Optional[Iterable[str]],
     ) -> Optional[set[str]]:
-        return trading_pipeline_engine.normalize_market_pattern_allowlist(allowed_market_patterns)
+        if allowed_market_patterns is None:
+            return None
+        normalized = {
+            str(value or "").strip().lower()
+            for value in allowed_market_patterns
+            if str(value or "").strip()
+        }
+        return normalized or None
 
     @staticmethod
     def _normalize_setup_allowlist(allowed_execution_setups: Optional[Iterable[str]]) -> Optional[set[str]]:
@@ -940,18 +785,33 @@ class TradingBot:
 
     @staticmethod
     def _normalize_signal_direction_filter(allowed_signal_directions: Optional[Iterable[str]]) -> Optional[set[str]]:
-        return trading_pipeline_engine.normalize_signal_direction_filter(allowed_signal_directions)
+        if allowed_signal_directions is None:
+            return None
+        normalized: set[str] = set()
+        for value in allowed_signal_directions:
+            token = str(value or "").strip().lower()
+            if token in {"compra", "buy", "long", "bull", "bullish"}:
+                normalized.add("COMPRA")
+            elif token in {"venda", "sell", "short", "bear", "bearish"}:
+                normalized.add("VENDA")
+        return normalized or None
 
     def _apply_runtime_market_pattern_policy(
         self,
         analytical_signal: str,
         allowed_market_patterns: Optional[Iterable[str]] = None,
     ) -> str:
-        return trading_pipeline_engine.apply_runtime_market_pattern_policy(
-            self,
-            analytical_signal=analytical_signal,
-            allowed_market_patterns=allowed_market_patterns,
-        )
+        normalized_patterns = self._normalize_market_pattern_allowlist(allowed_market_patterns)
+        if not normalized_patterns:
+            return analytical_signal
+
+        latest_entry = getattr(self, "_last_entry_quality_evaluation", None) or {}
+        market_pattern = str(
+            latest_entry.get("market_pattern") or latest_entry.get("setup_type") or ""
+        ).strip().lower()
+        if market_pattern and market_pattern in normalized_patterns:
+            return analytical_signal
+        return "NEUTRO"
 
     def _apply_runtime_setup_execution_policy(
         self,
@@ -968,11 +828,10 @@ class TradingBot:
         analytical_signal: str,
         allowed_signal_directions: Optional[Iterable[str]] = None,
     ) -> str:
-        return trading_pipeline_engine.apply_runtime_signal_direction_policy(
-            self,
-            analytical_signal=analytical_signal,
-            allowed_signal_directions=allowed_signal_directions,
-        )
+        normalized_directions = self._normalize_signal_direction_filter(allowed_signal_directions)
+        if not normalized_directions or analytical_signal == "NEUTRO":
+            return analytical_signal
+        return analytical_signal if analytical_signal in normalized_directions else "NEUTRO"
 
     def _apply_ai_guardrail(
         self,
@@ -990,25 +849,25 @@ class TradingBot:
         ai_min_win_probability: Optional[float] = None,
         include_ai_explanations: bool = True,
     ) -> str:
-        return trading_pipeline_engine.apply_ai_guardrail(
-            self,
-            df=df,
-            analytical_signal=analytical_signal,
-            timeframe=timeframe,
-            context_timeframe=context_timeframe,
-            stop_loss_pct=stop_loss_pct,
-            take_profit_pct=take_profit_pct,
-            require_volume=require_volume,
-            require_trend=require_trend,
-            avoid_ranging=avoid_ranging,
-            symbol=symbol,
-            ai_assist_mode=ai_assist_mode,
-            ai_min_win_probability=ai_min_win_probability,
-            include_ai_explanations=include_ai_explanations,
-        )
+        del self, df, timeframe, context_timeframe, stop_loss_pct, take_profit_pct
+        del require_volume, require_trend, avoid_ranging, symbol
+        del ai_assist_mode, ai_min_win_probability, include_ai_explanations
+        return analytical_signal
 
     def _finalize_signal_pipeline(self, analytical_signal: str) -> Dict[str, object]:
-        return trading_pipeline_engine.finalize_signal_pipeline(self, analytical_signal)
+        hard_block = getattr(self, "_last_hard_block_evaluation", None) or {
+            "hard_block": False,
+            "block_reason": None,
+            "block_source": None,
+            "notes": [],
+        }
+        return {
+            "approved_signal": analytical_signal,
+            "blocked_signal": None,
+            "block_reason": hard_block.get("block_reason"),
+            "block_source": hard_block.get("block_source"),
+            "hard_block_evaluation": hard_block,
+        }
 
     def evaluate_signal_pipeline(
         self,
@@ -1030,33 +889,175 @@ class TradingBot:
         ai_min_win_probability: Optional[float] = None,
         include_ai_explanations: bool = True,
     ) -> Dict[str, object]:
-        return trading_pipeline_engine.evaluate_signal_pipeline(
-            self,
-            df,
-            min_confidence=min_confidence,
-            require_volume=require_volume,
-            require_trend=require_trend,
-            avoid_ranging=avoid_ranging,
-            crypto_optimized=crypto_optimized,
+        del require_volume, require_trend, avoid_ranging, crypto_optimized, day_trading_mode
+        del ai_assist_mode, ai_min_win_probability, include_ai_explanations
+
+        if context_df is None and context_timeframe and context_timeframe != timeframe:
+            try:
+                context_df = self._fetch_context_df(context_timeframe)
+            except Exception:
+                context_df = None
+
+        snapshot = self._build_resume_snapshot(
+            df=df,
             timeframe=timeframe,
-            day_trading_mode=day_trading_mode,
             context_df=context_df,
-            context_timeframe=context_timeframe,
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
-            allowed_execution_setups=allowed_execution_setups,
-            allowed_signal_directions=allowed_signal_directions,
-            ai_assist_mode=ai_assist_mode,
-            ai_min_win_probability=ai_min_win_probability,
-            include_ai_explanations=include_ai_explanations,
         )
+        analysis = snapshot.get("analysis") or {}
+        context_evaluation = snapshot.get("context_evaluation") or {}
+        regime_evaluation = snapshot.get("regime_evaluation") or {}
+        structure_evaluation = snapshot.get("structure_evaluation") or {}
+        confirmation_evaluation = snapshot.get("confirmation_evaluation") or {}
+        entry_quality_evaluation = snapshot.get("entry_evaluation") or {}
+        scenario_evaluation = snapshot.get("scenario_evaluation") or {}
+        market_state_evaluation = snapshot.get("market_state_evaluation") or {}
+        trade_decision = snapshot.get("trade_decision") or {}
+
+        self._last_context_evaluation = context_evaluation
+        self._last_regime_evaluation = regime_evaluation
+        self._last_price_structure_evaluation = structure_evaluation
+        self._last_confirmation_evaluation = confirmation_evaluation
+        self._last_entry_quality_evaluation = entry_quality_evaluation
+        self._last_scenario_evaluation = scenario_evaluation
+        self._last_market_state_evaluation = market_state_evaluation
+        self._last_trade_decision = trade_decision
+
+        candidate_signal = analysis.get("signal") or "NEUTRO"
+        analytical_signal = candidate_signal
+        block_reason = None
+        block_source = None
+
+        resolved_regime = str(
+            regime_evaluation.get("regime")
+            or analysis.get("market_regime")
+            or ""
+        ).strip().lower()
+        if candidate_signal != "NEUTRO" and resolved_regime in {"", "unknown", "none", "null"}:
+            emit_block_debug(
+                "pipeline_engine.regime_unknown_filter",
+                candidate_signal=candidate_signal,
+                resolved_regime=resolved_regime,
+                timeframe=timeframe,
+                context_timeframe=context_timeframe,
+            )
+            analytical_signal = "NEUTRO"
+            block_reason = "Regime unknown bloqueado temporariamente."
+            block_source = "regime_unknown_filter"
+
+        trade_confidence = float(trade_decision.get("confidence", 0.0) or 0.0) * 10.0
+        if analytical_signal != "NEUTRO" and trade_confidence < float(min_confidence or 0.0):
+            emit_block_debug(
+                "pipeline_engine.confidence_filter",
+                candidate_signal=candidate_signal,
+                trade_confidence=round(trade_confidence, 2),
+                min_confidence=float(min_confidence or 0.0),
+                entry_score=entry_quality_evaluation.get("entry_score"),
+                scenario_score=scenario_evaluation.get("scenario_score"),
+            )
+            analytical_signal = "NEUTRO"
+            block_reason = f"Confianca abaixo do minimo ({trade_confidence:.1f} < {float(min_confidence):.1f})."
+            block_source = "confidence_filter"
+
+        if analytical_signal != "NEUTRO":
+            filtered_signal = self._apply_runtime_market_pattern_policy(
+                analytical_signal=analytical_signal,
+                allowed_market_patterns=allowed_execution_setups,
+            )
+            if filtered_signal == "NEUTRO":
+                emit_block_debug(
+                    "pipeline_engine.setup_allowlist_block",
+                    candidate_signal=candidate_signal,
+                    filtered_signal=filtered_signal,
+                    market_pattern=entry_quality_evaluation.get("market_pattern") or entry_quality_evaluation.get("setup_type"),
+                    allowed_execution_setups=list(allowed_execution_setups or []),
+                )
+                analytical_signal = "NEUTRO"
+                block_reason = "Setup fora da allowlist operacional."
+                block_source = "setup_allowlist"
+
+        if analytical_signal != "NEUTRO":
+            filtered_signal = self._apply_runtime_signal_direction_policy(
+                analytical_signal=analytical_signal,
+                allowed_signal_directions=allowed_signal_directions,
+            )
+            if filtered_signal == "NEUTRO":
+                emit_block_debug(
+                    "pipeline_engine.direction_allowlist_block",
+                    candidate_signal=candidate_signal,
+                    filtered_signal=filtered_signal,
+                    allowed_signal_directions=list(allowed_signal_directions or []),
+                    analytical_signal=analytical_signal,
+                )
+                analytical_signal = "NEUTRO"
+                block_reason = "Direcao fora da allowlist operacional."
+                block_source = "direction_allowlist"
+
+        if analytical_signal != "NEUTRO":
+            prior_signal = analytical_signal
+            analytical_signal = self._apply_ai_guardrail(
+                df=df,
+                analytical_signal=analytical_signal,
+                timeframe=timeframe,
+                context_timeframe=context_timeframe,
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
+            )
+            if analytical_signal == "NEUTRO":
+                emit_block_debug(
+                    "pipeline_engine.ai_guardrail_block",
+                    candidate_signal=candidate_signal,
+                    prior_signal=prior_signal,
+                    timeframe=timeframe,
+                    context_timeframe=context_timeframe,
+                )
+
+        if analytical_signal == "NEUTRO" and candidate_signal != "NEUTRO" and block_reason is None:
+            emit_block_debug(
+                "pipeline_engine.trade_decision_block",
+                candidate_signal=candidate_signal,
+                trade_decision_block_reason=trade_decision.get("block_reason"),
+                rejection_reason=entry_quality_evaluation.get("rejection_reason"),
+                objective_passed=entry_quality_evaluation.get("objective_passed"),
+                failed_flags=entry_quality_evaluation.get("failed_flags"),
+            )
+            block_reason = trade_decision.get("block_reason") or entry_quality_evaluation.get("rejection_reason")
+            block_source = "trade_decision"
+
+        hard_block_evaluation = getattr(self, "_last_hard_block_evaluation", None) or {
+            "hard_block": False,
+            "block_reason": None,
+            "block_source": None,
+            "notes": [],
+        }
+        approved_signal = analytical_signal
+        blocked_signal = candidate_signal if candidate_signal != approved_signal and candidate_signal != "NEUTRO" else None
+
+        return {
+            "candidate_signal": candidate_signal,
+            "analytical_signal": analytical_signal,
+            "approved_signal": approved_signal,
+            "blocked_signal": blocked_signal,
+            "block_reason": block_reason,
+            "block_source": block_source,
+            "analysis": analysis,
+            "context_evaluation": context_evaluation,
+            "regime_evaluation": regime_evaluation,
+            "structure_evaluation": structure_evaluation,
+            "confirmation_evaluation": confirmation_evaluation,
+            "entry_quality_evaluation": entry_quality_evaluation,
+            "scenario_evaluation": scenario_evaluation,
+            "market_state_evaluation": market_state_evaluation,
+            "trade_decision": trade_decision,
+            "hard_block_evaluation": hard_block_evaluation,
+        }
 
     def check_signal(self, df, min_confidence=60, require_volume=True, require_trend=False, avoid_ranging=False,
                     crypto_optimized=True, timeframe="5m", day_trading_mode=False, context_df=None,
                     context_timeframe: Optional[str] = None, stop_loss_pct: Optional[float] = None,
                     take_profit_pct: Optional[float] = None):
-        return trading_signal_engine.check_signal(
-            self,
+        pipeline = self.evaluate_signal_pipeline(
             df,
             min_confidence=min_confidence,
             require_volume=require_volume,
@@ -1070,24 +1071,29 @@ class TradingBot:
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
         )
+        return pipeline.get("approved_signal") or pipeline.get("analytical_signal") or "NEUTRO"
 
     def get_signal_with_confidence(self, df):
-        return trading_signal_engine.get_signal_with_confidence(self, df)
+        pipeline = self.evaluate_signal_pipeline(df)
+        decision = pipeline.get("trade_decision") or {}
+        approved_signal = pipeline.get("approved_signal") or pipeline.get("analytical_signal") or "NEUTRO"
+        return {
+            "signal": approved_signal,
+            "confidence": round(float(decision.get("confidence", 0.0) or 0.0) * 10.0, 2),
+        }
 
     # Auxiliares De Sinal
 
     def _generate_advanced_signal(self, row):
-        return trading_signal_engine.generate_advanced_signal(self, row)
+        return self._generate_trend_signal(row, getattr(self, "rsi_min", 54), getattr(self, "rsi_max", 47))
 
     def _calculate_signal_confidence(self, row):
-        return trading_signal_engine.calculate_signal_confidence(self, row)
+        signal_strength = abs(float(row.get("rsi", 50.0) or 50.0) - 50.0) / 50.0
+        return round(min(signal_strength * 100.0, 100.0), 2)
 
     def _get_effective_min_confidence(self, min_confidence: float, timeframe: Optional[str]) -> float:
-        return trading_signal_engine.get_effective_min_confidence(
-            self,
-            min_confidence,
-            timeframe,
-        )
+        del timeframe
+        return float(min_confidence or 0.0)
 
     @staticmethod
     def _relax_low_confidence_signal(
@@ -1096,15 +1102,24 @@ class TradingBot:
         effective_min_confidence: float,
         timeframe: Optional[str],
     ) -> Optional[str]:
-        return trading_signal_engine.relax_low_confidence_signal(
-            signal,
-            confidence,
-            effective_min_confidence,
-            timeframe,
-        )
+        del timeframe
+        return signal if confidence >= effective_min_confidence else None
 
     def _generate_trend_signal(self, row, rsi_min: float, rsi_max: float) -> str:
-        return trading_signal_engine.generate_trend_signal(self, row, rsi_min, rsi_max)
+        rsi = float(row.get("rsi", 50.0) or 50.0)
+        close = float(row.get("close", 0.0) or 0.0)
+        ema_fast = float(row.get("ema_fast", close) or close)
+        ema_slow = float(row.get("ema_slow", close) or close)
+        ema_trend = float(row.get("ema_trend", close) or close)
+        if close > ema_fast > ema_slow > ema_trend and rsi >= float(rsi_min):
+            return "COMPRA"
+        if close < ema_fast < ema_slow < ema_trend and rsi <= float(rsi_max):
+            return "VENDA"
+        return "NEUTRO"
 
     def calculate_advanced_score(self, row, signal=None):
-        return trading_signal_engine.calculate_advanced_score(self, row, signal=signal)
+        resolved_signal = signal or "NEUTRO"
+        base = self._calculate_signal_confidence(row) / 10.0
+        if resolved_signal in {"COMPRA", "VENDA"}:
+            return round(min(base + 1.0, 10.0), 2)
+        return round(min(base, 10.0), 2)

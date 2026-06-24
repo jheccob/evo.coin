@@ -1,0 +1,162 @@
+{
+  "source_dataset": "ia\\artifacts\\btc_xlm_15m_full_dataset.npz",
+  "feature_names": [
+    "source_is_btc",
+    "source_is_xlm",
+    "return_1_pct",
+    "return_3_pct",
+    "return_6_pct",
+    "return_12_pct",
+    "return_24_pct",
+    "range_pct",
+    "body_pct",
+    "upper_wick_pct",
+    "lower_wick_pct",
+    "close_location_pct",
+    "ema_fast_gap_pct",
+    "ema_slow_gap_pct",
+    "ema_trend_gap_pct",
+    "fast_slow_gap_pct",
+    "slow_trend_gap_pct",
+    "trend_strength_pct",
+    "ema_fast_slope_pct",
+    "ema_slow_slope_pct",
+    "ema_trend_slope_pct",
+    "rsi",
+    "rsi_delta",
+    "adx",
+    "adx_delta",
+    "atr_pct",
+    "atr_pct_delta",
+    "volume_ratio",
+    "distance_to_rolling_high_pct",
+    "distance_to_rolling_low_pct"
+  ],
+  "label_names": [
+    "short",
+    "hold",
+    "long"
+  ],
+  "dataset_metadata": {
+    "rows": 371122,
+    "horizon_candles": 8,
+    "target_pct": 0.45,
+    "risk_buffer_pct": 0.3,
+    "label_distribution": {
+      "short": 89400,
+      "hold": 195413,
+      "long": 86309
+    },
+    "sources": [
+      {
+        "symbol": "BTC/USDT",
+        "timeframe": "15m",
+        "rows": 230202,
+        "source_start": "2019-09-09 02:45:00+00:00",
+        "source_end": "2026-04-03 03:15:00+00:00"
+      },
+      {
+        "symbol": "XLM/USDT",
+        "timeframe": "15m",
+        "rows": 140920,
+        "source_start": "2022-06-09 00:15:00+00:00",
+        "source_end": "2026-06-16 00:00:00+00:00"
+      }
+    ],
+    "symbols": [
+      "BTC/USDT",
+      "XLM/USDT"
+    ],
+    "timeframe": "15m",
+    "total_limit": 0,
+    "feature_names": [
+      "source_is_btc",
+      "source_is_xlm",
+      "return_1_pct",
+      "return_3_pct",
+      "return_6_pct",
+      "return_12_pct",
+      "return_24_pct",
+      "range_pct",
+      "body_pct",
+      "upper_wick_pct",
+      "lower_wick_pct",
+      "close_location_pct",
+      "ema_fast_gap_pct",
+      "ema_slow_gap_pct",
+      "ema_trend_gap_pct",
+      "fast_slow_gap_pct",
+      "slow_trend_gap_pct",
+      "trend_strength_pct",
+      "ema_fast_slope_pct",
+      "ema_slow_slope_pct",
+      "ema_trend_slope_pct",
+      "rsi",
+      "rsi_delta",
+      "adx",
+      "adx_delta",
+      "atr_pct",
+      "atr_pct_delta",
+      "volume_ratio",
+      "distance_to_rolling_high_pct",
+      "distance_to_rolling_low_pct"
+    ],
+    "label_names": [
+      "short",
+      "hold",
+      "long"
+    ]
+  },
+  "metrics": {
+    "val_loss": 1.0253628492355347,
+    "val_accuracy": 0.49435850977897644,
+    "epochs_requested": 16,
+    "epochs_completed": 9,
+    "batch_size": 128,
+    "validation_ratio": 0.2,
+    "validation_symbol": "XLM/USDT"
+  },
+  "class_weights": {
+    "0": 1.1238869776755651,
+    "1": 0.8506885695910631,
+    "2": 1.1349860863203454
+  },
+  "raw_class_weights": {
+    "0": 1.396117034485847,
+    "1": 0.6300058235554551,
+    "2": 1.4358723140565075
+  },
+  "validation": {
+    "rows": 28184,
+    "symbols": {
+      "XLM/USDT": 28184
+    },
+    "label_distribution": {
+      "short": 7521,
+      "hold": 13966,
+      "long": 6697
+    },
+    "prediction_distribution": {
+      "short": 268,
+      "hold": 27676,
+      "long": 240
+    },
+    "confusion_matrix": [
+      [
+        82,
+        7383,
+        56
+      ],
+      [
+        95,
+        13769,
+        102
+      ],
+      [
+        91,
+        6524,
+        82
+      ]
+    ]
+  }
+}

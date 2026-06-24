@@ -4,12 +4,15 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import contextlib
+import html
 import os
 import json
+import time
 from datetime import datetime, timedelta, date
 import asyncio
 import hmac
 import logging
+import secrets
 import signal
 import subprocess
 import sys
@@ -20,8 +23,29 @@ from utils.timezone_utils import now_brazil, format_brazil_time, get_brazil_date
 
 # Importar banco de dados
 from database.database import build_strategy_version, db
+from runtime_process import (
+    BOT_EXECUTION_LOG_PATH,
+    BOT_RUNNER_STDERR_LOG_PATH,
+    BOT_RUNNER_STDOUT_LOG_PATH,
+    RUNTIME_PROCESS_STATE_PATH,
+    clear_runtime_process_state,
+    clear_runtime_stop_request,
+    get_runtime_execution_log_path,
+    get_runtime_process_state_path,
+    get_runtime_stderr_log_path,
+    get_runtime_stdout_log_path,
+    get_runtime_stop_request_path,
+    read_runtime_process_state,
+    request_runtime_stop,
+    tail_text_file,
+    write_runtime_process_state,
+)
 from trading_bot import TradingBot
 from config import AppConfig, ExchangeConfig, ProductionConfig
+try:
+    from live_go_live_check import build_go_live_report
+except Exception:
+    build_go_live_report = None
 try:
     from futures_trading import FuturesTrading
     _FUTURES_IMPORT_ERROR = None
@@ -39,6 +63,324 @@ _TELEGRAM_SERVICE_CLASS = None
 _TELEGRAM_SERVICE_AVAILABLE = None
 _BACKTEST_ENGINE_CLASS = None
 DASHBOARD_SESSION_QUERY_KEY = "workspace_session"
+
+
+def inject_dashboard_theme() -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+            --dashboard-bg: #f4efe6;
+            --dashboard-surface: rgba(255, 251, 245, 0.88);
+            --dashboard-surface-strong: #fff8ee;
+            --dashboard-border: #e5d8c4;
+            --dashboard-ink: #1f2937;
+            --dashboard-muted: #667085;
+            --dashboard-accent: #0f766e;
+            --dashboard-accent-soft: #d8f1ec;
+            --dashboard-warm: #c97a2b;
+            --dashboard-warm-soft: #fff1dd;
+            --dashboard-danger: #b9382f;
+            --dashboard-shadow: 0 18px 46px rgba(31, 41, 55, 0.08);
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at top left, rgba(15, 118, 110, 0.08), transparent 30%),
+                radial-gradient(circle at top right, rgba(201, 122, 43, 0.10), transparent 28%),
+                linear-gradient(180deg, #fbf7f0 0%, var(--dashboard-bg) 100%);
+            color: var(--dashboard-ink);
+        }
+
+        .main .block-container {
+            max-width: 1440px;
+            padding-top: 1.2rem;
+            padding-bottom: 4rem;
+        }
+
+        section[data-testid="stSidebar"] {
+            background:
+                linear-gradient(180deg, rgba(255, 250, 242, 0.96) 0%, rgba(247, 239, 227, 0.96) 100%);
+            border-right: 1px solid var(--dashboard-border);
+        }
+
+        h1, h2, h3 {
+            color: var(--dashboard-ink);
+            letter-spacing: -0.02em;
+        }
+
+        .dashboard-shell,
+        .section-hero,
+        .dashboard-strip {
+            border: 1px solid var(--dashboard-border);
+            background: linear-gradient(145deg, rgba(255,255,255,0.92), rgba(255,248,238,0.88));
+            border-radius: 24px;
+            box-shadow: var(--dashboard-shadow);
+        }
+
+        .dashboard-shell {
+            padding: 1.35rem 1.4rem 1.15rem 1.4rem;
+            margin: 0 0 1rem 0;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .dashboard-shell::after,
+        .section-hero::after {
+            content: "";
+            position: absolute;
+            inset: auto -4rem -4rem auto;
+            width: 13rem;
+            height: 13rem;
+            border-radius: 999px;
+            background: radial-gradient(circle, rgba(15, 118, 110, 0.14), transparent 62%);
+            pointer-events: none;
+        }
+
+        .shell-kicker,
+        .hero-kicker {
+            display: inline-block;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--dashboard-accent);
+            background: var(--dashboard-accent-soft);
+            border-radius: 999px;
+            padding: 0.36rem 0.75rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .dashboard-shell h1,
+        .section-hero h2 {
+            margin: 0;
+            font-size: 2rem;
+            line-height: 1.05;
+        }
+
+        .dashboard-shell p,
+        .section-hero p,
+        .dashboard-strip p {
+            margin: 0.45rem 0 0 0;
+            color: var(--dashboard-muted);
+            line-height: 1.5;
+        }
+
+        .shell-badges,
+        .hero-badges,
+        .strip-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.55rem;
+            margin-top: 1rem;
+        }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.44rem 0.8rem;
+            border-radius: 999px;
+            border: 1px solid var(--dashboard-border);
+            background: rgba(255, 255, 255, 0.82);
+            color: var(--dashboard-ink);
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        .status-pill strong {
+            font-weight: 800;
+        }
+
+        .status-pill.accent {
+            background: var(--dashboard-accent-soft);
+            border-color: rgba(15, 118, 110, 0.18);
+        }
+
+        .status-pill.warm {
+            background: var(--dashboard-warm-soft);
+            border-color: rgba(201, 122, 43, 0.22);
+        }
+
+        .status-pill.danger {
+            background: rgba(248, 222, 222, 0.88);
+            border-color: rgba(185, 56, 47, 0.18);
+        }
+
+        .section-hero {
+            padding: 1.15rem 1.25rem 1rem 1.25rem;
+            margin-bottom: 1rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .dashboard-strip {
+            padding: 0.95rem 1rem;
+            margin: 0.75rem 0 1rem 0;
+        }
+
+        div[data-testid="stMetric"] {
+            background: var(--dashboard-surface);
+            border: 1px solid var(--dashboard-border);
+            border-radius: 18px;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+            padding: 0.9rem 1rem;
+            min-height: 116px;
+        }
+
+        div[data-testid="stMetric"] label {
+            color: var(--dashboard-muted) !important;
+            font-size: 0.76rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        div[data-testid="stMetricValue"] {
+            color: var(--dashboard-ink);
+        }
+
+        div[role="radiogroup"] {
+            gap: 0.55rem;
+            flex-wrap: wrap;
+        }
+
+        div[role="radiogroup"] label {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid var(--dashboard-border);
+            border-radius: 999px;
+            padding: 0.2rem 0.8rem;
+            box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            border-radius: 999px;
+            border: 1px solid #dcc7a8;
+            background: linear-gradient(145deg, #fffaf2, #f5ead9);
+            color: var(--dashboard-ink);
+            font-weight: 700;
+            padding: 0.58rem 1rem;
+            box-shadow: 0 10px 20px rgba(31, 41, 55, 0.06);
+        }
+
+        .stButton > button:hover,
+        .stDownloadButton > button:hover {
+            border-color: #c9a56e;
+            color: #0f172a;
+        }
+
+        [data-testid="stExpander"] {
+            background: rgba(255, 255, 255, 0.72);
+            border: 1px solid var(--dashboard-border);
+            border-radius: 18px;
+            overflow: hidden;
+        }
+
+        .stAlert {
+            border-radius: 18px;
+            border: 1px solid rgba(148, 163, 184, 0.18);
+        }
+
+        .stTextInput > div > div,
+        .stNumberInput > div > div,
+        .stSelectbox > div > div,
+        .stTextArea textarea {
+            border-radius: 14px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _build_status_pill(label: str, value: str, tone: str = "default") -> str:
+    safe_label = html.escape(str(label))
+    safe_value = html.escape(str(value))
+    css_class = "status-pill"
+    if tone in {"accent", "warm", "danger"}:
+        css_class += f" {tone}"
+    return f"<span class='{css_class}'><span>{safe_label}</span><strong>{safe_value}</strong></span>"
+
+
+def render_dashboard_shell(
+    *,
+    active_section_label: str,
+    dashboard_user: dict | None,
+    admin_session_active: bool,
+    selected_exchange: str,
+) -> None:
+    if dashboard_user:
+        session_label = (
+            dashboard_user.get("first_name")
+            or dashboard_user.get("username")
+            or dashboard_user.get("login_name")
+            or str(dashboard_user.get("user_id"))
+        )
+        session_tone = "accent"
+    elif admin_session_active:
+        session_label = "Admin"
+        session_tone = "warm"
+    else:
+        session_label = "Visitante"
+        session_tone = "danger"
+
+    badges = "".join(
+        [
+            _build_status_pill("Seção", active_section_label, "accent"),
+            _build_status_pill("Sessão", session_label, session_tone),
+            _build_status_pill("Exchange", selected_exchange.upper(), "warm"),
+            _build_status_pill("Foco", "Runtime + Mercado", "default"),
+        ]
+    )
+    st.markdown(
+        f"""
+        <section class="dashboard-shell">
+            <span class="shell-kicker">Evo Coin Command</span>
+            <h1>Controle visual do bot, mercado e validação</h1>
+            <p>
+                A dashboard agora prioriza leitura rápida, status operacional e navegação mais limpa
+                para deixar o acompanhamento diário mais confortável.
+            </p>
+            <div class="shell-badges">{badges}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_section_hero(
+    *,
+    kicker: str,
+    title: str,
+    subtitle: str,
+    badges: list[str] | None = None,
+) -> None:
+    badge_html = "".join(badges or [])
+    st.markdown(
+        f"""
+        <section class="section-hero">
+            <span class="hero-kicker">{html.escape(kicker)}</span>
+            <h2>{html.escape(title)}</h2>
+            <p>{html.escape(subtitle)}</p>
+            <div class="hero-badges">{badge_html}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard_strip(message: str, badges: list[str] | None = None) -> None:
+    badge_html = "".join(badges or [])
+    st.markdown(
+        f"""
+        <section class="dashboard-strip">
+            <p>{html.escape(message)}</p>
+            <div class="strip-badges">{badge_html}</div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 class _UnavailableTelegramService:
@@ -762,6 +1104,57 @@ def _set_dashboard_query_param_value(key: str, value: str) -> None:
         logger.debug("Falha ao atualizar query param %s.", key, exc_info=True)
 
 
+def _get_dashboard_request_headers() -> dict:
+    try:
+        context = getattr(st, "context", None)
+        headers = getattr(context, "headers", None)
+        if headers:
+            return {str(key).lower(): str(value) for key, value in dict(headers).items()}
+    except Exception:
+        return {}
+    return {}
+
+
+def _get_dashboard_client_ip() -> str:
+    headers = _get_dashboard_request_headers()
+    for header_name in ("x-forwarded-for", "x-real-ip", "cf-connecting-ip", "x-client-ip"):
+        raw_value = str(headers.get(header_name) or "").strip()
+        if raw_value:
+            return raw_value.split(",")[0].strip()
+    return "local-dashboard"
+
+
+def _get_or_create_dashboard_device_id() -> str:
+    device_id = _get_dashboard_query_param_value("device_id")
+    if device_id:
+        return device_id
+    device_id = secrets.token_urlsafe(18)
+    _set_dashboard_query_param_value("device_id", device_id)
+    return device_id
+
+
+def validate_dashboard_license_for_user(auth_payload: dict | None) -> dict:
+    if not auth_payload:
+        return {"allowed": False, "reason": "not_authenticated"}
+    if bool(st.session_state.get("admin_authenticated")):
+        return {"allowed": True, "reason": "admin_bypass"}
+    if not bool(getattr(ProductionConfig, "REQUIRE_DASHBOARD_DEVICE_LICENSE", True)):
+        return {"allowed": True, "reason": "license_not_required"}
+    try:
+        return db.validate_dashboard_device_license(
+            user_id=int(auth_payload["user_id"]),
+            ip_address=_get_dashboard_client_ip(),
+            device_fingerprint=_get_or_create_dashboard_device_id(),
+            scope="workspace",
+            auto_bind=bool(getattr(ProductionConfig, "DASHBOARD_LICENSE_AUTO_BIND_FIRST_ACCESS", True)),
+            bind_ip=bool(getattr(ProductionConfig, "DASHBOARD_LICENSE_BIND_IP", True)),
+            bind_device=bool(getattr(ProductionConfig, "DASHBOARD_LICENSE_BIND_DEVICE", True)),
+        )
+    except Exception as exc:
+        logger.warning("Falha ao validar licenca da dashboard.", exc_info=True)
+        return {"allowed": False, "reason": f"license_validation_error: {exc}"}
+
+
 def _get_persistent_dashboard_session_token() -> str:
     session_token = str(st.session_state.get("dashboard_user_session_token") or "").strip()
     if session_token:
@@ -1067,6 +1460,13 @@ def get_cached_bot_runtime_db_state(runtime_key: str | None = None, limit: int =
     return rows[0] if rows else None
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cached_live_go_live_report():
+    if build_go_live_report is None:
+        return None
+    return build_go_live_report()
+
+
 def clear_dashboard_data_caches() -> None:
     get_cached_active_strategy_profile.clear()
     get_cached_edge_monitor_summary.clear()
@@ -1079,6 +1479,7 @@ def clear_dashboard_data_caches() -> None:
     get_cached_strategy_evaluations.clear()
     get_cached_strategy_evaluation_overview.clear()
     get_cached_bot_runtime_db_state.clear()
+    get_cached_live_go_live_report.clear()
 
 
 def clear_dashboard_user_session(*, revoke_persistent: bool = True):
@@ -1137,6 +1538,7 @@ def get_authenticated_dashboard_user():
         try:
             subscription_payload = db.get_dashboard_user_subscription(int(user_id))
             auth_payload["subscription"] = subscription_payload
+            auth_payload["license"] = validate_dashboard_license_for_user(auth_payload)
             st.session_state.dashboard_user_auth = auth_payload
         except Exception:
             logger.warning("Falha ao carregar assinatura do usuário %s.", user_id, exc_info=True)
@@ -1146,6 +1548,15 @@ def get_authenticated_dashboard_user():
 
 def is_admin_dashboard_session_active() -> bool:
     return bool(st.session_state.get("admin_authenticated"))
+
+
+def is_admin_dashboard_entry_requested() -> bool:
+    admin_param = (
+        _get_dashboard_query_param_value("admin")
+        or _get_dashboard_query_param_value("admin_panel")
+        or _get_dashboard_query_param_value("modo_admin")
+    )
+    return str(admin_param or "").strip().lower() in {"1", "true", "yes", "on", "admin", "sim"}
 
 
 def get_trader_bot_entrypoint() -> Path:
@@ -1165,6 +1576,64 @@ def get_or_init_admin_telegram_bot():
     return st.session_state.get("telegram_trading_bot")
 
 
+def _resolve_primary_runtime_key() -> str:
+    runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    return f"primary:{runtime_symbol}:{runtime_timeframe}"
+
+
+def _resolve_account_runtime_key(use_testnet: bool | None = None) -> str:
+    runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    if use_testnet is None:
+        use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    return (
+        f"account:{_runtime_credential_user_id()}:"
+        f"{_runtime_credential_account_id(bool(use_testnet))}:"
+        f"{_runtime_credential_exchange_name()}:"
+        f"{runtime_symbol}:{runtime_timeframe}"
+    )
+
+
+def _parse_runtime_datetime(raw_value):
+    if raw_value in (None, ""):
+        return None
+    try:
+        parsed = pd.to_datetime(raw_value, utc=True, errors="coerce")
+    except Exception:
+        return None
+    if parsed is None or pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime()
+
+
+def _format_age_label(total_seconds: float | None) -> str:
+    if total_seconds is None:
+        return "-"
+    if total_seconds < 60:
+        return f"{int(total_seconds)}s"
+    if total_seconds < 3600:
+        return f"{int(total_seconds // 60)}m"
+    return f"{total_seconds / 3600:.1f}h"
+
+
+def _runtime_heartbeat_age_seconds(runtime_db_state: dict | None) -> float | None:
+    if not runtime_db_state:
+        return None
+    heartbeat_at = _parse_runtime_datetime(runtime_db_state.get("last_heartbeat_at"))
+    if heartbeat_at is None:
+        return None
+    return max((datetime.now(heartbeat_at.tzinfo) - heartbeat_at).total_seconds(), 0.0)
+
+
+def _runtime_heartbeat_is_recent(runtime_db_state: dict | None) -> bool:
+    heartbeat_age = _runtime_heartbeat_age_seconds(runtime_db_state)
+    if heartbeat_age is None:
+        return False
+    freshness_window = max(90.0, float(os.getenv("BOT_RUNTIME_HEARTBEAT_STALE_SEC", "90") or "90"))
+    return heartbeat_age <= freshness_window
+
+
 def _is_process_running(pid):
     if not pid:
         return False
@@ -1178,22 +1647,52 @@ def _is_process_running(pid):
     return True
 
 
-def get_trader_bot_process_state():
-    pid = st.session_state.get("trader_bot_pid")
-    running = _is_process_running(pid)
+def _runtime_session_pid_key(runtime_key: str | None) -> str:
+    safe_key = "".join(char if char.isalnum() else "_" for char in str(runtime_key or "primary"))
+    return f"trader_bot_pid_{safe_key[:120]}"
+
+
+def get_trader_bot_process_state(runtime_db_state: dict | None = None, runtime_key: str | None = None):
+    process_state_path = get_runtime_process_state_path(runtime_key)
+    metadata = read_runtime_process_state(path=process_state_path)
+    pid_key = _runtime_session_pid_key(runtime_key)
+    pid = st.session_state.get(pid_key)
+    if not pid and metadata:
+        pid = metadata.get("pid")
     use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    if metadata and metadata.get("use_testnet") is not None:
+        use_testnet = bool(metadata.get("use_testnet"))
+        st.session_state.trader_bot_testnet = use_testnet
+    running = _is_process_running(pid)
     embedded_runtime = str(os.getenv("TRADER_BOT_EMBEDDED", "")).strip().lower() in {"1", "true", "yes", "on"}
     if embedded_runtime:
         testnet_env = str(os.getenv("TESTNET", "true")).strip().lower()
         use_testnet = testnet_env in {"1", "true", "yes", "on", "y", "sim"}
+    heartbeat_fresh = _runtime_heartbeat_is_recent(runtime_db_state)
+    heartbeat_age_seconds = _runtime_heartbeat_age_seconds(runtime_db_state)
+    if not running and metadata and not heartbeat_fresh:
+        clear_runtime_process_state()
+        metadata = None
+    running_via_heartbeat = bool(not running and not embedded_runtime and heartbeat_fresh)
+    if running_via_heartbeat:
+        running = True
     if not running:
-        st.session_state.trader_bot_pid = None
+        st.session_state[pid_key] = None
         st.session_state.telegram_trading_bot_started = False
         pid = None
+    else:
+        st.session_state[pid_key] = pid
     if embedded_runtime and not running:
         # No modo all do Railway, o bot é iniciado fora do controle da sessão Streamlit.
         # Consideramos runtime online para evitar falso "OFF/Crash" na UI.
         running = True
+    status_source = "pid"
+    if embedded_runtime:
+        status_source = "embedded"
+    elif running_via_heartbeat:
+        status_source = "heartbeat"
+    elif not running:
+        status_source = "offline"
     return {
         "running": running,
         "pid": pid,
@@ -1201,7 +1700,236 @@ def get_trader_bot_process_state():
         "mode_label": "Testnet" if use_testnet else "Conta Real",
         "entrypoint": str(get_trader_bot_entrypoint()),
         "managed_externally": embedded_runtime,
+        "metadata": metadata or {},
+        "process_state_file": str(process_state_path),
+        "status_source": status_source,
+        "heartbeat_fresh": heartbeat_fresh,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "controllable": bool(pid) and not embedded_runtime,
     }
+
+
+def _runtime_credential_slot(use_testnet: bool) -> str:
+    return "testnet" if bool(use_testnet) else "real"
+
+
+def _runtime_credential_session_key(use_testnet: bool) -> str:
+    return f"runtime_exchange_credentials_{_runtime_credential_slot(use_testnet)}"
+
+
+def _runtime_credential_env_names(use_testnet: bool) -> tuple[str, str]:
+    exchange_name = ExchangeConfig.normalize_exchange_name(_runtime_credential_exchange_name())
+    if exchange_name == "bybit":
+        if bool(use_testnet):
+            return "BYBIT_TESTNET_API_KEY", "BYBIT_TESTNET_SECRET_KEY"
+        return "BYBIT_API_KEY", "BYBIT_SECRET_KEY"
+    if bool(use_testnet):
+        return "BINANCE_TESTNET_API_KEY", "BINANCE_TESTNET_SECRET_KEY"
+    return "BINANCE_API_KEY", "BINANCE_SECRET_KEY"
+
+
+def _runtime_credential_account_id(use_testnet: bool) -> str:
+    base_account_id = str(os.getenv("SINGLE_USER_RUNTIME_ACCOUNT_ID", "env-primary")).strip() or "env-primary"
+    return f"{base_account_id}-{_runtime_credential_slot(use_testnet)}"
+
+
+def _runtime_credential_exchange_name() -> str:
+    selected = str(st.session_state.get("runtime_exchange_name") or "").strip()
+    configured = str(os.getenv("SINGLE_USER_RUNTIME_EXCHANGE", "binanceusdm")).strip() or "binanceusdm"
+    return ExchangeConfig.normalize_exchange_name(selected or configured)
+
+
+def _runtime_credential_user_id() -> int:
+    auth_payload = st.session_state.get("dashboard_user_auth") or {}
+    if auth_payload.get("user_id") is not None:
+        try:
+            return int(auth_payload.get("user_id"))
+        except (TypeError, ValueError):
+            pass
+    raw_value = str(os.getenv("SINGLE_USER_RUNTIME_USER_ID", "0")).strip() or "0"
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _mask_runtime_secret(value: str) -> str:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return "-"
+    if len(raw_value) <= 8:
+        return f"{raw_value[:2]}***{raw_value[-1:]}"
+    return f"{raw_value[:4]}***{raw_value[-4:]}"
+
+
+def _get_runtime_session_credentials(use_testnet: bool) -> dict | None:
+    payload = st.session_state.get(_runtime_credential_session_key(use_testnet)) or {}
+    api_key = str(payload.get("api_key") or "").strip()
+    api_secret = str(payload.get("api_secret") or "").strip()
+    if not api_key or not api_secret:
+        return None
+    return {
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "source": str(payload.get("source") or "session"),
+        "persisted": bool(payload.get("persisted", False)),
+    }
+
+
+def _store_runtime_session_credentials(
+    use_testnet: bool,
+    *,
+    api_key: str,
+    api_secret: str,
+    source: str = "session",
+    persisted: bool = False,
+) -> None:
+    st.session_state[_runtime_credential_session_key(use_testnet)] = {
+        "api_key": str(api_key or "").strip(),
+        "api_secret": str(api_secret or "").strip(),
+        "source": str(source or "session"),
+        "persisted": bool(persisted),
+    }
+
+
+def _clear_runtime_session_credentials(use_testnet: bool) -> None:
+    st.session_state.pop(_runtime_credential_session_key(use_testnet), None)
+
+
+def _load_runtime_vault_credentials(use_testnet: bool) -> dict | None:
+    try:
+        from services.credential_vault import CredentialVault
+
+        vault = CredentialVault(strict=False)
+    except Exception:
+        return None
+
+    if not vault.is_configured():
+        return None
+
+    try:
+        credentials = vault.load_exchange_credentials(
+            db,
+            user_id=_runtime_credential_user_id(),
+            account_id=_runtime_credential_account_id(use_testnet),
+            exchange=_runtime_credential_exchange_name(),
+        )
+    except Exception:
+        return None
+
+    api_key = str(credentials.get("api_key") or "").strip()
+    api_secret = str(credentials.get("api_secret") or "").strip()
+    if not api_key or not api_secret:
+        return None
+
+    return {
+        "api_key": api_key,
+        "api_secret": api_secret,
+        "source": "vault",
+        "persisted": True,
+    }
+
+
+def _resolve_runtime_credentials(use_testnet: bool) -> dict | None:
+    session_credentials = _get_runtime_session_credentials(use_testnet)
+    if session_credentials:
+        return {
+            **session_credentials,
+            "source_label": "sessão",
+        }
+
+    vault_credentials = _load_runtime_vault_credentials(use_testnet)
+    if vault_credentials:
+        return {
+            **vault_credentials,
+            "source_label": "vault",
+        }
+
+    api_env_name, secret_env_name = _runtime_credential_env_names(use_testnet)
+    api_key = str(os.getenv(api_env_name, "")).strip()
+    api_secret = str(os.getenv(secret_env_name, "")).strip()
+    if api_key and api_secret:
+        return {
+            "api_key": api_key,
+            "api_secret": api_secret,
+            "source": "env",
+            "source_label": "env",
+            "persisted": True,
+        }
+
+    return None
+
+
+def _apply_runtime_credentials_to_process_env(process_env: dict, *, use_testnet: bool) -> dict:
+    credentials = _resolve_runtime_credentials(use_testnet)
+    target_api_env, target_secret_env = _runtime_credential_env_names(use_testnet)
+
+    for env_name in (
+        "BINANCE_API_KEY",
+        "BINANCE_SECRET_KEY",
+        "BINANCE_TESTNET_API_KEY",
+        "BINANCE_TESTNET_SECRET_KEY",
+        "BYBIT_API_KEY",
+        "BYBIT_SECRET_KEY",
+        "BYBIT_TESTNET_API_KEY",
+        "BYBIT_TESTNET_SECRET_KEY",
+    ):
+        process_env.pop(env_name, None)
+
+    if not credentials:
+        return {
+            "configured": False,
+            "source": "none",
+        }
+
+    process_env[target_api_env] = str(credentials.get("api_key") or "").strip()
+    process_env[target_secret_env] = str(credentials.get("api_secret") or "").strip()
+    process_env["RUNTIME_CREDENTIAL_SOURCE"] = str(credentials.get("source") or "unknown")
+    process_env["RUNTIME_CREDENTIAL_MODE"] = _runtime_credential_slot(use_testnet)
+    return {
+        "configured": True,
+        "source": str(credentials.get("source") or "unknown"),
+    }
+
+
+def _build_runtime_entry_engine_lines(snapshot: dict | None) -> list[str]:
+    snapshot = snapshot or {}
+    long_setups: list[str] = []
+    short_setups: list[str] = []
+
+    if bool(snapshot.get("allow_long", True)):
+        if bool(snapshot.get("enable_long_pullback", True)):
+            long_setups.append("pullback_long")
+        long_setups.append("trend_resume_long")
+
+    if bool(snapshot.get("allow_short", True)):
+        if bool(snapshot.get("enable_short_pullback", True)):
+            short_setups.append("pullback_short")
+        if bool(snapshot.get("enable_short_relief_rally", False)):
+            short_setups.append("relief_rally_short")
+        if bool(snapshot.get("enable_short_resume", False)):
+            short_setups.append("trend_resume_short")
+
+    return [
+        f"Long ativos: {', '.join(long_setups) if long_setups else '-'}",
+        f"Short ativos: {', '.join(short_setups) if short_setups else '-'}",
+        (
+            "Filtros-base: "
+            f"RSI {snapshot.get('buy_rsi_signal', '-')}/{snapshot.get('sell_rsi_signal', '-')} | "
+            f"ADX {snapshot.get('long_adx_threshold', '-')}/{snapshot.get('short_adx_threshold', '-')} | "
+            f"vol {snapshot.get('long_volume_ratio_required', '-')}/{snapshot.get('short_volume_ratio_required', '-')}"
+        ),
+        (
+            "Stops/Alvos: "
+            f"long {snapshot.get('long_stop_loss_pct', '-')}/{snapshot.get('long_take_profit_pct', '-')} | "
+            f"short {snapshot.get('short_stop_loss_pct', '-')}/{snapshot.get('short_take_profit_pct', '-')}"
+        ),
+        (
+            "Horas bloqueadas UTC: "
+            f"long {snapshot.get('blocked_long_entry_hours_utc', [])} | "
+            f"short {snapshot.get('blocked_short_entry_hours_utc', [])}"
+        ),
+    ]
 
 
 def _validate_live_runtime_preflight(use_testnet: bool):
@@ -1215,10 +1943,9 @@ def _validate_live_runtime_preflight(use_testnet: bool):
     if confirmation != "EU_ASSUMO_RISCO":
         return False, "Modo real exige LIVE_TRADING_CONFIRMATION=EU_ASSUMO_RISCO."
 
-    api_key = os.getenv("BINANCE_API_KEY", "").strip()
-    api_secret = os.getenv("BINANCE_SECRET_KEY", "").strip()
-    if not api_key or not api_secret:
-        return False, "Modo real exige BINANCE_API_KEY e BINANCE_SECRET_KEY configurados."
+    credentials = _resolve_runtime_credentials(use_testnet=False)
+    if not credentials:
+        return False, "Modo real exige credenciais reais configuradas na aba de runtime, no vault ou no ambiente."
 
     try:
         import config as runtime_config
@@ -1239,7 +1966,11 @@ def _validate_live_runtime_preflight(use_testnet: bool):
 
 
 def start_trader_bot_process(use_testnet: bool = True):
-    current_state = get_trader_bot_process_state()
+    runtime_key = _resolve_account_runtime_key(use_testnet)
+    current_state = get_trader_bot_process_state(
+        runtime_db_state=get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1),
+        runtime_key=runtime_key,
+    )
     if current_state["running"]:
         return True, f"Bot já está ativo (PID {current_state['pid']}) em {current_state.get('mode_label', 'modo desconhecido')}."
 
@@ -1254,50 +1985,256 @@ def start_trader_bot_process(use_testnet: bool = True):
     creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     process_env = os.environ.copy()
     process_env["TESTNET"] = "true" if bool(use_testnet) else "false"
+    process_env["TRADER_BOT_LAUNCH_SOURCE"] = "dashboard"
+    process_env["PYTHONUNBUFFERED"] = "1"
+    process_env["SINGLE_USER_RUNTIME_USER_ID"] = str(_runtime_credential_user_id())
+    process_env["SINGLE_USER_RUNTIME_ACCOUNT_ID"] = _runtime_credential_account_id(use_testnet)
+    process_env["SINGLE_USER_RUNTIME_EXCHANGE"] = _runtime_credential_exchange_name()
+    process_env["TRADER_BOT_RUNTIME_KEY"] = runtime_key
+    process_env["BOT_EXECUTION_LOG_PATH"] = str(get_runtime_execution_log_path(runtime_key))
+    credential_runtime = _apply_runtime_credentials_to_process_env(process_env, use_testnet=bool(use_testnet))
+    process_state_path = get_runtime_process_state_path(runtime_key)
+    stop_request_path = get_runtime_stop_request_path(runtime_key)
+    stdout_log_path = get_runtime_stdout_log_path(runtime_key)
+    stderr_log_path = get_runtime_stderr_log_path(runtime_key)
+    BOT_EXECUTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    clear_runtime_stop_request(path=stop_request_path)
 
+    stdout_handle = None
+    stderr_handle = None
     try:
+        stdout_handle = open(stdout_log_path, "a", encoding="utf-8")
+        stderr_handle = open(stderr_log_path, "a", encoding="utf-8")
         process = subprocess.Popen(
             [sys.executable, str(entrypoint)],
             cwd=str(entrypoint.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
             creationflags=creationflags,
             env=process_env,
         )
     except Exception as exc:
         logger.warning("Falha ao iniciar processo do bot trader.", exc_info=True)
         return False, str(exc)
+    finally:
+        if stdout_handle is not None:
+            stdout_handle.close()
+        if stderr_handle is not None:
+            stderr_handle.close()
+
+    time.sleep(1.0)
+    if process.poll() is not None:
+        clear_runtime_process_state(path=process_state_path)
+        stderr_tail = tail_text_file(stderr_log_path, max_lines=40, max_chars=4000)
+        error_hint = stderr_tail or "Processo encerrou logo após o start. Verifique os logs do runner."
+        return False, error_hint
+
+    write_runtime_process_state(
+        pid=process.pid,
+        use_testnet=bool(use_testnet),
+        entrypoint=str(entrypoint),
+        source="dashboard",
+        command=f"{sys.executable} {entrypoint.name}",
+        path=process_state_path,
+        extra={
+            "runtime_key": runtime_key,
+            "user_id": _runtime_credential_user_id(),
+            "account_id": _runtime_credential_account_id(use_testnet),
+            "stdout_log": str(stdout_log_path),
+            "stderr_log": str(stderr_log_path),
+            "execution_log": str(get_runtime_execution_log_path(runtime_key)),
+        },
+    )
 
     st.session_state.trader_bot_testnet = bool(use_testnet)
-    st.session_state.trader_bot_pid = process.pid
+    st.session_state[_runtime_session_pid_key(runtime_key)] = process.pid
     st.session_state.telegram_trading_bot_started = True
+    clear_dashboard_data_caches()
     mode_label = "Testnet" if bool(use_testnet) else "Conta Real"
-    return True, f"Bot trader iniciado em background (PID {process.pid}) | modo: {mode_label}."
+    credential_hint = ""
+    if credential_runtime.get("configured"):
+        credential_hint = f" | credencial: {credential_runtime.get('source')}"
+    return True, f"Bot trader iniciado em background (PID {process.pid}) | modo: {mode_label}{credential_hint}."
 
 
 def stop_trader_bot_process():
-    current_state = get_trader_bot_process_state()
+    use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    runtime_key = _resolve_account_runtime_key(use_testnet)
+    process_state_path = get_runtime_process_state_path(runtime_key)
+    stop_request_path = get_runtime_stop_request_path(runtime_key)
+    current_state = get_trader_bot_process_state(
+        runtime_db_state=get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1),
+        runtime_key=runtime_key,
+    )
     pid = current_state.get("pid")
-    if not pid:
+    if not pid and not current_state.get("heartbeat_fresh"):
         return False, "Nenhum bot trader ativo nesta sessão."
 
+    request_runtime_stop(path=stop_request_path)
     try:
-        os.kill(int(pid), signal.SIGTERM)
-    except Exception:
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception as exc:
-            logger.warning("Falha ao encerrar processo do bot trader.", exc_info=True)
-            return False, str(exc)
+        if pid:
+            deadline = time.time() + 8.0
+            while _is_process_running(pid) and time.time() < deadline:
+                time.sleep(0.5)
+            if _is_process_running(pid):
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+    except Exception as exc:
+        logger.warning("Falha ao encerrar processo do bot trader.", exc_info=True)
+        return False, str(exc)
 
-    st.session_state.trader_bot_pid = None
+    st.session_state[_runtime_session_pid_key(runtime_key)] = None
     st.session_state.telegram_trading_bot_started = False
-    return True, f"Solicitação de parada enviada para o PID {pid}."
+    clear_runtime_process_state(path=process_state_path)
+    clear_runtime_stop_request(path=stop_request_path)
+    clear_dashboard_data_caches()
+    if pid:
+        return True, f"Solicitação de parada enviada para o PID {pid}."
+    return True, "Solicitação de parada enviada para o runtime monitorado pelo heartbeat."
+
+
+def render_runtime_credentials_panel(
+    section_key: str = "runtime_credentials",
+    default_use_testnet: bool = True,
+):
+    st.markdown("### 🔐 Credenciais do Runtime")
+    st.caption(
+        "Aqui a gente separa `testnet` e `conta real`. "
+        "Se o vault estiver configurado, as chaves podem ficar persistidas com criptografia; "
+        "senão elas ficam só na sessão atual da dashboard."
+    )
+
+    try:
+        from services.credential_vault import CredentialVault
+
+        vault = CredentialVault(strict=False)
+    except Exception:
+        vault = None
+
+    vault_ready = bool(vault and vault.is_configured())
+    exchange_name = _runtime_credential_exchange_name()
+    slot_order = (
+        [(True, "Testnet"), (False, "Conta Real")]
+        if bool(default_use_testnet)
+        else [(False, "Conta Real"), (True, "Testnet")]
+    )
+    tabs = st.tabs([label for _, label in slot_order])
+
+    for (use_testnet, _label), tab in zip(slot_order, tabs):
+        slot = _runtime_credential_slot(use_testnet)
+        resolved = _resolve_runtime_credentials(use_testnet)
+        env_api_name, env_secret_name = _runtime_credential_env_names(use_testnet)
+
+        with tab:
+            status_col1, status_col2, status_col3 = st.columns(3)
+            with status_col1:
+                st.metric("Configurada", "SIM" if resolved else "NÃO")
+            with status_col2:
+                st.metric("Origem Ativa", (resolved or {}).get("source_label", "-").upper())
+            with status_col3:
+                st.metric("Exchange", exchange_name)
+
+            if resolved:
+                st.caption(
+                    f"API Key: {_mask_runtime_secret(resolved.get('api_key', ''))} | "
+                    f"API Secret: {_mask_runtime_secret(resolved.get('api_secret', ''))}"
+                )
+            else:
+                st.caption("Nenhuma credencial ativa neste slot ainda.")
+
+            if use_testnet:
+                st.info(
+                    "No fluxo atual, `testnet` costuma rodar em paper. "
+                    "Mesmo assim, este slot já fica separado e pronto para futuras validações."
+                )
+            else:
+                st.warning(
+                    "As credenciais reais só entram no processo quando você seleciona `Conta Real` e liga o runtime."
+                )
+
+            st.caption(
+                f"Fallback por ambiente: `{env_api_name}` / `{env_secret_name}`. "
+                f"Conta salva no vault: `{_runtime_credential_account_id(use_testnet)}`."
+            )
+
+            with st.form(f"{section_key}_{slot}_form"):
+                api_key = st.text_input(
+                    "API Key",
+                    type="password",
+                    key=f"{section_key}_{slot}_api_key",
+                    help="Cole aqui a chave da exchange correspondente a este ambiente.",
+                )
+                api_secret = st.text_input(
+                    "API Secret",
+                    type="password",
+                    key=f"{section_key}_{slot}_api_secret",
+                    help="Cole aqui o segredo correspondente à mesma chave.",
+                )
+                action_col1, action_col2, action_col3 = st.columns(3)
+                with action_col1:
+                    save_session = st.form_submit_button("Salvar nesta sessão")
+                with action_col2:
+                    save_vault = st.form_submit_button("Salvar no Vault", disabled=not vault_ready)
+                with action_col3:
+                    clear_session = st.form_submit_button("Limpar sessão")
+
+                if save_session:
+                    if api_key and api_secret:
+                        _store_runtime_session_credentials(
+                            use_testnet,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            source="session",
+                            persisted=False,
+                        )
+                        st.success("Credenciais carregadas nesta sessão da dashboard.")
+                        st.rerun()
+                    else:
+                        st.warning("Preencha API Key e API Secret para salvar nesta sessão.")
+
+                if save_vault:
+                    if not vault_ready:
+                        st.error("Vault não configurado. Defina `CREDENTIAL_ENCRYPTION_KEY` para persistir com criptografia.")
+                    elif api_key and api_secret:
+                        vault.store_exchange_credentials(
+                            db,
+                            user_id=_runtime_credential_user_id(),
+                            account_id=_runtime_credential_account_id(use_testnet),
+                            exchange=exchange_name,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            credential_alias=f"runtime-{slot}",
+                            permissions_read=True,
+                            permissions_trade=True,
+                            permissions_withdraw=False,
+                            permission_status="unknown",
+                            token_status="unknown",
+                            reconciliation_status="unknown",
+                            notes=f"Credencial local do runtime ({slot}).",
+                        )
+                        _store_runtime_session_credentials(
+                            use_testnet,
+                            api_key=api_key,
+                            api_secret=api_secret,
+                            source="vault",
+                            persisted=True,
+                        )
+                        st.success("Credenciais persistidas com criptografia e carregadas na sessão.")
+                        st.rerun()
+                    else:
+                        st.warning("Preencha API Key e API Secret antes de salvar no vault.")
+
+                if clear_session:
+                    _clear_runtime_session_credentials(use_testnet)
+                    st.success("Credenciais removidas da sessão atual.")
+                    st.rerun()
+
+            if not vault_ready:
+                st.caption("Vault indisponível neste ambiente. As chaves podem ser usadas nesta sessão, mas não ficam persistidas com criptografia.")
 
 
 def render_bot_telegram_notifications_panel(section_key: str = "bot_runtime_telegram"):
@@ -1412,17 +2349,284 @@ def render_bot_telegram_notifications_panel(section_key: str = "bot_runtime_tele
                     st.error(message)
 
 
+@st.fragment(run_every=5)
+def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_runtime_monitor"):
+    get_cached_bot_runtime_db_state.clear()
+    runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
+    trader_bot_state = get_trader_bot_process_state(runtime_db_state=runtime_db_state, runtime_key=runtime_key)
+    process_metadata = trader_bot_state.get("metadata") or {}
+    payload = (runtime_db_state or {}).get("state_payload") or {}
+    position = payload.get("position") or {}
+    risk_state = payload.get("risk_state") or {}
+    snapshot = payload.get("snapshot") or {}
+    entry_runtime = payload.get("entry_runtime") or {}
+    last_signal_details = payload.get("last_signal_details") or {}
+
+    monitor_col1, monitor_col2, monitor_col3, monitor_col4 = st.columns(4)
+    with monitor_col1:
+        st.metric("Fonte Status", str(trader_bot_state.get("status_source") or "-").upper())
+    with monitor_col2:
+        st.metric("Heartbeat", _format_age_label(trader_bot_state.get("heartbeat_age_seconds")))
+    with monitor_col3:
+        st.metric("Controle", "SIM" if trader_bot_state.get("controllable") else "MONITOR")
+    with monitor_col4:
+        st.metric("Process File", "OK" if process_metadata else "AUSENTE")
+
+    if process_metadata:
+        st.caption(
+            f"Process state: {trader_bot_state.get('process_state_file')} | "
+            f"source={process_metadata.get('source') or '-'} | "
+            f"started_at={process_metadata.get('started_at') or '-'}"
+        )
+
+    runtime_tab1, runtime_tab2, runtime_tab3, runtime_tab4 = st.tabs(["Operação", "Entradas", "Posição", "Logs"])
+
+    with runtime_tab1:
+        if runtime_db_state:
+            op_col1, op_col2, op_col3, op_col4 = st.columns(4)
+            with op_col1:
+                st.metric("DB Status", runtime_db_state.get("status") or "-")
+            with op_col2:
+                st.metric("Último Candle", str(runtime_db_state.get("last_candle_timestamp") or "-"))
+            with op_col3:
+                st.metric("Último Sinal", str(runtime_db_state.get("last_signal") or "-"))
+            with op_col4:
+                st.metric("Preço Sinal", f"{float(runtime_db_state.get('last_signal_price') or 0.0):.2f}" if runtime_db_state.get("last_signal_price") is not None else "-")
+
+            st.caption(
+                f"Motivo do último sinal: {runtime_db_state.get('last_signal_reason') or '-'} | "
+                f"Strategy version: {runtime_db_state.get('strategy_version') or '-'}"
+            )
+            if runtime_db_state.get("blocked"):
+                st.warning(f"Runtime bloqueado: {runtime_db_state.get('block_reason') or 'sem motivo informado'}")
+            if runtime_db_state.get("last_error"):
+                st.error(f"Último erro persistido: {runtime_db_state.get('last_error')}")
+        else:
+            st.info("Sem snapshot persistido do runtime ainda.")
+
+    with runtime_tab2:
+        started_at_raw = entry_runtime.get("started_at_utc") or process_metadata.get("started_at")
+        started_at = _parse_runtime_datetime(started_at_raw)
+        first_entry_at = _parse_runtime_datetime(entry_runtime.get("first_entry_at_utc"))
+        current_wait_seconds = None
+        if started_at is not None and first_entry_at is None:
+            current_wait_seconds = max((datetime.now(started_at.tzinfo) - started_at).total_seconds(), 0.0)
+
+        entry_col1, entry_col2, entry_col3, entry_col4 = st.columns(4)
+        with entry_col1:
+            first_order_label = "OK" if entry_runtime.get("first_entry_at_utc") else "AGUARDANDO"
+            st.metric("Primeira Ordem", first_order_label)
+        with entry_col2:
+            if entry_runtime.get("first_entry_delay_sec") is not None:
+                delay_label = f"{float(entry_runtime.get('first_entry_delay_sec') or 0.0):.1f}s"
+            else:
+                delay_label = _format_age_label(current_wait_seconds)
+            st.metric("Tempo até 1ª Ordem", delay_label)
+        with entry_col3:
+            st.metric("Sinais Ação", int(entry_runtime.get("actionable_signal_count", 0) or 0))
+        with entry_col4:
+            st.metric("Entradas Sessão", int(entry_runtime.get("entry_count", 0) or 0))
+
+        if started_at_raw:
+            st.caption(
+                f"Runtime iniciado em: {started_at_raw} | "
+                f"Candles processados: {int(entry_runtime.get('processed_candles', 0) or 0)}"
+            )
+
+        st.markdown("#### Motor de Entrada")
+        for line in _build_runtime_entry_engine_lines(snapshot):
+            st.write(f"- {line}")
+
+        if last_signal_details:
+            st.markdown("#### Último Sinal Avaliado")
+            signal_col1, signal_col2, signal_col3, signal_col4 = st.columns(4)
+            with signal_col1:
+                st.metric("Sinal", str(last_signal_details.get("signal") or "-").upper())
+            with signal_col2:
+                st.metric("Setup", str(last_signal_details.get("setup_name") or "-"))
+            with signal_col3:
+                score_value = last_signal_details.get("score")
+                st.metric("Score", "-" if score_value is None else f"{float(score_value):.1f}")
+            with signal_col4:
+                atr_value = last_signal_details.get("atr")
+                st.metric("ATR", "-" if atr_value is None else f"{float(atr_value):.4f}")
+            st.caption(f"Motivo: {last_signal_details.get('reason') or '-'}")
+
+        last_entry = entry_runtime.get("last_entry") or {}
+        if last_entry:
+            st.markdown("#### Última Entrada")
+            entry_info_col1, entry_info_col2, entry_info_col3, entry_info_col4 = st.columns(4)
+            with entry_info_col1:
+                st.metric("Side", str(last_entry.get("side") or "-").upper())
+            with entry_info_col2:
+                st.metric("Setup", str(last_entry.get("setup_name") or "-"))
+            with entry_info_col3:
+                last_entry_score = last_entry.get("score")
+                st.metric("Score", "-" if last_entry_score is None else f"{float(last_entry_score):.1f}")
+            with entry_info_col4:
+                st.metric("Modo Execução", str(last_entry.get("execution_mode") or "-"))
+            st.caption(
+                f"Preço: {float(last_entry.get('entry_price') or 0.0):.2f} | "
+                f"Qty: {float(last_entry.get('quantity') or 0.0):.6f} | "
+                f"Candle: {last_entry.get('candle_timestamp') or '-'} | "
+                f"Motivo: {last_entry.get('reason') or '-'}"
+            )
+
+        last_blocked_entry = entry_runtime.get("last_blocked_entry") or {}
+        if last_blocked_entry:
+            st.markdown("#### Última Entrada Bloqueada")
+            st.warning(
+                f"{str(last_blocked_entry.get('signal') or '-').upper()} | "
+                f"setup={last_blocked_entry.get('setup_name') or '-'} | "
+                f"score={last_blocked_entry.get('score') if last_blocked_entry.get('score') is not None else '-'} | "
+                f"etapa={last_blocked_entry.get('stage') or '-'}"
+            )
+            st.caption(
+                f"Candle: {last_blocked_entry.get('candle_timestamp') or '-'} | "
+                f"Motivo: {last_blocked_entry.get('reason') or '-'}"
+            )
+
+    with runtime_tab3:
+        risk_col1, risk_col2, risk_col3 = st.columns(3)
+        with risk_col1:
+            st.metric("Daily PnL %", f"{float(risk_state.get('daily_realized_pct', 0.0) or 0.0):.2f}%")
+        with risk_col2:
+            st.metric("Losses Seguidas", int(risk_state.get("consecutive_losses", 0) or 0))
+        with risk_col3:
+            st.metric("Bloqueado", "SIM" if risk_state.get("blocked") else "NÃO")
+
+        if position:
+            pos_col1, pos_col2, pos_col3, pos_col4 = st.columns(4)
+            with pos_col1:
+                st.metric("Side", str(position.get("side") or "-").upper())
+            with pos_col2:
+                st.metric("Entry", f"{float(position.get('entry_price') or 0.0):.2f}")
+            with pos_col3:
+                st.metric("Stop Atual", f"{float(position.get('current_stop') or 0.0):.2f}")
+            with pos_col4:
+                st.metric("Alvo Parcial", f"{float(position.get('partial_target') or 0.0):.2f}")
+            st.caption(
+                f"Best price: {float(position.get('best_price') or 0.0):.2f} | "
+                f"Execution profile: {position.get('execution_profile') or '-'} | "
+                f"Entry timestamp: {position.get('entry_timestamp') or '-'}"
+            )
+        else:
+            st.info("Sem posição aberta no snapshot atual.")
+
+        with st.expander("Snapshot bruto do runtime", expanded=False):
+            st.json(
+                {
+                    "risk_state": risk_state,
+                    "position": position,
+                    "snapshot": snapshot,
+                    "entry_runtime": entry_runtime,
+                    "last_signal_details": last_signal_details,
+                }
+            )
+
+    with runtime_tab4:
+        log_options = {
+            "Execução": BOT_EXECUTION_LOG_PATH,
+            "Runner stdout": BOT_RUNNER_STDOUT_LOG_PATH,
+            "Runner stderr": BOT_RUNNER_STDERR_LOG_PATH,
+        }
+        selected_log = st.selectbox(
+            "Arquivo de log",
+            options=list(log_options.keys()),
+            key=f"{section_key}_log_file",
+        )
+        log_lines = st.slider(
+            "Linhas finais",
+            min_value=40,
+            max_value=400,
+            value=120,
+            step=20,
+            key=f"{section_key}_log_lines",
+        )
+        log_text = tail_text_file(log_options[selected_log], max_lines=log_lines)
+        if log_text:
+            st.code(log_text, language="text")
+        else:
+            st.info("Sem conteúdo de log disponível neste arquivo.")
+
+
+def render_live_go_live_status_panel(section_key: str = "bot_go_live_status"):
+    report = get_cached_live_go_live_report()
+    if not report:
+        st.info("Checklist de go-live indisponível no momento.")
+        return None
+
+    checks = report.get("checks") or []
+    fail_count = sum(1 for item in checks if item.get("status") == "FAIL")
+    warn_count = sum(1 for item in checks if item.get("status") == "WARN")
+    info_count = sum(1 for item in checks if item.get("status") == "INFO")
+
+    st.markdown("### 🛡️ Prontidão Conta Real")
+    status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+    with status_col1:
+        st.metric(
+            "Estrutura Alinhada",
+            "SIM" if bool(report.get("structure_aligned_for_conservative_live")) else "NÃO",
+        )
+    with status_col2:
+        st.metric(
+            "Live Armado",
+            "SIM" if bool(report.get("live_mode_armed")) else "NÃO",
+        )
+    with status_col3:
+        st.metric("Checks FAIL", fail_count)
+    with status_col4:
+        st.metric("Checks WARN", warn_count)
+
+    st.caption(
+        f"Relatório: {report.get('latest_backtest_report') or '-'} | "
+        f"INFO={info_count} | gerado em {report.get('generated_at_utc') or '-'}"
+    )
+
+    with st.expander("Ver checklist automático de go-live", expanded=False):
+        for item in checks:
+            status = str(item.get("status") or "-").upper()
+            detail = str(item.get("detail") or "-")
+            action = str(item.get("action") or "").strip()
+            if status == "FAIL":
+                st.error(f"[{status}] {item.get('name')}: {detail}")
+            elif status == "WARN":
+                st.warning(f"[{status}] {item.get('name')}: {detail}")
+            elif status == "PASS":
+                st.success(f"[{status}] {item.get('name')}: {detail}")
+            else:
+                st.info(f"[{status}] {item.get('name')}: {detail}")
+            if action:
+                st.caption(f"Ação: {action}")
+
+    return report
+
+
 def render_trader_bot_runtime_controls(
     section_key: str = "bot_trader_runtime",
     allow_start: bool = True,
     block_reason: str = "",
 ):
-    trader_bot_state = get_trader_bot_process_state()
+    selected_runtime_mode_for_key = str(
+        st.session_state.get(f"{section_key}_runtime_mode")
+        or ("testnet" if bool(st.session_state.get("trader_bot_testnet", True)) else "real")
+    )
+    runtime_key = _resolve_account_runtime_key(selected_runtime_mode_for_key == "testnet")
+    runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
+    trader_bot_state = get_trader_bot_process_state(runtime_db_state=runtime_db_state, runtime_key=runtime_key)
     managed_externally = bool(trader_bot_state.get("managed_externally"))
     runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
     runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
-    runtime_key = f"primary:{runtime_symbol}:{runtime_timeframe}"
-    runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
+
+    render_dashboard_strip(
+        "Use esta área para controlar o processo local do bot sem sair da dashboard.",
+        badges=[
+            _build_status_pill("Runtime", "ON" if trader_bot_state.get("running") else "OFF", "accent" if trader_bot_state.get("running") else "danger"),
+            _build_status_pill("Modo", trader_bot_state.get("mode_label", "Testnet"), "warm"),
+            _build_status_pill("Mercado", f"{runtime_symbol} · {runtime_timeframe}", "default"),
+            _build_status_pill("Entrada", Path(trader_bot_state.get("entrypoint", "bot_runner.py")).name, "default"),
+        ],
+    )
 
     bot_runtime_col1, bot_runtime_col2, bot_runtime_col3, bot_runtime_col4 = st.columns(4)
     with bot_runtime_col1:
@@ -1479,15 +2683,47 @@ def render_trader_bot_runtime_controls(
     selected_use_testnet = selected_runtime_mode == "testnet"
     if not bool(trader_bot_state.get("running")):
         st.session_state.trader_bot_testnet = bool(selected_use_testnet)
-    if not selected_use_testnet:
-        st.warning("Conta Real selecionada. Confirme API keys e limites de risco antes de ligar.")
 
-    bot_control_col1, bot_control_col2 = st.columns(2)
+    render_runtime_credentials_panel(
+        section_key=f"{section_key}_credentials",
+        default_use_testnet=selected_use_testnet,
+    )
+    selected_credentials = _resolve_runtime_credentials(selected_use_testnet)
+    if not selected_use_testnet and selected_credentials and str(selected_credentials.get("source") or "") == "session":
+        st.info(
+            "Credencial real carregada só nesta sessão. "
+            "Ela já serve para ligar o runtime, mas o checklist automático de go-live continua mais rígido "
+            "e só considera `env` ou `vault` como persistência."
+        )
+
+    real_preflight_ok = True
+    real_preflight_message = ""
+    if not selected_use_testnet:
+        real_preflight_ok, real_preflight_message = _validate_live_runtime_preflight(use_testnet=False)
+        if real_preflight_ok:
+            st.warning("Conta Real selecionada. Faça a virada apenas quando o piloto estiver realmente decidido.")
+        else:
+            st.error(f"Conta Real bloqueada agora: {real_preflight_message}")
+
+    live_go_live_report = render_live_go_live_status_panel(section_key=f"{section_key}_go_live")
+    if not selected_use_testnet and live_go_live_report and not bool(live_go_live_report.get("structure_aligned_for_conservative_live")):
+        st.warning("A estrutura do projeto ainda não está suficientemente alinhada para um piloto real conservador.")
+
+    credential_source = str((selected_credentials or {}).get("source") or "não configurada")
+    render_dashboard_strip(
+        "A seleção de ambiente fica travada enquanto o processo estiver em execução, para evitar mudanças acidentais no meio da operação.",
+        badges=[
+            _build_status_pill("Ambiente", "Testnet" if selected_use_testnet else "Conta Real", "accent" if selected_use_testnet else "danger"),
+            _build_status_pill("Credencial", credential_source, "warm" if credential_source not in {"não configurada", "none"} else "danger"),
+        ],
+    )
+
+    bot_control_col1, bot_control_col2, bot_control_col3 = st.columns([1, 1, 0.8])
     with bot_control_col1:
         if st.button(
             "▶️ Ligar Bot Trader",
             key=f"{section_key}_start",
-            disabled=managed_externally or bool(trader_bot_state.get("running")) or not bool(allow_start),
+            disabled=managed_externally or bool(trader_bot_state.get("running")) or not bool(allow_start) or (not selected_use_testnet and not real_preflight_ok),
         ):
             success, message = start_trader_bot_process(use_testnet=selected_use_testnet)
             if success:
@@ -1507,6 +2743,12 @@ def render_trader_bot_runtime_controls(
                 st.rerun()
             else:
                 st.error(message)
+    with bot_control_col3:
+        if st.button(
+            "🔄 Atualizar Painel",
+            key=f"{section_key}_refresh",
+        ):
+            st.rerun()
 
     if managed_externally:
         st.info("Runtime gerenciado externamente (RAILWAY_SERVICE_MODE=all). Status ON sincronizado pelo ambiente.")
@@ -1518,6 +2760,9 @@ def render_trader_bot_runtime_controls(
         "Use para subir ou derrubar o bot trader sem sair da dashboard. "
         "O botão de ligar injeta TESTNET=true/false conforme o modo escolhido."
     )
+    st.markdown("### 👀 Monitor Operacional")
+    st.caption("Este bloco atualiza sozinho a cada 5 segundos enquanto a aba estiver aberta.")
+    render_trader_bot_runtime_monitor(runtime_key=runtime_key, section_key=f"{section_key}_monitor")
     return trader_bot_state
 
 
@@ -2692,8 +3937,7 @@ def render_multiuser_workspace_tab():
             - risco, permissões e governança são acompanhados por conta
 
             Como entrar pela primeira vez:
-            - você cria sua conta em `Sidebar > Criar Conta Agora`
-            - ou um admin cria seu acesso em `Admin > Acessos`
+            - o administrador cria seu acesso para você
             - você recebe `login` e `senha inicial`
             - faz login na barra lateral em `Workspace Multiusuário`
             """
@@ -3273,6 +4517,7 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    inject_dashboard_theme()
 
     # Incluir JavaScript para refresh suave
     st.markdown("""
@@ -3328,11 +4573,40 @@ def main():
     # Exchange selection
     st.sidebar.subheader("🌎 Exchange")
 
-    # Usar sempre Binance WebSocket público
-    selected_exchange = 'binanceusdm'
-    st.sidebar.success("✅ **Binance WebSocket Público** - Funcionando sem credenciais")
-    st.sidebar.info("📡 Dados em tempo real via WebSocket público da Binance Futures")
-    st.sidebar.info("🔹 Sem limite de requisições API - Dados streaming 24/7")
+    supported_exchanges = [
+        ExchangeConfig.normalize_exchange_name(exchange_name)
+        for exchange_name in (AppConfig.BRAZIL_SUPPORTED_EXCHANGES or ["binanceusdm"])
+    ]
+    supported_exchanges = list(dict.fromkeys(supported_exchanges)) or ["binanceusdm"]
+    current_exchange = ExchangeConfig.normalize_exchange_name(
+        st.session_state.get("runtime_exchange_name") or os.getenv("SINGLE_USER_RUNTIME_EXCHANGE", "binanceusdm")
+    )
+    if current_exchange not in supported_exchanges:
+        current_exchange = supported_exchanges[0]
+    exchange_label_by_name = {
+        exchange_name: ExchangeConfig.get_exchange_label(exchange_name)
+        for exchange_name in supported_exchanges
+    }
+    selected_exchange_label = st.sidebar.selectbox(
+        "Corretora do runtime",
+        options=[exchange_label_by_name[exchange_name] for exchange_name in supported_exchanges],
+        index=supported_exchanges.index(current_exchange),
+        key="runtime_exchange_selector",
+        help="Define onde as credenciais serão salvas e qual exchange o runtime real vai usar.",
+    )
+    selected_exchange = next(
+        exchange_name
+        for exchange_name, label in exchange_label_by_name.items()
+        if label == selected_exchange_label
+    )
+    st.session_state.runtime_exchange_name = selected_exchange
+    st.sidebar.success(f"✅ Runtime selecionado: {ExchangeConfig.get_exchange_label(selected_exchange)}")
+    if selected_exchange == "binanceusdm":
+        st.sidebar.info("📡 Mercado em tempo real via Binance Futures.")
+    else:
+        st.sidebar.warning(
+            "Bybit habilitada para credenciais/runtime via CCXT. Valide em testnet antes de operar conta real."
+        )
 
     initialize_dashboard_session_state()
     runtime_bootstrap_error = ""
@@ -3345,13 +4619,15 @@ def main():
 
     dashboard_user = get_authenticated_dashboard_user()
     admin_session_active = is_admin_dashboard_session_active()
+    admin_entry_requested = is_admin_dashboard_entry_requested()
     dashboard_sections = [
         ("workspace", "👤 Workspace"),
         ("market", "📈 Mercado"),
         ("bot", "🤖 Bot Trader"),
         ("backtest", "🔬 Backtest"),
-        ("admin", "👑 Admin"),
     ]
+    if admin_session_active or admin_entry_requested:
+        dashboard_sections.append(("admin", "👑 Admin"))
     dashboard_section_labels = [label for _, label in dashboard_sections]
     dashboard_section_by_label = {label: section_id for section_id, label in dashboard_sections}
     raw_default_dashboard_section = str(st.session_state.get("default_tab") or "").strip().lower()
@@ -3364,7 +4640,7 @@ def main():
     if default_dashboard_section not in {section_id for section_id, _ in dashboard_sections}:
         if dashboard_user:
             default_dashboard_section = "market"
-        elif admin_session_active:
+        elif admin_session_active or admin_entry_requested:
             default_dashboard_section = "admin"
         else:
             default_dashboard_section = "workspace"
@@ -3377,11 +4653,14 @@ def main():
 
     default_dashboard_index = next(
         (index for index, (section_id, _) in enumerate(dashboard_sections) if section_id == default_dashboard_section),
-        1 if dashboard_user else (4 if admin_session_active else 0),
+        1 if dashboard_user else (len(dashboard_sections) - 1 if admin_session_active or admin_entry_requested else 0),
     )
     sidebar_selected_dashboard_label = str(
         st.session_state.get("dashboard_main_section") or dashboard_section_labels[default_dashboard_index]
     )
+    if sidebar_selected_dashboard_label not in dashboard_section_by_label:
+        sidebar_selected_dashboard_label = dashboard_section_labels[default_dashboard_index]
+        st.session_state.dashboard_main_section = sidebar_selected_dashboard_label
     sidebar_active_section = dashboard_section_by_label.get(sidebar_selected_dashboard_label, default_dashboard_section)
     live_sidebar_sections = {"market"}
     show_live_sidebar_controls = sidebar_active_section in live_sidebar_sections
@@ -3418,6 +4697,15 @@ def main():
             st.sidebar.warning(
                 f"Sua assinatura expira em {int(subscription_payload.get('days_remaining', 0))} dia(s). Renove para não interromper o bot."
             )
+        license_payload = dashboard_user.get("license") or validate_dashboard_license_for_user(dashboard_user)
+        dashboard_user["license"] = license_payload
+        if license_payload.get("allowed"):
+            if license_payload.get("bound_now"):
+                st.sidebar.success("Licença vinculada a este acesso.")
+            else:
+                st.sidebar.success("Licença válida neste dispositivo/IP.")
+        else:
+            st.sidebar.error(f"Licença bloqueada: {license_payload.get('reason') or 'acesso não autorizado'}")
         if dashboard_user.get("require_password_change"):
             st.sidebar.warning("Troque sua senha no workspace antes de operar regularmente.")
         if st.sidebar.button("Sair do Workspace", key="dashboard_user_logout"):
@@ -3439,32 +4727,40 @@ def main():
                     password=password_value,
                 )
                 if authenticated_user:
-                    session_expires_at = (
-                        now_brazil() + timedelta(hours=ProductionConfig.DASHBOARD_USER_SESSION_TIMEOUT_HOURS)
-                    ).isoformat()
-                    authenticated_user["expires_at"] = session_expires_at
-                    try:
-                        session_token = db.create_dashboard_user_session(
-                            user_id=int(authenticated_user["user_id"]),
-                            login_name=str(authenticated_user.get("login_name") or login_value),
-                            expires_at=session_expires_at,
+                    license_payload = validate_dashboard_license_for_user(authenticated_user)
+                    authenticated_user["license"] = license_payload
+                    if not license_payload.get("allowed"):
+                        st.session_state.dashboard_user_auth_error = (
+                            "❌ Licença bloqueada para este IP/dispositivo. "
+                            f"Motivo: {license_payload.get('reason') or 'não autorizado'}."
                         )
-                        authenticated_user["session_token"] = session_token
-                        _set_persistent_dashboard_session_token(session_token)
-                    except Exception:
-                        logger.warning("Falha ao criar sessao persistente da dashboard.", exc_info=True)
-                    st.session_state.dashboard_user_auth = authenticated_user
-                    st.session_state.dashboard_user_login = ""
-                    st.session_state.dashboard_user_password = ""
-                    st.session_state.dashboard_user_auth_error = ""
-                    st.rerun()
+                    else:
+                        session_expires_at = (
+                            now_brazil() + timedelta(hours=ProductionConfig.DASHBOARD_USER_SESSION_TIMEOUT_HOURS)
+                        ).isoformat()
+                        authenticated_user["expires_at"] = session_expires_at
+                        try:
+                            session_token = db.create_dashboard_user_session(
+                                user_id=int(authenticated_user["user_id"]),
+                                login_name=str(authenticated_user.get("login_name") or login_value),
+                                expires_at=session_expires_at,
+                            )
+                            authenticated_user["session_token"] = session_token
+                            _set_persistent_dashboard_session_token(session_token)
+                        except Exception:
+                            logger.warning("Falha ao criar sessao persistente da dashboard.", exc_info=True)
+                        st.session_state.dashboard_user_auth = authenticated_user
+                        st.session_state.dashboard_user_login = ""
+                        st.session_state.dashboard_user_password = ""
+                        st.session_state.dashboard_user_auth_error = ""
+                        st.rerun()
                 else:
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
-        if ProductionConfig.ALLOW_SELF_SERVICE_SIGNUP:
+        if ProductionConfig.ALLOW_SELF_SERVICE_SIGNUP and admin_session_active:
             st.sidebar.caption(
-                "Acesso isolado por usuário. Crie sua conta abaixo e depois ative um plano para operar o bot."
+                "Cadastro assistido pelo Admin. Use apenas para criar acesso sob sua supervisão."
             )
             with st.sidebar.expander("📝 Criar Conta Agora", expanded=False):
                 with st.form("dashboard_self_signup_form"):
@@ -3507,24 +4803,24 @@ def main():
                                 st.error(f"Não foi possível criar a conta: {signup_exc}")
         else:
             st.sidebar.caption(
-                "Cadastro público desativado. Solicite acesso ao administrador."
+                "Cadastro público desativado. O acesso é liberado somente pelo administrador."
             )
 
     # Continue with sidebar configuration
 
     if show_live_sidebar_controls:
-        if st.sidebar.button("🧪 Testar WebSocket Binance"):
-            with st.spinner("Testando WebSocket público da Binance Futures..."):
+        if st.sidebar.button("🧪 Testar Exchange Selecionada"):
+            with st.spinner(f"Testando {ExchangeConfig.get_exchange_label(selected_exchange)}..."):
                 try:
                     use_testnet_runtime = str(os.getenv("TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
-                    success, message = ExchangeConfig.test_connection('binanceusdm', testnet=use_testnet_runtime)
+                    success, message = ExchangeConfig.test_connection(selected_exchange, testnet=use_testnet_runtime)
 
                     if success:
-                        st.sidebar.success("✅ WebSocket Público da Binance funcionando!")
+                        st.sidebar.success("✅ Exchange selecionada respondeu com sucesso!")
                         with st.sidebar.expander("📊 Detalhes da Conexão"):
                             st.text(message)
                     else:
-                        st.sidebar.error("❌ Problema com WebSocket público")
+                        st.sidebar.error("❌ Problema com a exchange selecionada")
                         with st.sidebar.expander("🔍 Detalhes do Erro"):
                             st.text(message)
 
@@ -3544,16 +4840,24 @@ def main():
 
                 try:
                     import requests
+                    exchange_is_bybit = ExchangeConfig.normalize_exchange_name(selected_exchange) == "bybit"
                     use_testnet_runtime = str(os.getenv("TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
-                    api_ping_url = (
-                        "https://testnet.binancefuture.com/fapi/v1/ping"
-                        if use_testnet_runtime
-                        else "https://fapi.binance.com/fapi/v1/ping"
-                    )
+                    if exchange_is_bybit:
+                        api_ping_url = (
+                            "https://api-testnet.bybit.com/v5/market/time"
+                            if use_testnet_runtime
+                            else "https://api.bybit.com/v5/market/time"
+                        )
+                    else:
+                        api_ping_url = (
+                            "https://testnet.binancefuture.com/fapi/v1/ping"
+                            if use_testnet_runtime
+                            else "https://fapi.binance.com/fapi/v1/ping"
+                        )
                     requests.get(api_ping_url, timeout=5).raise_for_status()
-                    st.sidebar.success("✅ Binance Futures API acessível")
+                    st.sidebar.success("✅ API da exchange acessível")
                 except Exception:
-                    st.sidebar.error("❌ Problema com Binance Futures API")
+                    st.sidebar.error("❌ Problema com a API da exchange")
 
                 try:
                     import requests
@@ -3879,10 +5183,6 @@ def main():
             )
 
     # Main dashboard
-    st.title("📈 Trading Signals Dashboard")
-
-    # Status do WebSocket Binance removido para interface mais limpa
-
     WEBSOCKET_AVAILABLE = False
 
     FUTURES_AVAILABLE = FuturesTrading is not None
@@ -3908,10 +5208,25 @@ def main():
     active_dashboard_section = dashboard_section_by_label[selected_dashboard_label]
     st.session_state.default_tab = active_dashboard_section
 
+    render_dashboard_shell(
+        active_section_label=selected_dashboard_label,
+        dashboard_user=dashboard_user,
+        admin_session_active=admin_session_active,
+        selected_exchange=selected_exchange,
+    )
+
     active_market_view = None
     if active_dashboard_section == "market":
-        st.header("📈 Central de Mercado")
-        st.caption("Graficos, streaming, sinais e leitura operacional ficam concentrados aqui.")
+        render_section_hero(
+            kicker="Mercado",
+            title="Central de mercado e leitura operacional",
+            subtitle="Acompanhe streaming, gráfico, sinal e contexto sem misturar isso com o controle do runtime.",
+            badges=[
+                _build_status_pill("Símbolo", symbol, "accent"),
+                _build_status_pill("Timeframe", timeframe, "default"),
+                _build_status_pill("Fonte", "WebSocket Binance", "warm"),
+            ],
+        )
         market_view_mode = st.radio(
             "Visao de Mercado",
             options=["Graficos & Streaming", "Operacao & Risco"],
@@ -5104,19 +6419,6 @@ def main():
                         st.error(f"❌ Erro na atualização: {error_text}")
 
     if active_dashboard_section == "bot":
-        st.header("🤖 Central do Bot Trader")
-        st.info(
-            "Escopo desta aba: ligar, parar e acompanhar o runtime do bot trader. "
-            "Graficos e leitura de mercado ficam concentrados na aba Mercado."
-        )
-        bot_view_mode = st.radio(
-            "Visao do Bot",
-            options=["Runtime", "Prontidao", "Guia"],
-            horizontal=True,
-            key="bot_view_mode",
-            help="Runtime para operar o processo, Prontidao para conferir dependencias e Guia para o fluxo recomendado.",
-        )
-
         runtime_reference_settings = get_effective_strategy_settings(
             symbol,
             timeframe,
@@ -5124,7 +6426,11 @@ def main():
             require_trend=False,
         )
         runtime_family_label = AppConfig.get_symbol_profile_family_label(symbol)
-        bot_process_state = get_trader_bot_process_state()
+        bot_runtime_key = _resolve_account_runtime_key(bool(st.session_state.get("trader_bot_testnet", True)))
+        bot_process_state = get_trader_bot_process_state(
+            runtime_db_state=get_cached_bot_runtime_db_state(runtime_key=bot_runtime_key, limit=1),
+            runtime_key=bot_runtime_key,
+        )
         workspace_session_active = bool(dashboard_user)
         admin_session_active = bool(st.session_state.get("admin_authenticated"))
         operator_session_active = bool(workspace_session_active or admin_session_active)
@@ -5137,10 +6443,14 @@ def main():
         subscription_plan = str(subscription_payload.get("plan_code") or "free").upper()
         subscription_gate_required = bool(ProductionConfig.REQUIRE_ACTIVE_SUBSCRIPTION_FOR_BOT)
         subscription_gate_satisfied = bool(admin_session_active or not subscription_gate_required or subscription_active)
+        license_payload = (dashboard_user or {}).get("license") or {}
+        license_gate_required = bool(getattr(ProductionConfig, "REQUIRE_DASHBOARD_DEVICE_LICENSE", True))
+        license_gate_satisfied = bool(admin_session_active or not license_gate_required or license_payload.get("allowed"))
         bot_start_allowed = bool(
             operator_session_active
             and websocket_library_ready
             and subscription_gate_satisfied
+            and license_gate_satisfied
         )
         bot_start_block_reason = ""
         if not operator_session_active:
@@ -5151,6 +6461,34 @@ def main():
             bot_start_block_reason = (
                 "Assinatura inativa/expirada. Ative um plano semanal, mensal ou anual para ligar o bot."
             )
+        elif license_gate_required and not license_gate_satisfied:
+            bot_start_block_reason = (
+                "Licença de IP/dispositivo bloqueada. Peça ao admin para resetar a licença deste usuário."
+            )
+
+        render_section_hero(
+            kicker="Bot Trader",
+            title="Central operacional do runtime",
+            subtitle=(
+                "Ligue, pare e acompanhe o processo do bot com leitura rápida de status. "
+                "Gráficos, streaming e contexto ficam concentrados na aba Mercado."
+            ),
+            badges=[
+                _build_status_pill("Processo", "ON" if bot_process_state.get("running") else "OFF", "accent" if bot_process_state.get("running") else "danger"),
+                _build_status_pill("Sessão", operator_session_label, "warm" if operator_session_active else "danger"),
+                _build_status_pill("WebSocket", "OK" if websocket_library_ready else "Pendente", "accent" if websocket_library_ready else "danger"),
+                _build_status_pill("Assinatura", subscription_plan if subscription_gate_satisfied else f"{subscription_plan} OFF", "accent" if subscription_gate_satisfied else "danger"),
+                _build_status_pill("Licença", "OK" if license_gate_satisfied else "Bloqueada", "accent" if license_gate_satisfied else "danger"),
+            ],
+        )
+
+        bot_view_mode = st.radio(
+            "Visao do Bot",
+            options=["Runtime", "Prontidao", "Guia"],
+            horizontal=True,
+            key="bot_view_mode",
+            help="Runtime para operar o processo, Prontidao para conferir dependencias e Guia para o fluxo recomendado.",
+        )
 
         context_col1, context_col2, context_col3, context_col4 = st.columns(4)
         with context_col1:
@@ -5162,18 +6500,29 @@ def main():
         with context_col4:
             st.metric("Telegram", "ON" if st.session_state.get("telegram_notifications") else "OPCIONAL")
 
-        st.caption(
-            "A configuracao analitica acima serve como referencia da sessao atual da dashboard. "
-            "Use a aba Mercado para acompanhar graficos e sinais."
+        render_dashboard_strip(
+            "A configuração analítica abaixo serve como referência da sessão atual. Use Mercado para gráfico e sinal, e Bot Trader para o comando do runtime.",
+            badges=[
+                _build_status_pill("Símbolo", symbol, "accent"),
+                _build_status_pill("Timeframe", timeframe, "default"),
+                _build_status_pill("Família", runtime_family_label, "warm"),
+            ],
         )
 
         active_runtime_profile = runtime_reference_settings.get("active_profile") or "global"
         runtime_risk_profile = runtime_reference_settings.get("risk_profile") or "normal"
-        st.info(
-            f"Perfil analitico de referencia: {active_runtime_profile} | "
-            f"RSI({runtime_reference_settings.get('rsi_period')}) "
-            f"{runtime_reference_settings.get('rsi_min')}/{runtime_reference_settings.get('rsi_max')} | "
-            f"Risco {runtime_risk_profile}"
+        render_dashboard_strip(
+            (
+                f"Perfil analítico de referência {active_runtime_profile}. "
+                f"RSI({runtime_reference_settings.get('rsi_period')}) "
+                f"{runtime_reference_settings.get('rsi_min')}/{runtime_reference_settings.get('rsi_max')} "
+                f"com risco {runtime_risk_profile}."
+            ),
+            badges=[
+                _build_status_pill("Perfil", active_runtime_profile, "accent"),
+                _build_status_pill("RSI", f"{runtime_reference_settings.get('rsi_min')}/{runtime_reference_settings.get('rsi_max')}", "default"),
+                _build_status_pill("Risco", runtime_risk_profile, "warm"),
+            ],
         )
 
         readiness_col1, readiness_col2, readiness_col3, readiness_col4, readiness_col5, readiness_col6 = st.columns(6)
@@ -5275,14 +6624,18 @@ def main():
 
     # Backtesting Tab - Otimizado para foco em testes
     if active_dashboard_section == "backtest":
-        st.header("🔬 Centro de Backtesting Avançado")
-        st.info(
-            "Escopo desta aba: simulação histórica e validação de estratégia (retorno, drawdown, execução e auditoria). "
-            "Não representa sinal operacional ao vivo."
+        render_section_hero(
+            kicker="Backtest",
+            title="Centro de validação histórica",
+            subtitle="Simulação, auditoria e comparação de desempenho sem confundir resultado histórico com sinal ao vivo.",
+            badges=[
+                _build_status_pill("Fonte", "WebSocket persistida", "accent"),
+                _build_status_pill("Uso", "Validação", "warm"),
+                _build_status_pill("Foco", "Retorno + Drawdown", "default"),
+            ],
         )
-        st.caption(
-            "Origem de dados desta aba: mesma WebSocket publica da Binance usada pela dashboard. "
-            "Os candles fechados sao acumulados no banco e o backtest passa a usar esse historico persistido."
+        render_dashboard_strip(
+            "Origem desta aba: a mesma WebSocket pública da Binance usada pela dashboard. Os candles fechados são acumulados no banco e depois reaproveitados no backtest.",
         )
         backtest_engine = get_or_init_backtest_engine()
         max_backtest_days = 730
@@ -8173,8 +9526,8 @@ def main():
                 """
                 1. Defina `ADMIN_PANEL_PASSWORD` no ambiente e faça deploy.
                 2. Entre com essa senha no bloco de autenticação Admin abaixo.
-                3. Usuários podem criar conta em `Sidebar -> Criar Conta Agora`.
-                4. Em `Visão Admin -> Acessos`, ajuste plano/assinatura (semanal, mensal, anual).
+                3. Crie os acessos manualmente em `Visão Admin -> Acessos`.
+                4. Ajuste plano/assinatura (semanal, mensal, anual) para cada cliente.
                 5. O bot só exige assinatura ativa para usuários comuns; o Admin tem bypass operacional.
                 6. Em seguida, cadastre conta/risco/credenciais nas visões `Contas` e `Resumo`.
                 """
@@ -8552,6 +9905,67 @@ def main():
                             st.rerun()
                         except Exception as access_error:
                             st.error(f"Falha ao salvar acesso da dashboard: {access_error}")
+
+                st.markdown("### 🛡️ Licenças de IP/Dispositivo")
+                license_rows = db.list_dashboard_device_licenses(limit=300)
+                if license_rows:
+                    license_df = pd.DataFrame(license_rows)[
+                        [
+                            "user_id",
+                            "login_name",
+                            "license_scope",
+                            "is_active",
+                            "bind_ip",
+                            "bind_device",
+                            "has_ip_binding",
+                            "has_device_binding",
+                            "first_seen_at",
+                            "last_seen_at",
+                        ]
+                    ].rename(
+                        columns={
+                            "user_id": "User ID",
+                            "login_name": "Login",
+                            "license_scope": "Escopo",
+                            "is_active": "Ativa",
+                            "bind_ip": "Trava IP",
+                            "bind_device": "Trava Dispositivo",
+                            "has_ip_binding": "IP Vinculado",
+                            "has_device_binding": "Dispositivo Vinculado",
+                            "first_seen_at": "Primeiro Acesso",
+                            "last_seen_at": "Último Acesso",
+                        }
+                    )
+                    st.dataframe(license_df, width="stretch", hide_index=True)
+                else:
+                    st.info("Nenhuma licença vinculada ainda. O primeiro login do cliente cria o vínculo automaticamente.")
+
+                with st.form("dashboard_license_reset_form"):
+                    reset_user_id = st.number_input(
+                        "User ID para resetar licença",
+                        min_value=1,
+                        step=1,
+                        key="dashboard_license_reset_user_id",
+                    )
+                    reset_scope = st.text_input(
+                        "Escopo",
+                        value="workspace",
+                        key="dashboard_license_reset_scope",
+                    )
+                    st.caption("Use isto quando o cliente trocar de internet/dispositivo e você quiser liberar um novo primeiro acesso.")
+                    if st.form_submit_button("Resetar Licença do Usuário"):
+                        try:
+                            removed = db.reset_dashboard_device_license(
+                                int(reset_user_id),
+                                scope=str(reset_scope or "workspace"),
+                            )
+                            if removed:
+                                st.success("Licença resetada. O próximo acesso do cliente será vinculado novamente.")
+                            else:
+                                st.info("Nenhuma licença existente para esse usuário/escopo.")
+                            st.rerun()
+                        except Exception as license_error:
+                            st.error(f"Falha ao resetar licença: {license_error}")
 
                 st.markdown("### 💳 Assinaturas e Créditos")
                 subscription_rows = db.list_dashboard_user_subscriptions(limit=300)

@@ -1,0 +1,66 @@
+{
+  "generated_at_utc": "2026-06-16T10:21:03.689963+00:00",
+  "timeframe": "15m",
+  "search": {
+    "max_trials": 20,
+    "seed": 42,
+    "use_local_csv": false,
+    "initial_balance_usdt": 50.0,
+    "risk_per_trade_pct": 0.25,
+    "short_candles": 2880,
+    "medium_candles": 8640,
+    "final_candles": 17280
+  },
+  "symbols": {
+    "XLM/USDT": {
+      "status": "approved_15m_dual_resume",
+      "reason": "Perfil XLM validado em 15m com motor dual-resume: long por resume filtrado/ponte de pullback e short por trend resume de contexto forte.",
+      "recommended_timeframe": "15m",
+      "overrides": {
+        "ALLOW_LONG": true,
+        "ALLOW_SHORT": true,
+        "ENABLE_LONG_PULLBACK": false,
+        "LONG_PULLBACK_AS_RESUME_WHEN_DISABLED": true,
+        "ENABLE_LONG_RESUME": true,
+        "EXPERIMENTAL_LONG_SIDE_LOGIC": true,
+        "LONG_VOLUME_RATIO_REQUIRED": 1.0,
+        "MIN_LONG_SCORE": 7,
+        "LONG_ADX_THRESHOLD": 35.0,
+        "TREND_RESUME_LONG_MIN_CONTEXT_GAP_PCT": 0.45,
+        "TREND_RESUME_LONG_MAX_CONTEXT_GAP_PCT": 0.8,
+        "TREND_RESUME_LONG_MIN_ADX": 46.0,
+        "TREND_RESUME_LONG_MIN_TREND_STRENGTH_PCT": 0.3,
+        "TREND_RESUME_LONG_MAX_RSI": 85.0,
+        "TREND_RESUME_LONG_REQUIRE_CLOSE_ABOVE_PREV_CLOSE": true,
+        "LONG_RESUME_HOT_CONTEXT_GAP_PCT": 0.8,
+        "TREND_RESUME_LONG_STOP_LOSS_PCT": 0.7,
+        "TREND_RESUME_LONG_PARTIAL_TARGET_PCT": 1.2,
+        "TREND_RESUME_LONG_TRAILING_TRIGGER_PCT": 1.0,
+        "TREND_RESUME_LONG_TRAILING_STOP_PCT": 0.4,
+        "TREND_RESUME_LONG_USE_FIXED_STOP": true,
+        "ENABLE_SHORT_PULLBACK": false,
+        "ENABLE_SHORT_RELIEF_RALLY": false,
+        "ENABLE_SHORT_RESUME": true,
+        "DISABLE_SHORT_SCORE_GATE": false,
+        "EXPERIMENTAL_SHORT_SIDE_LOGIC": true,
+        "SHORT_VOLUME_RATIO_REQUIRED": 1.0,
+        "TREND_RESUME_SHORT_REQUIRE_BREAKDOWN_CONFIRMATION": true,
+        "MIN_SHORT_SCORE": 8,
+        "SHORT_ADX_THRESHOLD": 55.0,
+        "TREND_RESUME_SHORT_MIN_CONTEXT_GAP_PCT": 0.9,
+        "TREND_RESUME_SHORT_MIN_ADX": 55.0,
+        "MIN_TREND_STRENGTH_PCT_SHORT": 0.55,
+        "SHORT_TREND_GAP_PCT": 0.45,
+        "TREND_RESUME_SHORT_STOP_LOSS_PCT": 1.5,
+        "TREND_RESUME_SHORT_PARTIAL_TARGET_PCT": 1.6,
+        "TREND_RESUME_SHORT_TRAILING_TRIGGER_PCT": 1.4,
+        "TREND_RESUME_SHORT_TRAILING_STOP_PCT": 0.4,
+        "TREND_RESUME_SHORT_USE_FIXED_STOP": true
+      }
+    },
+    "XRP/USDT": {
+      "status": "no_candidate",
+      "reason": "Nenhum conjunto sustentou PF/net nos recortes 90d e 180d."
+    }
+  }
+}

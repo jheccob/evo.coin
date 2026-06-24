@@ -8,7 +8,7 @@ import pandas as pd
 from config import AppConfig
 import config as runtime_config
 from market_data import fetch_candles
-from strategy import prepare_candle_features
+from strategy_engine import StrategyParams, calculate_indicators as engine_calculate_indicators
 from trading_bot_websocket import StreamlinedTradingBot, WEBSOCKETS_AVAILABLE
 
 
@@ -167,10 +167,20 @@ def _coerce_market_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return working_df
 
 
+def _build_strategy_params() -> StrategyParams:
+    return StrategyParams(
+        buy_rsi_floor=float(runtime_config.BUY_RSI_SIGNAL),
+        sell_rsi_ceiling=float(runtime_config.SELL_RSI_SIGNAL),
+    )
+
+
 def calculate_indicators(bot, df: pd.DataFrame) -> pd.DataFrame:
     del bot
     working_df = _coerce_market_dataframe(df)
-    prepared = prepare_candle_features(working_df)
+    prepared = engine_calculate_indicators(working_df, _build_strategy_params())
+    if "is_closed" not in prepared.columns:
+        prepared["is_closed"] = True
+    prepared["is_closed"] = prepared["is_closed"].fillna(True).astype(bool)
 
     ema12 = prepared["close"].ewm(span=12, adjust=False).mean()
     ema26 = prepared["close"].ewm(span=26, adjust=False).mean()
@@ -185,8 +195,11 @@ def calculate_indicators(bot, df: pd.DataFrame) -> pd.DataFrame:
     prepared.loc[bullish, "market_regime"] = "bullish"
     prepared.loc[bearish, "market_regime"] = "bearish"
 
-    rsi_distance = (prepared["rsi"] - 50).abs().fillna(0.0)
-    macd_strength = (prepared["macd"] - prepared["macd_signal"]).abs().fillna(0.0)
+    rsi_distance = (pd.to_numeric(prepared["rsi"], errors="coerce") - 50.0).abs().fillna(0.0)
+    macd_strength = (
+        pd.to_numeric(prepared["macd"], errors="coerce")
+        - pd.to_numeric(prepared["macd_signal"], errors="coerce")
+    ).abs().fillna(0.0)
     prepared["signal_confidence"] = (rsi_distance.clip(upper=35) / 35 * 60) + (macd_strength.clip(upper=1.5) / 1.5 * 40)
     prepared["signal_confidence"] = prepared["signal_confidence"].clip(lower=0.0, upper=100.0)
     return prepared
