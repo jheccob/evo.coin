@@ -152,7 +152,37 @@ def _resolve_exchange_symbol(exchange, symbol: str) -> str:
     return symbol
 
 
-def _candles_to_dataframe(ohlcv):
+def _timeframe_to_milliseconds(timeframe: str) -> int:
+    raw = str(timeframe or "15m").strip().lower()
+    if not raw:
+        return 15 * 60 * 1000
+    unit = raw[-1]
+    try:
+        value = int(raw[:-1] or "1")
+    except ValueError:
+        return 15 * 60 * 1000
+    if unit == "m":
+        return value * 60 * 1000
+    if unit == "h":
+        return value * 60 * 60 * 1000
+    if unit == "d":
+        return value * 24 * 60 * 60 * 1000
+    return 15 * 60 * 1000
+
+
+def _apply_is_closed_flag(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
+    if df.empty or "timestamp" not in df.columns:
+        df["is_closed"] = True
+        return df
+
+    timeframe_ms = _timeframe_to_milliseconds(timeframe)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    close_times = df["timestamp"] + pd.to_timedelta(timeframe_ms, unit="ms")
+    df["is_closed"] = (close_times <= now_utc).fillna(False)
+    return df
+
+
+def _candles_to_dataframe(ohlcv, timeframe: str):
     df = pd.DataFrame(
         ohlcv,
         columns=["timestamp", "open", "high", "low", "close", "volume"],
@@ -160,6 +190,7 @@ def _candles_to_dataframe(ohlcv):
     for column in ["open", "high", "low", "close", "volume"]:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+    df = _apply_is_closed_flag(df, timeframe)
     return df
 
 
@@ -170,7 +201,7 @@ def fetch_candles(symbol: str, timeframe: str, limit: int = 500, testnet: bool =
         limit=limit,
         testnet=testnet,
     )
-    return _candles_to_dataframe(ohlcv)
+    return _candles_to_dataframe(ohlcv, timeframe)
 
 
 def fetch_historical_candles(symbol: str, timeframe: str, total_limit: int = 2000, batch_limit: int = 500, testnet: bool = False):
@@ -196,7 +227,7 @@ def fetch_historical_candles(symbol: str, timeframe: str, total_limit: int = 200
 
     unique = list({row[0]: row for row in all_ohlcv}.values())
     unique.sort(key=lambda row: row[0])
-    return _candles_to_dataframe(unique[-total_limit:])
+    return _candles_to_dataframe(unique[-total_limit:], timeframe)
 
 
 def _normalize_symbol_for_csv(symbol: str) -> str:
@@ -249,7 +280,10 @@ def fetch_historical_candles_from_csv(symbol: str, timeframe: str, total_limit: 
         # Converter colunas numéricas
         for column in ['open', 'high', 'low', 'close', 'volume']:
             df[column] = pd.to_numeric(df[column], errors='coerce')
-        
+
+        if 'is_closed' not in df.columns:
+            df['is_closed'] = True
+
         # Retornar os últimos N candles solicitados
         return df.tail(total_limit).reset_index(drop=True)
     except Exception as e:

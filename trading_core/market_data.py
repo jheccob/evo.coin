@@ -212,10 +212,19 @@ def get_market_data(bot, limit: int = 200, symbol: Optional[str] = None, timefra
     if client is None:
         use_testnet = bool(getattr(runtime_config, "TESTNET", False))
         df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit, testnet=use_testnet)
-        return calculate_indicators(bot, df)
-    try:
-        df = client.get_market_data(limit=limit)
-    except Exception:
-        use_testnet = bool(getattr(runtime_config, "TESTNET", False))
-        df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit, testnet=use_testnet)
-    return calculate_indicators(bot, df)
+        prepared = calculate_indicators(bot, df)
+    else:
+        try:
+            df = client.get_market_data(limit=limit)
+        except Exception:
+            use_testnet = bool(getattr(runtime_config, "TESTNET", False))
+            df = fetch_candles(resolved_symbol, resolved_timeframe, limit=limit, testnet=use_testnet)
+        prepared = calculate_indicators(bot, df)
+
+    if "is_closed" in prepared.columns:
+        closed_df = prepared[prepared["is_closed"].fillna(False)]
+        if not closed_df.empty:
+            return closed_df
+        if len(prepared) > 1:
+            return prepared.iloc[:-1]
+    return prepared

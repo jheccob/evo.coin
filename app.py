@@ -1057,6 +1057,7 @@ def initialize_dashboard_session_state() -> None:
         "trader_bot_testnet": True,
         "signals_history": list,
         "last_update": None,
+        "last_market_timestamp": None,
         "auto_refresh": True,
         "current_data": None,
         "telegram_notifications": False,
@@ -1186,6 +1187,7 @@ def ensure_trading_runtime(selected_exchange: str):
     st.session_state.current_exchange = selected_exchange
     st.session_state.current_data = None
     st.session_state.last_update = None
+    st.session_state.last_market_timestamp = None
     st.session_state.multi_symbol_data = {}
     return trading_bot
 
@@ -3113,15 +3115,61 @@ def _compare_timestamps(ts1, ts2):
         return True
 
 
+def _coerce_brazil_naive_datetime(value):
+    if value is None:
+        return None
+    try:
+        if isinstance(value, pd.Timestamp):
+            if value.tzinfo is not None:
+                return value.tz_convert(BRAZIL_TZ).tz_localize(None).to_pydatetime()
+            return value.to_pydatetime()
+        if isinstance(value, datetime):
+            if value.tzinfo is not None:
+                return value.astimezone(BRAZIL_TZ).replace(tzinfo=None)
+            return value
+        parsed = pd.to_datetime(value, errors="coerce")
+        if parsed is None or pd.isna(parsed):
+            return None
+        if getattr(parsed, "tzinfo", None) is not None:
+            return parsed.tz_convert(BRAZIL_TZ).tz_localize(None).to_pydatetime()
+        return parsed.to_pydatetime()
+    except Exception:
+        return None
+
+
+def _coerce_market_timestamp_to_brazil_naive(value):
+    if value is None:
+        return None
+    try:
+        parsed = pd.to_datetime(value, utc=True, errors="coerce")
+        if parsed is None or pd.isna(parsed):
+            return None
+        return parsed.tz_convert(BRAZIL_TZ).tz_localize(None).to_pydatetime()
+    except Exception:
+        return None
+
+
+def _extract_market_timestamp_reference(df):
+    if df is None or getattr(df, "empty", True):
+        return None
+    try:
+        if "timestamp" in df.columns:
+            raw_value = df["timestamp"].iloc[-1]
+        else:
+            raw_value = df.index[-1]
+    except Exception:
+        return None
+    return _coerce_market_timestamp_to_brazil_naive(raw_value)
+
+
 def _compute_data_age_seconds(last_update, now_reference=None):
     if last_update is None:
         return None
     try:
-        now_value = now_reference or get_brazil_datetime_naive()
-        if hasattr(last_update, "tzinfo") and last_update.tzinfo is not None:
-            last_naive = last_update.astimezone(BRAZIL_TZ).replace(tzinfo=None)
-        else:
-            last_naive = last_update
+        now_value = _coerce_brazil_naive_datetime(now_reference) if now_reference is not None else get_brazil_datetime_naive()
+        last_naive = _coerce_brazil_naive_datetime(last_update)
+        if now_value is None or last_naive is None:
+            return None
         return max((now_value - last_naive).total_seconds(), 0.0)
     except Exception:
         return None
@@ -5033,14 +5081,17 @@ def main():
                 try:
                     st.session_state.last_update = None
                     st.session_state.current_data = None
+                    st.session_state.last_market_timestamp = None
                     runtime_bot = get_session_trading_bot_safe(selected_exchange)
                     if runtime_bot is None:
                         st.error("❌ Runtime de mercado indisponível. Tente novamente em alguns segundos.")
                     else:
                         new_data = runtime_bot.get_market_data()
                         if new_data is not None:
+                            market_timestamp = _extract_market_timestamp_reference(new_data)
                             st.session_state.current_data = new_data
                             st.session_state.last_update = get_brazil_datetime_naive()
+                            st.session_state.last_market_timestamp = market_timestamp
 
                     st.success("✅ Dados atualizados!")
                     st.rerun()
@@ -5564,7 +5615,12 @@ def main():
 
                     if cache_key in st.session_state.multi_symbol_data:
                         cached_data = st.session_state.multi_symbol_data[cache_key]
-                        cache_age = (current_time - cached_data['last_update']).total_seconds()
+                        cache_age = _compute_data_age_seconds(
+                            cached_data.get('last_update'),
+                            now_reference=current_time,
+                        )
+                        if cache_age is None:
+                            cache_age = float("inf")
                         # Cache mais agressivo para reduzir API calls
                         cache_timeout = 30 if len(selected_symbols) > 5 else 60
                         if cached_data['last_update'] and cache_age < cache_timeout:
@@ -5574,7 +5630,7 @@ def main():
                             last_candle = cached_data['last_candle']
                             signal_pipeline = cached_data.get('signal_pipeline')
                             operational_state = cached_data.get('operational_state')
-                            data_last_update = cached_data.get('last_update')
+                            data_last_update = cached_data.get('market_timestamp') or cached_data.get('last_update')
 
                     if should_refresh:
                         # Mostrar progresso para símbolos múltiplos
@@ -5591,6 +5647,8 @@ def main():
                                 sym_data = runtime_bot.get_market_data(limit=200)
 
                                 if sym_data is not None and not sym_data.empty:
+                                    fetch_timestamp = current_time
+                                    market_timestamp_reference = _extract_market_timestamp_reference(sym_data)
                                     last_candle = sym_data.iloc[-1]
                                     signal_pipeline = runtime_bot.evaluate_signal_pipeline(
                                         sym_data,
@@ -5606,14 +5664,15 @@ def main():
                                         allowed_execution_setups=symbol_strategy_settings.get("allowed_execution_setups"),
                                     )
                                     analytical_signal = signal_pipeline["analytical_signal"]
-                                    data_last_update = current_time
+                                    data_last_update = market_timestamp_reference or fetch_timestamp
 
                                     # Cache the data com timestamp
                                     st.session_state.multi_symbol_data[cache_key] = {
                                         'data': sym_data,
                                         'analytical_signal': analytical_signal,
                                         'last_candle': last_candle,
-                                        'last_update': data_last_update,
+                                        'last_update': fetch_timestamp,
+                                        'market_timestamp': market_timestamp_reference,
                                         'signal_pipeline': signal_pipeline,
                                         'operational_state': operational_state,
                                     }
@@ -5867,8 +5926,10 @@ def main():
             with st.spinner('Carregando dados...'):
                 data = runtime_bot.get_market_data()
                 if data is not None:
+                    market_timestamp = _extract_market_timestamp_reference(data)
                     st.session_state.current_data = data
                     st.session_state.last_update = get_brazil_datetime_naive()
+                    st.session_state.last_market_timestamp = market_timestamp
         except Exception as e:
             error_text = str(e or "")
             if "451" in error_text and "restricted location" in error_text.lower():
@@ -5887,8 +5948,13 @@ def main():
     if active_market_view == "futures" and st.session_state.current_data is not None and runtime_bot is not None:
         data = st.session_state.current_data
         last_candle = data.iloc[-1]
+        market_timestamp_reference = (
+            st.session_state.last_market_timestamp
+            or _extract_market_timestamp_reference(data)
+        )
+        st.session_state.last_market_timestamp = market_timestamp_reference
         data_is_fresh, data_age_seconds = _is_data_fresh(
-            st.session_state.last_update,
+            market_timestamp_reference or st.session_state.last_update,
             max_age_seconds=MAX_SIGNAL_DATA_AGE_SECONDS,
         )
         guardrail_edge_summary = None
@@ -5997,6 +6063,7 @@ def main():
             'analytical_signal': analytical_signal,
             'last_candle': last_candle,
             'last_update': st.session_state.last_update,
+            'market_timestamp': market_timestamp_reference,
             'edge_summary': guardrail_edge_summary,
             'risk_plan': risk_plan,
             'governance_summary': governance_summary,
@@ -6402,8 +6469,10 @@ def main():
                     else:
                         new_data = runtime_bot.get_market_data()
                         if new_data is not None:
+                            market_timestamp = _extract_market_timestamp_reference(new_data)
                             st.session_state.current_data = new_data
                             st.session_state.last_update = current_time_check
+                            st.session_state.last_market_timestamp = market_timestamp
                             st.success("✅ Dados atualizados!")
                         else:
                             st.warning("⚠️ Não foi possível atualizar os dados")
