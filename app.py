@@ -1049,13 +1049,18 @@ def get_or_init_backtest_engine():
     return st.session_state.backtest_engine
 
 
+def _env_testnet_default() -> bool:
+    return str(os.getenv("TESTNET", "true")).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
+
+
 def initialize_dashboard_session_state() -> None:
+    env_testnet = _env_testnet_default()
     session_defaults = {
         "trading_bot": None,
         "telegram_bot": None,
         "telegram_trading_bot_started": False,
         "trader_bot_pid": None,
-        "trader_bot_testnet": True,
+        "trader_bot_testnet": env_testnet,
         "signals_history": list,
         "last_update": None,
         "last_market_timestamp": None,
@@ -1084,6 +1089,11 @@ def initialize_dashboard_session_state() -> None:
             st.session_state[key] = {}
         else:
             st.session_state[key] = default
+
+    if not st.session_state.get("trader_bot_env_default_applied"):
+        st.session_state.trader_bot_testnet = env_testnet
+        st.session_state.bot_hub_runtime_mode = "testnet" if env_testnet else "real"
+        st.session_state.trader_bot_env_default_applied = True
 
 
 def _get_dashboard_query_param_value(key: str) -> str:
@@ -1589,7 +1599,7 @@ def _resolve_account_runtime_key(use_testnet: bool | None = None) -> str:
     runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
     runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
     if use_testnet is None:
-        use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+        use_testnet = bool(st.session_state.get("trader_bot_testnet", _env_testnet_default()))
     return (
         f"account:{_runtime_credential_user_id()}:"
         f"{_runtime_credential_account_id(bool(use_testnet))}:"
@@ -1641,7 +1651,7 @@ def _runtime_env_uses_testnet() -> bool:
     testnet_env = os.getenv("TESTNET")
     if testnet_env is not None:
         return str(testnet_env).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
-    return bool(st.session_state.get("trader_bot_testnet", True))
+    return bool(st.session_state.get("trader_bot_testnet", _env_testnet_default()))
 
 
 def _get_active_bot_runtime_state() -> tuple[str, dict | None, dict]:
@@ -1685,7 +1695,7 @@ def get_trader_bot_process_state(runtime_db_state: dict | None = None, runtime_k
     pid = st.session_state.get(pid_key)
     if not pid and metadata:
         pid = metadata.get("pid")
-    use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    use_testnet = bool(st.session_state.get("trader_bot_testnet", _env_testnet_default()))
     if metadata and metadata.get("use_testnet") is not None:
         use_testnet = bool(metadata.get("use_testnet"))
         st.session_state.trader_bot_testnet = use_testnet
@@ -2085,7 +2095,7 @@ def start_trader_bot_process(use_testnet: bool = True):
 
 
 def stop_trader_bot_process():
-    use_testnet = bool(st.session_state.get("trader_bot_testnet", True))
+    use_testnet = bool(st.session_state.get("trader_bot_testnet", _env_testnet_default()))
     runtime_key = _resolve_account_runtime_key(use_testnet)
     process_state_path = get_runtime_process_state_path(runtime_key)
     stop_request_path = get_runtime_stop_request_path(runtime_key)
@@ -2636,7 +2646,7 @@ def render_trader_bot_runtime_controls(
 ):
     selected_runtime_mode_for_key = str(
         st.session_state.get(f"{section_key}_runtime_mode")
-        or ("testnet" if bool(st.session_state.get("trader_bot_testnet", True)) else "real")
+        or ("testnet" if bool(st.session_state.get("trader_bot_testnet", _env_testnet_default())) else "real")
     )
     runtime_key = _resolve_account_runtime_key(selected_runtime_mode_for_key == "testnet")
     runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
@@ -2701,7 +2711,7 @@ def render_trader_bot_runtime_controls(
     selected_runtime_mode = st.radio(
         "Ambiente do Bot Trader",
         options=["testnet", "real"],
-        index=0 if bool(st.session_state.get("trader_bot_testnet", True)) else 1,
+        index=0 if bool(st.session_state.get("trader_bot_testnet", _env_testnet_default())) else 1,
         horizontal=True,
         key=f"{section_key}_runtime_mode",
         format_func=lambda value: "Testnet (seguro)" if value == "testnet" else "Conta Real (cuidado)",
@@ -6960,7 +6970,7 @@ def main():
             require_trend=False,
         )
         runtime_family_label = AppConfig.get_symbol_profile_family_label(symbol)
-        bot_runtime_key = _resolve_account_runtime_key(bool(st.session_state.get("trader_bot_testnet", True)))
+        bot_runtime_key = _resolve_account_runtime_key(bool(st.session_state.get("trader_bot_testnet", _env_testnet_default())))
         bot_process_state = get_trader_bot_process_state(
             runtime_db_state=get_cached_bot_runtime_db_state(runtime_key=bot_runtime_key, limit=1),
             runtime_key=bot_runtime_key,
