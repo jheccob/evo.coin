@@ -4652,7 +4652,7 @@ def render_multiuser_workspace_tab():
     else:
         st.warning(
             f"Assinatura {subscription_plan} está {subscription_status}. "
-            "Ative um plano para operar o bot em runtime."
+            "Você pode acessar a plataforma e cadastrar suas chaves, mas o botão de ligar o bot fica bloqueado até o Admin confirmar pagamento e ativar seu plano."
         )
     if workspace_user.get("require_password_change"):
         st.warning("Sua conta exige troca de senha antes de uso recorrente. Atualize abaixo.")
@@ -5377,46 +5377,46 @@ def main():
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
-        st.sidebar.caption("Novos usuários podem solicitar acesso, mas o bot só libera após aprovação do Admin.")
-        with st.sidebar.expander("📝 Solicitar acesso", expanded=False):
-            with st.form("dashboard_signup_request_form"):
-                st.text_input("Login desejado", key="dashboard_signup_request_login")
-                st.text_input("Senha", type="password", key="dashboard_signup_request_password")
-                st.text_input("Confirmar senha", type="password", key="dashboard_signup_request_password_confirm")
-                st.text_input("Nome de exibição", key="dashboard_signup_request_display_name")
-                st.text_input("Contato Telegram/e-mail", key="dashboard_signup_request_contact")
-                st.text_area("Observações", key="dashboard_signup_request_notes")
-                if st.form_submit_button("Enviar solicitação"):
-                    signup_login = str(st.session_state.get("dashboard_signup_request_login") or "").strip()
-                    signup_password = str(st.session_state.get("dashboard_signup_request_password") or "")
-                    signup_password_confirm = str(st.session_state.get("dashboard_signup_request_password_confirm") or "")
+        st.sidebar.caption("Crie login para acessar a plataforma. O bot só liga após aprovação/pagamento pelo Admin.")
+        with st.sidebar.expander("📝 Criar conta grátis", expanded=False):
+            with st.form("dashboard_self_signup_form"):
+                st.text_input("Login desejado", key="dashboard_self_signup_login")
+                st.text_input("Senha", type="password", key="dashboard_self_signup_password")
+                st.text_input("Confirmar senha", type="password", key="dashboard_self_signup_password_confirm")
+                st.text_input("Nome de exibição", key="dashboard_self_signup_display_name")
+                st.text_input("Contato Telegram/e-mail", key="dashboard_self_signup_contact")
+                st.text_area("Observações", key="dashboard_self_signup_notes")
+                if st.form_submit_button("Criar conta"):
+                    signup_login = str(st.session_state.get("dashboard_self_signup_login") or "").strip()
+                    signup_password = str(st.session_state.get("dashboard_self_signup_password") or "")
+                    signup_password_confirm = str(st.session_state.get("dashboard_self_signup_password_confirm") or "")
                     if not signup_login or not signup_password:
-                        st.error("Preencha login e senha para solicitar acesso.")
+                        st.error("Preencha login e senha para criar a conta.")
                     elif signup_password != signup_password_confirm:
                         st.error("A confirmação da senha não confere.")
                     else:
                         try:
-                            request_id = db.create_dashboard_signup_request(
+                            created = db.register_dashboard_user_selfservice(
                                 {
                                     "login_name": signup_login,
                                     "password": signup_password,
-                                    "display_name": st.session_state.get("dashboard_signup_request_display_name"),
-                                    "contact_text": st.session_state.get("dashboard_signup_request_contact"),
-                                    "notes": st.session_state.get("dashboard_signup_request_notes"),
+                                    "display_name": st.session_state.get("dashboard_self_signup_display_name"),
+                                    "contact_text": st.session_state.get("dashboard_self_signup_contact"),
+                                    "notes": st.session_state.get("dashboard_self_signup_notes"),
                                 }
                             )
                             st.success(
-                                f"Solicitação enviada (#{request_id}). "
-                                "Aguarde aprovação do Admin para acessar o bot."
+                                f"Conta criada (User ID {created.get('user_id')}). "
+                                "Faça login acima. O bot ficará bloqueado até o Admin ativar seu plano."
                             )
-                            st.session_state.dashboard_signup_request_login = ""
-                            st.session_state.dashboard_signup_request_password = ""
-                            st.session_state.dashboard_signup_request_password_confirm = ""
-                            st.session_state.dashboard_signup_request_display_name = ""
-                            st.session_state.dashboard_signup_request_contact = ""
-                            st.session_state.dashboard_signup_request_notes = ""
+                            st.session_state.dashboard_self_signup_login = ""
+                            st.session_state.dashboard_self_signup_password = ""
+                            st.session_state.dashboard_self_signup_password_confirm = ""
+                            st.session_state.dashboard_self_signup_display_name = ""
+                            st.session_state.dashboard_self_signup_contact = ""
+                            st.session_state.dashboard_self_signup_notes = ""
                         except Exception as signup_exc:
-                            st.error(f"Não foi possível enviar solicitação: {signup_exc}")
+                            st.error(f"Não foi possível criar conta: {signup_exc}")
 
     # Continue with sidebar configuration
 
