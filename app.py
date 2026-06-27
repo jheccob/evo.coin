@@ -5377,53 +5377,46 @@ def main():
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
-        if ProductionConfig.ALLOW_SELF_SERVICE_SIGNUP and admin_session_active:
-            st.sidebar.caption(
-                "Cadastro assistido pelo Admin. Use apenas para criar acesso sob sua supervisão."
-            )
-            with st.sidebar.expander("📝 Criar Conta Agora", expanded=False):
-                with st.form("dashboard_self_signup_form"):
-                    st.text_input("Login desejado", key="dashboard_self_signup_login")
-                    st.text_input("Senha", type="password", key="dashboard_self_signup_password")
-                    st.text_input("Confirmar senha", type="password", key="dashboard_self_signup_password_confirm")
-                    st.text_input("Nome de exibição (opcional)", key="dashboard_self_signup_display_name")
-                    st.text_input("Contato (Telegram/email opcional)", key="dashboard_self_signup_contact")
-                    st.text_area("Observações (opcional)", key="dashboard_self_signup_notes")
-                    if st.form_submit_button("Criar Conta"):
-                        signup_login = str(st.session_state.get("dashboard_self_signup_login") or "").strip()
-                        signup_password = str(st.session_state.get("dashboard_self_signup_password") or "")
-                        signup_password_confirm = str(st.session_state.get("dashboard_self_signup_password_confirm") or "")
-                        if not signup_login or not signup_password:
-                            st.error("Preencha login e senha para criar a conta.")
-                        elif signup_password != signup_password_confirm:
-                            st.error("A confirmação da senha não confere.")
-                        else:
-                            try:
-                                created = db.register_dashboard_user_selfservice(
-                                    {
-                                        "login_name": signup_login,
-                                        "password": signup_password,
-                                        "display_name": st.session_state.get("dashboard_self_signup_display_name"),
-                                        "contact_text": st.session_state.get("dashboard_self_signup_contact"),
-                                        "notes": st.session_state.get("dashboard_self_signup_notes"),
-                                    }
-                                )
-                                st.success(
-                                    f"Conta criada com sucesso (User ID {created.get('user_id')}). "
-                                    "Faça login e ative um plano para operar o bot."
-                                )
-                                st.session_state.dashboard_self_signup_login = ""
-                                st.session_state.dashboard_self_signup_password = ""
-                                st.session_state.dashboard_self_signup_password_confirm = ""
-                                st.session_state.dashboard_self_signup_display_name = ""
-                                st.session_state.dashboard_self_signup_contact = ""
-                                st.session_state.dashboard_self_signup_notes = ""
-                            except Exception as signup_exc:
-                                st.error(f"Não foi possível criar a conta: {signup_exc}")
-        else:
-            st.sidebar.caption(
-                "Cadastro público desativado. O acesso é liberado somente pelo administrador."
-            )
+        st.sidebar.caption("Novos usuários podem solicitar acesso, mas o bot só libera após aprovação do Admin.")
+        with st.sidebar.expander("📝 Solicitar acesso", expanded=False):
+            with st.form("dashboard_signup_request_form"):
+                st.text_input("Login desejado", key="dashboard_signup_request_login")
+                st.text_input("Senha", type="password", key="dashboard_signup_request_password")
+                st.text_input("Confirmar senha", type="password", key="dashboard_signup_request_password_confirm")
+                st.text_input("Nome de exibição", key="dashboard_signup_request_display_name")
+                st.text_input("Contato Telegram/e-mail", key="dashboard_signup_request_contact")
+                st.text_area("Observações", key="dashboard_signup_request_notes")
+                if st.form_submit_button("Enviar solicitação"):
+                    signup_login = str(st.session_state.get("dashboard_signup_request_login") or "").strip()
+                    signup_password = str(st.session_state.get("dashboard_signup_request_password") or "")
+                    signup_password_confirm = str(st.session_state.get("dashboard_signup_request_password_confirm") or "")
+                    if not signup_login or not signup_password:
+                        st.error("Preencha login e senha para solicitar acesso.")
+                    elif signup_password != signup_password_confirm:
+                        st.error("A confirmação da senha não confere.")
+                    else:
+                        try:
+                            request_id = db.create_dashboard_signup_request(
+                                {
+                                    "login_name": signup_login,
+                                    "password": signup_password,
+                                    "display_name": st.session_state.get("dashboard_signup_request_display_name"),
+                                    "contact_text": st.session_state.get("dashboard_signup_request_contact"),
+                                    "notes": st.session_state.get("dashboard_signup_request_notes"),
+                                }
+                            )
+                            st.success(
+                                f"Solicitação enviada (#{request_id}). "
+                                "Aguarde aprovação do Admin para acessar o bot."
+                            )
+                            st.session_state.dashboard_signup_request_login = ""
+                            st.session_state.dashboard_signup_request_password = ""
+                            st.session_state.dashboard_signup_request_password_confirm = ""
+                            st.session_state.dashboard_signup_request_display_name = ""
+                            st.session_state.dashboard_signup_request_contact = ""
+                            st.session_state.dashboard_signup_request_notes = ""
+                        except Exception as signup_exc:
+                            st.error(f"Não foi possível enviar solicitação: {signup_exc}")
 
     # Continue with sidebar configuration
 
@@ -10425,6 +10418,35 @@ def main():
                             "Notas da revisão",
                             key="dashboard_signup_review_notes",
                         )
+                        activate_plan_on_approval = st.checkbox(
+                            "Ativar plano ao aprovar",
+                            value=True,
+                            key="dashboard_signup_activate_plan",
+                            disabled=review_action != "Aprovar",
+                        )
+                        plan_col1, plan_col2 = st.columns(2)
+                        with plan_col1:
+                            approval_plan_code = st.selectbox(
+                                "Plano inicial",
+                                options=["weekly", "monthly", "yearly", "trial", "custom"],
+                                index=1,
+                                key="dashboard_signup_approval_plan",
+                                disabled=review_action != "Aprovar" or not activate_plan_on_approval,
+                            )
+                        with plan_col2:
+                            approval_custom_days = st.number_input(
+                                "Dias customizados",
+                                min_value=1,
+                                max_value=730,
+                                value=30,
+                                step=1,
+                                key="dashboard_signup_custom_days",
+                                disabled=(
+                                    review_action != "Aprovar"
+                                    or not activate_plan_on_approval
+                                    or approval_plan_code != "custom"
+                                ),
+                            )
                         if st.form_submit_button("Processar Solicitação"):
                             try:
                                 reviewer_name = str(st.session_state.get("dashboard_user_login") or "admin")
@@ -10436,8 +10458,27 @@ def main():
                                     approved_user_id=(int(review_user_id) if int(review_user_id) > 0 else None),
                                 )
                                 if result.get("status") == "approved":
+                                    subscription_message = ""
+                                    if activate_plan_on_approval:
+                                        explicit_expiry = None
+                                        if approval_plan_code == "custom":
+                                            explicit_expiry = (
+                                                now_brazil() + timedelta(days=int(approval_custom_days))
+                                            ).isoformat()
+                                        subscription = db.activate_dashboard_user_subscription(
+                                            user_id=int(result.get("approved_user_id")),
+                                            plan_code=str(approval_plan_code),
+                                            approved_by=reviewer_name,
+                                            extend_from_current=False,
+                                            auto_renew=False,
+                                            payment_provider="manual",
+                                            notes=review_notes or "Ativado na aprovação do cadastro.",
+                                            expires_at=explicit_expiry,
+                                        )
+                                        subscription_message = f" Plano ativo até {subscription.get('expires_at')}."
                                     st.success(
                                         f"Solicitação aprovada. Login {result.get('login_name')} liberado para User ID {result.get('approved_user_id')}."
+                                        f"{subscription_message}"
                                     )
                                 else:
                                     st.warning(f"Solicitação {result.get('request_id')} rejeitada.")
@@ -10652,7 +10693,7 @@ def main():
                         sub_user_id = st.number_input("User ID Assinatura", min_value=1, step=1, key="sub_user_id")
                         sub_plan_code = st.selectbox(
                             "Plano",
-                            options=["weekly", "monthly", "yearly", "free"],
+                            options=["weekly", "monthly", "yearly", "trial", "custom", "free"],
                             key="sub_plan_code",
                         )
                     with sub_col2:
@@ -10664,12 +10705,26 @@ def main():
                         sub_auto_renew = st.checkbox("Auto Renew", value=False, key="sub_auto_renew")
                     with sub_col3:
                         sub_extend = st.checkbox("Somar ao período atual", value=True, key="sub_extend")
+                        sub_custom_days = st.number_input(
+                            "Dias customizados",
+                            min_value=1,
+                            max_value=730,
+                            value=30,
+                            step=1,
+                            key="sub_custom_days",
+                            disabled=sub_plan_code != "custom",
+                        )
                         sub_credits = st.number_input("Créditos (+/-)", value=0.0, step=10.0, key="sub_credits")
                         sub_notes = st.text_area("Notas da Assinatura", key="sub_notes")
 
                     if st.form_submit_button("Salvar Assinatura"):
                         try:
                             if sub_action == "Ativar/Renovar":
+                                custom_expiry = None
+                                if sub_plan_code == "custom":
+                                    custom_expiry = (
+                                        now_brazil() + timedelta(days=int(sub_custom_days))
+                                    ).isoformat()
                                 result_sub = db.activate_dashboard_user_subscription(
                                     user_id=int(sub_user_id),
                                     plan_code=str(sub_plan_code),
@@ -10679,6 +10734,7 @@ def main():
                                     payment_provider="manual",
                                     credits_delta=float(sub_credits),
                                     notes=sub_notes,
+                                    expires_at=custom_expiry,
                                 )
                                 st.success(
                                     f"Assinatura atualizada: {result_sub.get('plan_code')} | "

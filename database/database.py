@@ -1968,6 +1968,8 @@ class TradingDatabase:
             return "yearly"
         if normalized in {"trial"}:
             return "trial"
+        if normalized in {"custom", "personalizado"}:
+            return "custom"
         return "free"
 
     @staticmethod
