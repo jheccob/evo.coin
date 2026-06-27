@@ -123,6 +123,7 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Sessão ativa": "Active session",
     "Estado da Conta": "Account Status",
     "Conta": "Account",
+    "Conta para operar": "Account to trade",
     "Contas": "Accounts",
     "Contas Ativas": "Active Accounts",
     "Bloqueadas": "Blocked",
@@ -233,6 +234,18 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Live da Conta": "Account Live",
     "Credencial": "Credential",
     "Credenciais": "Credentials",
+    "API Key e Secret Key": "API Key and Secret Key",
+    "Cadastre aqui as chaves da Binance/Exchange desta conta. Elas são salvas criptografadas no vault e o botão de ligar o bot só libera quando existir credencial.": "Register this account's Binance/Exchange keys here. They are stored encrypted in the vault and the bot start button only unlocks when credentials exist.",
+    "Antes de ligar o bot, cadastre ou confirme a API Key e Secret Key desta conta. O `evo-bot` usa essas credenciais criptografadas para operar a conta real.": "Before starting the bot, register or confirm this account's API Key and Secret Key. `evo-bot` uses these encrypted credentials to trade the real account.",
+    "Alias da Credencial": "Credential Alias",
+    "Notas da Credencial": "Credential Notes",
+    "Salvar API Key e Secret Key": "Save API Key and Secret Key",
+    "Informe API Key e Secret Key para atualizar as credenciais.": "Enter API Key and Secret Key to update the credentials.",
+    "Credenciais atualizadas com criptografia.": "Credentials updated with encryption.",
+    "Credencial atual": "Current credential",
+    "não cadastrada": "not registered",
+    "não cadastrado": "not registered",
+    "Nenhuma conta foi criada para este usuário ainda. Crie uma conta no Workspace ou peça ao Admin para liberar sua conta antes de cadastrar API Key.": "No account has been created for this user yet. Create an account in Workspace or ask the Admin to release your account before registering an API Key.",
     "PENDENTE": "PENDING",
     "AUSENTE": "MISSING",
     "NÃO CONFIGURADO": "NOT CONFIGURED",
@@ -306,6 +319,7 @@ def install_dashboard_translation_layer() -> None:
         "caption",
         "error",
         "expander",
+        "form_submit_button",
         "info",
         "markdown",
         "metric",
@@ -4599,6 +4613,121 @@ def _build_workspace_remote_runtime_health(control_row, runtime_db_state):
     }
 
 
+def build_workspace_execution_context(user_id: int, selected_account: dict, selected_exchange: str) -> dict:
+    selected_account_id = str(selected_account["account_id"])
+    try:
+        return db.build_account_execution_context(
+            user_id=user_id,
+            account_id=selected_account_id,
+            exchange=selected_exchange,
+        )
+    except Exception:
+        risk_profile_fallback = db.get_user_risk_profile(user_id=user_id, account_id=selected_account_id) or {}
+        credential_fallback = db.get_user_exchange_credential(
+            user_id=user_id,
+            account_id=selected_account_id,
+            exchange=selected_exchange,
+            include_encrypted=False,
+        ) or {}
+        governance_fallback = db.get_user_governance_state(
+            user_id=user_id,
+            account_id=selected_account_id,
+            exchange=selected_exchange,
+        ) or {}
+        return {
+            "user_id": user_id,
+            "account_id": selected_account_id,
+            "account_alias": selected_account.get("account_alias") or selected_account_id,
+            "exchange_name": selected_exchange,
+            "api_key_ref": credential_fallback.get("api_key_ref"),
+            "token_ref": credential_fallback.get("token_ref"),
+            "live_enabled": bool(selected_account.get("live_enabled")),
+            "paper_enabled": bool(selected_account.get("paper_enabled")),
+            "governance_status": governance_fallback.get("governance_status") or "unknown",
+            "governance_mode": governance_fallback.get("governance_mode") or "blocked",
+            "governance_blocked": bool(governance_fallback.get("blocked", False)),
+            "governance_block_reason": governance_fallback.get("block_reason"),
+            "risk_profile": risk_profile_fallback,
+            "allowed_symbols": selected_account.get("allowed_symbols") or [],
+            "allowed_timeframes": selected_account.get("allowed_timeframes") or [],
+            "capital_base": float(selected_account.get("capital_base", 0.0) or 0.0),
+            "risk_mode": selected_account.get("risk_mode") or "normal",
+            "notes": selected_account.get("notes"),
+            "permission_status": credential_fallback.get("permission_status") or selected_account.get("permission_status") or "unknown",
+            "token_status": credential_fallback.get("token_status") or selected_account.get("token_status") or "unknown",
+            "reconciliation_status": credential_fallback.get("reconciliation_status") or selected_account.get("reconciliation_status") or "unknown",
+        }
+
+
+def render_workspace_credentials_panel(
+    *,
+    user_id: int,
+    selected_account: dict,
+    selected_exchange: str,
+    execution_context: dict,
+    form_key_prefix: str,
+) -> None:
+    selected_account_id = str(selected_account["account_id"])
+    vault = None
+    vault_error = ""
+    try:
+        from services.credential_vault import CredentialVault
+
+        vault = CredentialVault(strict=False)
+    except Exception as exc:
+        vault_error = str(exc)
+
+    st.markdown("### 🔑 API Key e Secret Key")
+    st.caption(
+        "Cadastre aqui as chaves da Binance/Exchange desta conta. "
+        "Elas são salvas criptografadas no vault e o botão de ligar o bot só libera quando existir credencial."
+    )
+
+    if vault_error:
+        st.error(f"Vault indisponível: {vault_error}")
+        return
+    if not vault or not vault.is_configured():
+        st.warning("Configure CREDENTIAL_ENCRYPTION_KEY para liberar o armazenamento seguro das credenciais.")
+        return
+
+    st.success(
+        f"Credencial atual: {execution_context.get('api_key_ref') or 'não cadastrada'} | "
+        f"Token ref: {execution_context.get('token_ref') or 'não cadastrado'}"
+    )
+    with st.form(f"{form_key_prefix}_credentials_form_{selected_account_id}"):
+        credential_alias = st.text_input(
+            "Alias da Credencial",
+            value=str(selected_account.get("account_alias") or selected_account_id),
+            key=f"{form_key_prefix}_cred_alias_{selected_account_id}",
+        )
+        api_key = st.text_input("API Key", type="password", key=f"{form_key_prefix}_api_key_{selected_account_id}")
+        api_secret = st.text_input("Secret Key", type="password", key=f"{form_key_prefix}_api_secret_{selected_account_id}")
+        credential_notes = st.text_area("Notas da Credencial", key=f"{form_key_prefix}_cred_notes_{selected_account_id}")
+
+        if st.form_submit_button("Salvar API Key e Secret Key"):
+            if not api_key or not api_secret:
+                st.error("Informe API Key e Secret Key para atualizar as credenciais.")
+            else:
+                vault.store_exchange_credentials(
+                    db,
+                    user_id=user_id,
+                    account_id=selected_account_id,
+                    exchange=selected_exchange,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    credential_alias=credential_alias,
+                    permissions_read=True,
+                    permissions_trade=True,
+                    permissions_withdraw=False,
+                    permission_status=selected_account.get("permission_status", "unknown"),
+                    token_status=selected_account.get("token_status", "unknown"),
+                    reconciliation_status=selected_account.get("reconciliation_status", "unknown"),
+                    notes=credential_notes,
+                )
+                st.success("Credenciais atualizadas com criptografia.")
+                st.rerun()
+
+
 def render_workspace_account_runtime_panel(
     *,
     user_id: int,
@@ -5042,48 +5171,7 @@ def render_multiuser_workspace_tab():
         selected_account = account_lookup[selected_account_label]
         selected_account_id = str(selected_account["account_id"])
         selected_exchange = str(selected_account.get("exchange") or "")
-        try:
-            execution_context = db.build_account_execution_context(
-                user_id=user_id,
-                account_id=selected_account_id,
-                exchange=selected_exchange,
-            )
-        except Exception:
-            risk_profile_fallback = db.get_user_risk_profile(user_id=user_id, account_id=selected_account_id) or {}
-            credential_fallback = db.get_user_exchange_credential(
-                user_id=user_id,
-                account_id=selected_account_id,
-                exchange=selected_exchange,
-                include_encrypted=False,
-            ) or {}
-            governance_fallback = db.get_user_governance_state(
-                user_id=user_id,
-                account_id=selected_account_id,
-                exchange=selected_exchange,
-            ) or {}
-            execution_context = {
-                "user_id": user_id,
-                "account_id": selected_account_id,
-                "account_alias": selected_account.get("account_alias") or selected_account_id,
-                "exchange_name": selected_exchange,
-                "api_key_ref": credential_fallback.get("api_key_ref"),
-                "token_ref": credential_fallback.get("token_ref"),
-                "live_enabled": bool(selected_account.get("live_enabled")),
-                "paper_enabled": bool(selected_account.get("paper_enabled")),
-                "governance_status": governance_fallback.get("governance_status") or "unknown",
-                "governance_mode": governance_fallback.get("governance_mode") or "blocked",
-                "governance_blocked": bool(governance_fallback.get("blocked", False)),
-                "governance_block_reason": governance_fallback.get("block_reason"),
-                "risk_profile": risk_profile_fallback,
-                "allowed_symbols": selected_account.get("allowed_symbols") or [],
-                "allowed_timeframes": selected_account.get("allowed_timeframes") or [],
-                "capital_base": float(selected_account.get("capital_base", 0.0) or 0.0),
-                "risk_mode": selected_account.get("risk_mode") or "normal",
-                "notes": selected_account.get("notes"),
-                "permission_status": credential_fallback.get("permission_status") or selected_account.get("permission_status") or "unknown",
-                "token_status": credential_fallback.get("token_status") or selected_account.get("token_status") or "unknown",
-                "reconciliation_status": credential_fallback.get("reconciliation_status") or selected_account.get("reconciliation_status") or "unknown",
-            }
+        execution_context = build_workspace_execution_context(user_id, selected_account, selected_exchange)
 
         st.markdown("### Estado da Conta")
         account_col1, account_col2, account_col3, account_col4, account_col5 = st.columns(5)
@@ -5371,56 +5459,13 @@ def render_multiuser_workspace_tab():
                     st.rerun()
 
         with detail_tab3:
-            vault = None
-            vault_error = ""
-            try:
-                from services.credential_vault import CredentialVault
-
-                vault = CredentialVault(strict=False)
-            except Exception as exc:
-                vault_error = str(exc)
-
-            if vault_error:
-                st.error(f"Vault indisponível: {vault_error}")
-            elif not vault or not vault.is_configured():
-                st.warning("Configure CREDENTIAL_ENCRYPTION_KEY para liberar o armazenamento seguro das credenciais.")
-            else:
-                st.success(
-                    f"Credencial atual: {execution_context.get('api_key_ref') or 'não cadastrada'} | "
-                    f"Token ref: {execution_context.get('token_ref') or 'não cadastrado'}"
-                )
-                with st.form(f"workspace_credentials_form_{selected_account_id}"):
-                    credential_alias = st.text_input(
-                        "Alias da Credencial",
-                        value=str(selected_account.get("account_alias") or selected_account_id),
-                        key=f"workspace_cred_alias_{selected_account_id}",
-                    )
-                    api_key = st.text_input("API Key", type="password", key=f"workspace_api_key_{selected_account_id}")
-                    api_secret = st.text_input("API Secret", type="password", key=f"workspace_api_secret_{selected_account_id}")
-                    credential_notes = st.text_area("Notas da Credencial", key=f"workspace_cred_notes_{selected_account_id}")
-
-                    if st.form_submit_button("Salvar Credenciais"):
-                        if not api_key or not api_secret:
-                            st.error("Informe API Key e API Secret para atualizar as credenciais.")
-                        else:
-                            vault.store_exchange_credentials(
-                                db,
-                                user_id=user_id,
-                                account_id=selected_account_id,
-                                exchange=selected_exchange,
-                                api_key=api_key,
-                                api_secret=api_secret,
-                                credential_alias=credential_alias,
-                                permissions_read=True,
-                                permissions_trade=True,
-                                permissions_withdraw=False,
-                                permission_status=selected_account.get("permission_status", "unknown"),
-                                token_status=selected_account.get("token_status", "unknown"),
-                                reconciliation_status=selected_account.get("reconciliation_status", "unknown"),
-                                notes=credential_notes,
-                            )
-                            st.success("Credenciais atualizadas com criptografia.")
-                            st.rerun()
+            render_workspace_credentials_panel(
+                user_id=user_id,
+                selected_account=selected_account,
+                selected_exchange=selected_exchange,
+                execution_context=execution_context,
+                form_key_prefix="workspace",
+            )
 
         with detail_tab4:
             render_workspace_account_runtime_panel(
@@ -7574,14 +7619,63 @@ def main():
                     "`Sidebar -> Entrar no Workspace` ou `Admin -> Entrar`."
                 )
 
-            render_bot_telegram_notifications_panel(section_key="bot_runtime_notifications")
-            st.markdown("### ▶️ Runtime")
-            render_trader_bot_runtime_controls(
-                section_key="bot_hub",
-                allow_start=bot_start_allowed,
-                block_reason=bot_start_block_reason,
-                admin_session_active=admin_session_active,
-            )
+            if workspace_session_active:
+                runtime_user_id = int(dashboard_user["user_id"])
+                runtime_accounts = db.get_user_workspace_accounts(user_id=runtime_user_id, limit=100)
+                if not runtime_accounts:
+                    st.warning(
+                        "Nenhuma conta foi criada para este usuário ainda. "
+                        "Crie uma conta no Workspace ou peça ao Admin para liberar sua conta antes de cadastrar API Key."
+                    )
+                else:
+                    runtime_account_lookup = {
+                        f"{row.get('account_alias') or row.get('account_id')} | {row.get('exchange')} | {row.get('account_id')}": row
+                        for row in runtime_accounts
+                    }
+                    runtime_account_label = st.selectbox(
+                        "Conta para operar",
+                        options=list(runtime_account_lookup.keys()),
+                        key="bot_runtime_account_selector",
+                    )
+                    runtime_account = runtime_account_lookup[runtime_account_label]
+                    runtime_account_exchange = str(runtime_account.get("exchange") or "")
+                    runtime_execution_context = build_workspace_execution_context(
+                        runtime_user_id,
+                        runtime_account,
+                        runtime_account_exchange,
+                    )
+
+                    render_dashboard_strip(
+                        "Antes de ligar o bot, cadastre ou confirme a API Key e Secret Key desta conta. O `evo-bot` usa essas credenciais criptografadas para operar a conta real.",
+                        badges=[
+                            _build_status_pill("Conta", runtime_account.get("account_alias") or runtime_account.get("account_id"), "accent"),
+                            _build_status_pill("Exchange", runtime_account_exchange or "-", "default"),
+                            _build_status_pill("Credencial", "OK" if runtime_execution_context.get("api_key_ref") else "PENDENTE", "accent" if runtime_execution_context.get("api_key_ref") else "danger"),
+                        ],
+                    )
+                    render_workspace_credentials_panel(
+                        user_id=runtime_user_id,
+                        selected_account=runtime_account,
+                        selected_exchange=runtime_account_exchange,
+                        execution_context=runtime_execution_context,
+                        form_key_prefix="bot_runtime",
+                    )
+                    render_workspace_account_runtime_panel(
+                        user_id=runtime_user_id,
+                        workspace_user=dashboard_user,
+                        workspace_subscription=subscription_payload,
+                        selected_account=runtime_account,
+                        execution_context=runtime_execution_context,
+                    )
+            else:
+                render_bot_telegram_notifications_panel(section_key="bot_runtime_notifications")
+                st.markdown("### ▶️ Runtime")
+                render_trader_bot_runtime_controls(
+                    section_key="bot_hub",
+                    allow_start=bot_start_allowed,
+                    block_reason=bot_start_block_reason,
+                    admin_session_active=admin_session_active,
+                )
 
         elif bot_view_mode == "Prontidao":
             st.markdown("### 🧪 Checklist de Prontidão")
