@@ -6,6 +6,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+import config
 from config import ProductionConfig
 try:
     from websockets.sync.client import connect
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 class BinanceFuturesUserDataStream:
     """Cliente simples do user data stream da Binance Futures com rotacao e keepalive."""
+
+    _TIMESTAMP_ERROR_MARKERS = (
+        "-1021",
+        "outside of the recvwindow",
+        "timestamp for this request",
+    )
 
     def __init__(
         self,
@@ -97,8 +104,32 @@ class BinanceFuturesUserDataStream:
         )
         return f"{base_url}/{listen_key}"
 
+    @classmethod
+    def _is_timestamp_sync_error(cls, exc: Exception) -> bool:
+        error_text = str(exc or "").lower()
+        return any(marker in error_text for marker in cls._TIMESTAMP_ERROR_MARKERS)
+
+    def _refresh_exchange_time_difference(self) -> None:
+        if hasattr(self.exchange, "load_time_difference"):
+            self.exchange.load_time_difference()
+
+    def _call_signed_exchange(self, method_name: str, params: Optional[dict] = None):
+        method = getattr(self.exchange, method_name)
+        request_params = dict(params or {})
+        recv_window = int(getattr(config, "BINANCE_RECV_WINDOW_MS", 60000) or 60000)
+        if recv_window > 0:
+            request_params.setdefault("recvWindow", recv_window)
+        try:
+            return method(request_params)
+        except Exception as exc:
+            if not self._is_timestamp_sync_error(exc):
+                raise
+            logger.warning("Erro de timestamp no user data stream; recalibrando relogio da exchange e tentando novamente.")
+            self._refresh_exchange_time_difference()
+            return method(request_params)
+
     def _start_listen_key(self) -> str:
-        payload = self.exchange.fapiPrivatePostListenKey({})
+        payload = self._call_signed_exchange("fapiPrivatePostListenKey")
         listen_key = payload.get("listenKey") if isinstance(payload, dict) else None
         if not listen_key:
             raise ConnectionError("Binance nao retornou listenKey para o user data stream.")
@@ -111,7 +142,7 @@ class BinanceFuturesUserDataStream:
             listen_key = self._listen_key
         if not listen_key:
             return
-        self.exchange.fapiPrivatePutListenKey({"listenKey": listen_key})
+        self._call_signed_exchange("fapiPrivatePutListenKey", {"listenKey": listen_key})
 
     def _close_listen_key(self):
         with self._lock:
@@ -120,7 +151,7 @@ class BinanceFuturesUserDataStream:
         if not listen_key:
             return
         try:
-            self.exchange.fapiPrivateDeleteListenKey({"listenKey": listen_key})
+            self._call_signed_exchange("fapiPrivateDeleteListenKey", {"listenKey": listen_key})
         except Exception as exc:
             logger.warning("Falha ao fechar listenKey da Binance Futures: %s", exc)
 

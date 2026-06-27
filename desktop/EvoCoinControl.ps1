@@ -1184,34 +1184,44 @@ function Test-LiveCredentialConnection {
 
     $pythonScript = @'
 import json
-import config
-from bot_runner import _build_single_user_execution_context
-from database.database import db
-from services.live_execution_service import LiveExecutionService
 
-config.apply_symbol_strategy_overrides(config.SYMBOL)
-context = _build_single_user_execution_context()
-service = LiveExecutionService(database=db)
-validation = service.validate_account_connection(context, testnet=False)
-snapshot = config.build_runtime_strategy_snapshot()
 result = {
-    "validation": validation,
+    "validation": None,
     "reconcile": None,
     "ok": False,
 }
-if validation.get("ok"):
-    reconcile = service.reconcile_account_state(
-        context=context,
-        symbol=config.SYMBOL,
-        timeframe=config.TIMEFRAME,
-        strategy_version=snapshot.get("strategy_version"),
-        testnet=False,
-        source="desktop_preflight",
-    )
-    result["reconcile"] = reconcile
-    result["ok"] = bool(reconcile.get("ok"))
-else:
-    result["ok"] = False
+
+try:
+    import config
+    from bot_runner import _build_single_user_execution_context
+    from database.database import db
+    from services.live_execution_service import LiveExecutionService
+
+    config.apply_symbol_strategy_overrides(config.SYMBOL)
+    context = _build_single_user_execution_context()
+    service = LiveExecutionService(database=db)
+    validation = service.validate_account_connection(context, testnet=False)
+    snapshot = config.build_runtime_strategy_snapshot()
+    result["validation"] = validation
+    if validation.get("ok"):
+        reconcile = service.reconcile_account_state(
+            context=context,
+            symbol=config.SYMBOL,
+            timeframe=config.TIMEFRAME,
+            strategy_version=snapshot.get("strategy_version"),
+            testnet=False,
+            source="desktop_preflight",
+        )
+        result["reconcile"] = reconcile
+        result["ok"] = bool(reconcile.get("ok"))
+except Exception as exc:
+    result["validation"] = {
+        "ok": False,
+        "error": str(exc),
+        "permission_status": "invalid",
+        "token_status": "invalid",
+    }
+
 print(json.dumps(result, ensure_ascii=True))
 '@
 
@@ -1238,7 +1248,17 @@ print(json.dumps(result, ensure_ascii=True))
             return $false
         }
 
-        $result = $raw | ConvertFrom-Json
+        $rawText = ([string]($raw | Out-String)).Trim()
+        $jsonLine = $rawText -split "(`r`n|`n|`r)" |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_.StartsWith("{") -and $_.EndsWith("}") } |
+            Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string]$jsonLine)) {
+            $Reason.Value = "Nao foi possivel validar a conexao da conta real. A validacao nao retornou JSON valido."
+            return $false
+        }
+
+        $result = $jsonLine | ConvertFrom-Json
         if (-not $result.ok) {
             $reconcileProperty = $null
             $validationProperty = $null

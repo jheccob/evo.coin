@@ -22,6 +22,12 @@ def _compact_symbol(symbol: str) -> str:
 class LiveExecutionService:
     """Camada de execucao real com persistencia local e reconciliacao com a exchange."""
 
+    _TIMESTAMP_ERROR_MARKERS = (
+        "-1021",
+        "outside of the recvwindow",
+        "timestamp for this request",
+    )
+
     def __init__(self, database=None, credential_vault: Optional[CredentialVault] = None):
         self.database = database or runtime_db
         self.credential_vault = credential_vault or CredentialVault(strict=False)
@@ -91,6 +97,27 @@ class LiveExecutionService:
             "api_secret": api_secret,
         }
 
+    @classmethod
+    def _is_timestamp_sync_error(cls, exc: Exception) -> bool:
+        error_text = str(exc or "").lower()
+        return any(marker in error_text for marker in cls._TIMESTAMP_ERROR_MARKERS)
+
+    @staticmethod
+    def _refresh_exchange_time_difference(exchange) -> None:
+        if hasattr(exchange, "load_time_difference"):
+            exchange.load_time_difference()
+
+    def _call_signed_exchange(self, exchange, method_name: str, *args, **kwargs):
+        method = getattr(exchange, method_name)
+        try:
+            return method(*args, **kwargs)
+        except Exception as exc:
+            if not self._is_timestamp_sync_error(exc):
+                raise
+            logger.warning("Erro de timestamp na Binance em %s; recalibrando relogio da exchange e tentando novamente.", method_name)
+            self._refresh_exchange_time_difference(exchange)
+            return method(*args, **kwargs)
+
     def _build_authenticated_exchange(self, context: Dict[str, Any], *, testnet: Optional[bool] = None):
         exchange_name = str(context.get("exchange_name") or context.get("exchange") or "binanceusdm")
         if self._uses_env_credentials(context):
@@ -101,6 +128,7 @@ class LiveExecutionService:
                 api_secret=credentials.get("api_secret", ""),
                 testnet=self._resolve_testnet(testnet),
             )
+            self._refresh_exchange_time_difference(exchange)
             return exchange, credentials
 
         if not self.is_ready():
@@ -118,6 +146,7 @@ class LiveExecutionService:
             api_secret=credentials.get("api_secret", ""),
             testnet=self._resolve_testnet(testnet),
         )
+        self._refresh_exchange_time_difference(exchange)
         return exchange, credentials
 
     @staticmethod
@@ -218,7 +247,7 @@ class LiveExecutionService:
 
         if order_id and hasattr(exchange, "fetch_order"):
             try:
-                fetched_order = exchange.fetch_order(order_id, resolved_symbol)
+                fetched_order = self._call_signed_exchange(exchange, "fetch_order", order_id, resolved_symbol)
             except Exception:
                 fetched_order = None
             if isinstance(fetched_order, dict):
@@ -250,7 +279,7 @@ class LiveExecutionService:
 
         if hasattr(exchange, "fetch_my_trades"):
             try:
-                recent_trades = exchange.fetch_my_trades(resolved_symbol, limit=25) or []
+                recent_trades = self._call_signed_exchange(exchange, "fetch_my_trades", resolved_symbol, limit=25) or []
             except Exception:
                 recent_trades = []
             matched_trades = []
@@ -394,7 +423,7 @@ class LiveExecutionService:
         testnet: Optional[bool] = None,
     ) -> Dict[str, Any]:
         exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
-        balance = exchange.fetch_balance()
+        balance = self._call_signed_exchange(exchange, "fetch_balance")
 
         asset = str(quote_asset or "USDT").upper()
         asset_bucket = balance.get(asset) if isinstance(balance, dict) else {}
@@ -539,11 +568,37 @@ class LiveExecutionService:
             exchange, credentials = self._build_authenticated_exchange(context, testnet=testnet)
             exchange.load_markets()
             try:
-                exchange.fetch_balance()
+                self._call_signed_exchange(exchange, "fetch_balance")
                 permission_status = "valid"
             except Exception as balance_exc:
-                permission_status = "unknown"
                 logger.warning("Falha ao validar balance da conta %s/%s: %s", context.get("user_id"), context.get("account_id"), balance_exc)
+                error_message = str(balance_exc)
+                self.database.update_user_exchange_credential_status(
+                    user_id=int(context["user_id"]),
+                    account_id=str(context["account_id"]),
+                    exchange=exchange_name,
+                    permission_status="invalid",
+                    token_status="invalid",
+                    last_validated_at=now_iso,
+                    notes=error_message,
+                )
+                self._save_execution_event(
+                    context=context,
+                    symbol="*",
+                    timeframe="*",
+                    strategy_version="validation",
+                    event_type="credential_validation",
+                    event_status="error",
+                    message=f"Falha ao validar balance da conta: {balance_exc}",
+                    details={"environment": "testnet" if self._resolve_testnet(testnet) else "mainnet"},
+                )
+                return {
+                    "ok": False,
+                    "error": error_message,
+                    "permission_status": "invalid",
+                    "token_status": "invalid",
+                    "environment": "testnet" if self._resolve_testnet(testnet) else "mainnet",
+                }
             token_status = "valid"
             self.database.update_user_exchange_credential_status(
                 user_id=int(context["user_id"]),
@@ -626,7 +681,7 @@ class LiveExecutionService:
 
         if leverage:
             try:
-                exchange.set_leverage(int(leverage), resolved_symbol)
+                self._call_signed_exchange(exchange, "set_leverage", int(leverage), resolved_symbol)
             except Exception as leverage_exc:
                 logger.warning("Falha ao ajustar leverage para %s: %s", resolved_symbol, leverage_exc)
 
@@ -645,7 +700,9 @@ class LiveExecutionService:
             )
             if reduce_only:
                 params["reduceOnly"] = True
-            order = exchange.create_order(
+            order = self._call_signed_exchange(
+                exchange,
+                "create_order",
                 resolved_symbol,
                 "market",
                 resolved_side,
@@ -792,7 +849,9 @@ class LiveExecutionService:
             },
             exchange_name=exchange_name,
         )
-        order = exchange.create_order(
+        order = self._call_signed_exchange(
+            exchange,
+            "create_order",
             resolved_symbol,
             order_type,
             resolved_side,
@@ -902,7 +961,9 @@ class LiveExecutionService:
 
         exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
         resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
-        exchange.cancel_order(
+        self._call_signed_exchange(
+            exchange,
+            "cancel_order",
             resolved_order_id,
             resolved_symbol,
             params=self._exchange_request_params(
@@ -951,7 +1012,7 @@ class LiveExecutionService:
         if not hasattr(exchange, "fetch_open_orders"):
             return {"ok": True, "cancelled": 0, "skipped": "fetch_open_orders_unavailable"}
 
-        open_orders = exchange.fetch_open_orders(resolved_symbol) or []
+        open_orders = self._call_signed_exchange(exchange, "fetch_open_orders", resolved_symbol) or []
         cancelled = 0
         cancelled_ids: List[str] = []
         for order in open_orders:
@@ -960,7 +1021,9 @@ class LiveExecutionService:
             order_id = str(order.get("id") or (order.get("info") or {}).get("orderId") or "").strip()
             if not order_id:
                 continue
-            exchange.cancel_order(
+            self._call_signed_exchange(
+                exchange,
+                "cancel_order",
                 order_id,
                 resolved_symbol,
                 params=self._exchange_request_params(
@@ -1071,14 +1134,20 @@ class LiveExecutionService:
     ) -> Dict[str, Any]:
         exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
         resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
-        open_orders = exchange.fetch_open_orders(resolved_symbol) if hasattr(exchange, "fetch_open_orders") else []
+        open_orders = (
+            self._call_signed_exchange(exchange, "fetch_open_orders", resolved_symbol)
+            if hasattr(exchange, "fetch_open_orders")
+            else []
+        )
 
         cancelled = 0
         for order in open_orders or []:
             order_id = order.get("id") or (order.get("info") or {}).get("orderId")
             if not order_id:
                 continue
-            exchange.cancel_order(
+            self._call_signed_exchange(
+                exchange,
+                "cancel_order",
                 order_id,
                 resolved_symbol,
                 params=self._exchange_request_params(
@@ -1115,7 +1184,11 @@ class LiveExecutionService:
             exchange, _ = self._build_authenticated_exchange(context, testnet=testnet)
             resolved_symbol = self._resolve_exchange_symbol(exchange, symbol)
 
-            raw_open_orders = exchange.fetch_open_orders(resolved_symbol) if hasattr(exchange, "fetch_open_orders") else []
+            raw_open_orders = (
+                self._call_signed_exchange(exchange, "fetch_open_orders", resolved_symbol)
+                if hasattr(exchange, "fetch_open_orders")
+                else []
+            )
             normalized_orders = [
                 self._normalize_ccxt_order(
                     item,
@@ -1140,7 +1213,7 @@ class LiveExecutionService:
 
             raw_positions: List[Dict[str, Any]] = []
             if getattr(exchange, "has", {}).get("fetchPositions"):
-                raw_positions = exchange.fetch_positions([resolved_symbol])
+                raw_positions = self._call_signed_exchange(exchange, "fetch_positions", [resolved_symbol])
             normalized_positions = []
             for position in raw_positions or []:
                 normalized = self._normalize_ccxt_position(

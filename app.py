@@ -1637,6 +1637,29 @@ def _runtime_heartbeat_is_recent(runtime_db_state: dict | None) -> bool:
     return heartbeat_age <= freshness_window
 
 
+def _runtime_env_uses_testnet() -> bool:
+    testnet_env = os.getenv("TESTNET")
+    if testnet_env is not None:
+        return str(testnet_env).strip().lower() in {"1", "true", "yes", "on", "y", "sim"}
+    return bool(st.session_state.get("trader_bot_testnet", True))
+
+
+def _get_active_bot_runtime_state() -> tuple[str, dict | None, dict]:
+    use_testnet = _runtime_env_uses_testnet()
+    runtime_keys = [_resolve_account_runtime_key(use_testnet), _resolve_primary_runtime_key()]
+    selected_key = runtime_keys[0]
+    runtime_db_state = None
+    for runtime_key in dict.fromkeys(runtime_keys):
+        runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
+        selected_key = runtime_key
+        if runtime_db_state:
+            break
+    return selected_key, runtime_db_state, get_trader_bot_process_state(
+        runtime_db_state=runtime_db_state,
+        runtime_key=selected_key,
+    )
+
+
 def _is_process_running(pid):
     if not pid:
         return False
@@ -3599,6 +3622,84 @@ def render_live_market_chart(symbol, timeframe, fallback_data):
         st.caption("Grafico exibido com snapshot fallback; stream realtime nao confirmou conexao neste ciclo.")
 
 
+@st.fragment(run_every=5)
+def render_bot_operation_snapshot(symbol, timeframe, stream_status=None):
+    runtime_key, runtime_db_state, trader_bot_state = _get_active_bot_runtime_state()
+    heartbeat_age = _runtime_heartbeat_age_seconds(runtime_db_state)
+    heartbeat_fresh = bool(trader_bot_state.get("heartbeat_fresh"))
+    running = bool(trader_bot_state.get("running"))
+    blocked = bool((runtime_db_state or {}).get("blocked"))
+    last_error = str((runtime_db_state or {}).get("last_error") or "").strip()
+
+    if blocked:
+        status_label = "BLOQUEADO"
+        status_kind = "danger"
+    elif last_error:
+        status_label = "ERRO"
+        status_kind = "danger"
+    elif running and heartbeat_fresh:
+        status_label = "OPERANDO"
+        status_kind = "accent"
+    elif running:
+        status_label = "ONLINE"
+        status_kind = "warm"
+    else:
+        status_label = "AGUARDANDO"
+        status_kind = "default"
+
+    render_dashboard_strip(
+        "Painel operacional do bot: prioriza runtime, heartbeat, sinal e posicao em vez de mostrar apenas candle de mercado.",
+        badges=[
+            _build_status_pill("Bot", status_label, status_kind),
+            _build_status_pill("Modo", trader_bot_state.get("mode_label", "Testnet"), "warm"),
+            _build_status_pill("Mercado", f"{symbol} · {timeframe}", "default"),
+            _build_status_pill("Heartbeat", _format_age_label(heartbeat_age), "accent" if heartbeat_fresh else "danger"),
+        ],
+    )
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    with metric_col1:
+        st.metric("Status do Bot", status_label)
+    with metric_col2:
+        st.metric("Ambiente", trader_bot_state.get("mode_label", "Testnet"))
+    with metric_col3:
+        st.metric("Ultimo Sinal", str((runtime_db_state or {}).get("last_signal") or "-").upper())
+    with metric_col4:
+        st.metric("Posicao", str((runtime_db_state or {}).get("position_side") or "flat").upper())
+
+    detail_col1, detail_col2, detail_col3 = st.columns(3)
+    with detail_col1:
+        st.metric("Ultimo Candle", str((runtime_db_state or {}).get("last_candle_timestamp") or "-"))
+    with detail_col2:
+        st.metric("Heartbeat", _format_age_label(heartbeat_age))
+    with detail_col3:
+        pid_label = trader_bot_state.get("pid") or (
+            "EMBEDDED" if trader_bot_state.get("managed_externally") else trader_bot_state.get("status_source", "-")
+        )
+        st.metric("Origem", str(pid_label).upper())
+
+    last_reason = str((runtime_db_state or {}).get("last_signal_reason") or "").strip()
+    if runtime_db_state:
+        st.caption(f"Runtime DB: {runtime_key} | Motivo do ultimo sinal: {last_reason or '-'}")
+    else:
+        st.warning("Ainda nao encontrei snapshot do bot no banco. Assim que o evo-bot gravar o primeiro heartbeat, esta area atualiza sozinha.")
+
+    if stream_status:
+        stream_label = "conectado" if stream_status.get("connected") else "conectando"
+        st.caption(f"Stream de mercado auxiliar: {stream_label}. Ele serve como contexto; a decisao vem do runtime do bot.")
+
+    if blocked:
+        st.warning(f"Runtime bloqueado: {(runtime_db_state or {}).get('block_reason') or 'sem motivo informado'}")
+    if last_error:
+        st.error(f"Ultimo erro persistido: {last_error}")
+
+    payload = (runtime_db_state or {}).get("state_payload") or {}
+    last_signal_details = payload.get("last_signal_details") or {}
+    if last_signal_details:
+        with st.expander("Detalhes do ultimo sinal do bot", expanded=False):
+            st.json(last_signal_details)
+
+
 def render_market_operational_summary(
     *,
     symbol,
@@ -5056,7 +5157,7 @@ def main():
         if raw_default_dashboard_section == "futures":
             st.session_state.market_view_mode = "Operacao & Risco"
         else:
-            st.session_state.market_view_mode = "Graficos & Streaming"
+            st.session_state.market_view_mode = "Bot em Operacao"
 
     default_dashboard_index = next(
         (index for index, (section_id, _) in enumerate(dashboard_sections) if section_id == default_dashboard_section),
@@ -5604,8 +5705,6 @@ def main():
             st.sidebar.warning(f"⚠️ Futures trading não disponível: {str(e)}")
             st.session_state.futures_trading = None
             FUTURES_AVAILABLE = False
-    elif not FUTURES_AVAILABLE and _FUTURES_IMPORT_ERROR is not None:
-        st.sidebar.warning(f"⚠️ Futures trading não carregou: {_FUTURES_IMPORT_ERROR}")
 
     selected_dashboard_label = st.radio(
         "Seção da Dashboard",
@@ -5639,20 +5738,20 @@ def main():
         )
         market_view_mode = st.radio(
             "Visao de Mercado",
-            options=["Graficos & Streaming", "Operacao & Risco"],
+            options=["Bot em Operacao", "Operacao & Risco"],
             horizontal=True,
             key="market_view_mode",
-            help="Use Graficos & Streaming para monitoramento visual e Operacao & Risco para sinal, contexto e calculadoras.",
+            help="Use Bot em Operacao para acompanhar o runtime real; Operacao & Risco mostra sinal, contexto e calculadoras.",
         )
-        active_market_view = "websocket" if market_view_mode == "Graficos & Streaming" else "futures"
+        active_market_view = "websocket" if market_view_mode == "Bot em Operacao" else "futures"
 
     if active_dashboard_section == "workspace":
         render_multiuser_workspace_tab()
 
     # Central de mercado - streaming visual
     if active_market_view == "websocket":
-        st.subheader("📡 Binance Futures WebSocket - Dados em Tempo Real")
-        st.markdown("**Análise otimizada com streaming de dados em tempo real da Binance**")
+        st.subheader("🤖 Bot em Operacao")
+        st.markdown("**Acompanhe se o evo-bot esta vivo, sincronizado e tomando decisoes.**")
 
         try:
             from trading_bot_websocket import StreamlinedTradingBot
@@ -5756,15 +5855,22 @@ def main():
             # Área de dados em tempo real 
             if stream_client:
                 st.markdown("---")
-                st.subheader("📈 Dados em Tempo Real - Streaming WebSocket")
+                st.subheader("🤖 Runtime do Bot")
                 
                 # Status do streaming
-                st.success("🔗 **WebSocket ativo** - Dados atualizados automaticamente")
+                st.success("🔗 **WebSocket ativo** - dados de mercado disponiveis como apoio")
                 
                 # Informações de conexão
-                st.info(f"📡 Streaming para {ws_display_symbol} no timeframe {ws_timeframe}")
+                st.info(f"📡 Contexto de mercado para {ws_display_symbol} no timeframe {ws_timeframe}")
+
+                render_bot_operation_snapshot(
+                    symbol=symbol,
+                    timeframe=ws_timeframe,
+                    stream_status=stream_status,
+                )
                 
                 # Métricas em tempo real
+                st.markdown("### Contexto de Mercado Auxiliar")
                 col1, col2, col3, col4 = st.columns(4)
                 market_data = st.session_state.get("current_data")
                 latest_market_row = None
@@ -5834,14 +5940,14 @@ def main():
                             delta="WebSocket"
                         )
                 
-                st.success("✅ **Stream compartilhado ativo** - UI e analise usam a mesma conexao")
+                st.success("✅ **Stream compartilhado ativo** - usado como contexto, nao como painel principal")
 
                 st.markdown("---")
-                st.subheader("📈 Grafico Realtime")
-                render_live_market_chart(symbol=symbol, timeframe=ws_timeframe, fallback_data=market_data)
+                with st.expander("📈 Grafico de mercado auxiliar", expanded=False):
+                    render_live_market_chart(symbol=symbol, timeframe=ws_timeframe, fallback_data=market_data)
                     
             # Informações sobre dados públicos
-            with st.expander("ℹ️ Sobre WebSocket Público Binance Futures", expanded=False):
+            with st.expander("ℹ️ Sobre o stream publico da Binance Futures", expanded=False):
                 st.markdown("""
                 **🔗 Conexão WebSocket Pública:**
                 
@@ -5861,10 +5967,10 @@ def main():
                 - Dados em tempo real
                 - Totalmente gratuito
                 
-                ⏰ **Funcionamento:**
-                - Análise executada automaticamente a cada 1 minuto
-                - Sinais gerados com base em dados públicos
-                - Indicadores calculados em tempo real
+                ⏰ **Papel nesta tela:**
+                - Serve como contexto de mercado para o bot
+                - O painel principal vem do heartbeat/runtime persistido
+                - Se o stream cair, o bot ainda pode aparecer online pelo banco
                 """)
                 
             # Área de logs WebSocket
@@ -6652,7 +6758,7 @@ def main():
             key="market_operations_view_mode",
             help="Resumo para leitura atual do trade. Historico para auditoria dos sinais gerados.",
         )
-        st.caption("O grafico completo fica em Graficos & Streaming. Esta visao foca decisao, risco e auditoria.")
+        st.caption("O grafico de mercado fica como auxiliar em Bot em Operacao. Esta visao foca decisao, risco e auditoria.")
 
         if market_operations_view == "Resumo":
             render_market_operational_summary(
