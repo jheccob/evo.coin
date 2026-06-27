@@ -10102,27 +10102,24 @@ def main():
         if not configured_admin_password:
             st.warning("⚠️ Configure ADMIN_PANEL_PASSWORD para liberar o painel admin.")
         else:
-            auth_col1, auth_col2 = st.columns([4, 1])
-            with auth_col1:
-                if not st.session_state.admin_authenticated:
-                    st.text_input("🔐 Senha de Admin", type="password", key="admin_pass")
-            with auth_col2:
-                if st.session_state.admin_authenticated:
-                    if st.button("🔒 Sair", key="admin_logout"):
-                        st.session_state.admin_authenticated = False
+            if st.session_state.admin_authenticated:
+                if st.button("🔒 Sair", key="admin_logout"):
+                    st.session_state.admin_authenticated = False
+                    st.session_state.admin_auth_error = ""
+                    st.session_state.admin_pass = ""
+                    st.rerun()
+            else:
+                with st.form("admin_login_form", clear_on_submit=False):
+                    provided_password = st.text_input("🔐 Senha de Admin", type="password", key="admin_pass")
+                    submitted_admin_login = st.form_submit_button("🔓 Entrar")
+                if submitted_admin_login:
+                    if hmac.compare_digest(str(provided_password or ""), configured_admin_password):
+                        st.session_state.admin_authenticated = True
                         st.session_state.admin_auth_error = ""
                         st.session_state.admin_pass = ""
                         st.rerun()
-                else:
-                    if st.button("🔓 Entrar", key="admin_login"):
-                        provided_password = str(st.session_state.get("admin_pass") or "")
-                        if hmac.compare_digest(provided_password, configured_admin_password):
-                            st.session_state.admin_authenticated = True
-                            st.session_state.admin_auth_error = ""
-                            st.session_state.admin_pass = ""
-                            st.rerun()
-                        else:
-                            st.session_state.admin_auth_error = "❌ Senha incorreta"
+                    else:
+                        st.session_state.admin_auth_error = "❌ Senha incorreta"
 
             if st.session_state.admin_authenticated:
                 st.success("✅ Sessão administrativa autenticada.")
