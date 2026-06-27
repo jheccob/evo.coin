@@ -2651,32 +2651,42 @@ def render_trader_bot_runtime_controls(
     runtime_key = _resolve_account_runtime_key(selected_runtime_mode_for_key == "testnet")
     runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
     trader_bot_state = get_trader_bot_process_state(runtime_db_state=runtime_db_state, runtime_key=runtime_key)
-    managed_externally = bool(trader_bot_state.get("managed_externally"))
     runtime_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
     runtime_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    runtime_user_id = _runtime_credential_user_id()
+    runtime_exchange = _runtime_credential_exchange_name()
+    runtime_account_id = _runtime_credential_account_id(selected_runtime_mode_for_key == "testnet")
+    runtime_control = db.get_user_runtime_control(
+        user_id=runtime_user_id,
+        account_id=runtime_account_id,
+        exchange=runtime_exchange,
+        symbol=runtime_symbol,
+        timeframe=runtime_timeframe,
+    )
+    runtime_health = _build_workspace_remote_runtime_health(runtime_control, runtime_db_state)
+    desired_state = str(runtime_health.get("desired_state") or "stopped").strip().lower()
+    runtime_online = bool(runtime_health.get("heartbeat_fresh"))
 
     render_dashboard_strip(
-        "Use esta área para controlar o processo local do bot sem sair da dashboard.",
+        "Este botão controla o `evo-bot` privado pela fila de comandos no banco. A dashboard não sobe processo fictício/local.",
         badges=[
-            _build_status_pill("Runtime", "ON" if trader_bot_state.get("running") else "OFF", "accent" if trader_bot_state.get("running") else "danger"),
+            _build_status_pill("Runtime", runtime_health.get("status_label", "OFF"), runtime_health.get("tone", "default")),
+            _build_status_pill("Desejado", "RUNNING" if desired_state == "running" else "STOPPED", "accent" if desired_state == "running" else "default"),
             _build_status_pill("Modo", trader_bot_state.get("mode_label", "Testnet"), "warm"),
             _build_status_pill("Mercado", f"{runtime_symbol} · {runtime_timeframe}", "default"),
-            _build_status_pill("Entrada", Path(trader_bot_state.get("entrypoint", "bot_runner.py")).name, "default"),
+            _build_status_pill("Executor", "evo-bot", "accent"),
         ],
     )
 
     bot_runtime_col1, bot_runtime_col2, bot_runtime_col3, bot_runtime_col4 = st.columns(4)
     with bot_runtime_col1:
-        st.metric("Status Runtime", "ON" if trader_bot_state.get("running") else "OFF")
+        st.metric("Status Remoto", runtime_health.get("status_label", "OFF"))
     with bot_runtime_col2:
-        st.metric("PID", trader_bot_state.get("pid") or ("EMBEDDED" if managed_externally else "-"))
+        st.metric("Desejado", "RUNNING" if desired_state == "running" else "STOPPED")
     with bot_runtime_col3:
         st.metric("Modo", trader_bot_state.get("mode_label", "Testnet"))
     with bot_runtime_col4:
-        st.metric(
-            "Entrypoint",
-            Path(trader_bot_state.get("entrypoint", "bot_runner.py")).name,
-        )
+        st.metric("Revisão", int((runtime_control or {}).get("command_revision", 0) or 0))
 
     if runtime_db_state:
         heartbeat_value = str(runtime_db_state.get("last_heartbeat_at") or "-")
@@ -2715,30 +2725,23 @@ def render_trader_bot_runtime_controls(
         horizontal=True,
         key=f"{section_key}_runtime_mode",
         format_func=lambda value: "Testnet (seguro)" if value == "testnet" else "Conta Real (cuidado)",
-        disabled=bool(trader_bot_state.get("running")) or managed_externally,
+        disabled=bool(runtime_online) or desired_state == "running",
     )
     selected_use_testnet = selected_runtime_mode == "testnet"
-    if not bool(trader_bot_state.get("running")):
+    if not bool(runtime_online):
         st.session_state.trader_bot_testnet = bool(selected_use_testnet)
-
-    render_runtime_credentials_panel(
-        section_key=f"{section_key}_credentials",
-        default_use_testnet=selected_use_testnet,
-    )
-    selected_credentials = _resolve_runtime_credentials(selected_use_testnet)
-    if not selected_use_testnet and selected_credentials and str(selected_credentials.get("source") or "") == "session":
-        st.info(
-            "Credencial real carregada só nesta sessão. "
-            "Ela já serve para ligar o runtime, mas o checklist automático de go-live continua mais rígido "
-            "e só considera `env` ou `vault` como persistência."
-        )
 
     real_preflight_ok = True
     real_preflight_message = ""
     if not selected_use_testnet:
-        real_preflight_ok, real_preflight_message = _validate_live_runtime_preflight(use_testnet=False)
+        if not bool(ProductionConfig.ENABLE_LIVE_EXECUTION):
+            real_preflight_ok = False
+            real_preflight_message = "Modo real bloqueado: ENABLE_LIVE_EXECUTION=false."
+        elif str(ProductionConfig.LIVE_TRADING_CONFIRMATION or "").strip().upper() != "EU_ASSUMO_RISCO":
+            real_preflight_ok = False
+            real_preflight_message = "Modo real exige LIVE_TRADING_CONFIRMATION=EU_ASSUMO_RISCO."
         if real_preflight_ok:
-            st.warning("Conta Real selecionada. Faça a virada apenas quando o piloto estiver realmente decidido.")
+            st.warning("Conta Real selecionada. O comando sera executado pelo serviço privado `evo-bot` usando as variáveis dele.")
         else:
             st.error(f"Conta Real bloqueada agora: {real_preflight_message}")
 
@@ -2746,12 +2749,11 @@ def render_trader_bot_runtime_controls(
     if not selected_use_testnet and live_go_live_report and not bool(live_go_live_report.get("structure_aligned_for_conservative_live")):
         st.warning("A estrutura do projeto ainda não está suficientemente alinhada para um piloto real conservador.")
 
-    credential_source = str((selected_credentials or {}).get("source") or "não configurada")
     render_dashboard_strip(
-        "A seleção de ambiente fica travada enquanto o processo estiver em execução, para evitar mudanças acidentais no meio da operação.",
+        "O start/stop abaixo grava uma intenção no Postgres. O daemon do `evo-bot` reconcilia em poucos segundos.",
         badges=[
             _build_status_pill("Ambiente", "Testnet" if selected_use_testnet else "Conta Real", "accent" if selected_use_testnet else "danger"),
-            _build_status_pill("Credencial", credential_source, "warm" if credential_source not in {"não configurada", "none"} else "danger"),
+            _build_status_pill("Credencial", "env do evo-bot", "warm"),
         ],
     )
 
@@ -2760,26 +2762,45 @@ def render_trader_bot_runtime_controls(
         if st.button(
             "▶️ Ligar Bot Trader",
             key=f"{section_key}_start",
-            disabled=managed_externally or bool(trader_bot_state.get("running")) or not bool(allow_start) or (not selected_use_testnet and not real_preflight_ok),
+            disabled=bool(runtime_online) or not bool(allow_start) or (not selected_use_testnet and not real_preflight_ok),
         ):
-            success, message = start_trader_bot_process(use_testnet=selected_use_testnet)
-            if success:
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
+            control_row = db.set_user_runtime_control(
+                user_id=runtime_user_id,
+                account_id=_runtime_credential_account_id(selected_use_testnet),
+                exchange=runtime_exchange,
+                symbol=runtime_symbol,
+                timeframe=runtime_timeframe,
+                desired_state="running",
+                requested_mode=selected_runtime_mode,
+                requested_by_user_id=runtime_user_id,
+                requested_by_scope="dashboard",
+                requested_reason="bot_trader_dashboard_start",
+            )
+            st.success(
+                "Comando enviado para o `evo-bot`. "
+                f"Revisão {control_row.get('command_revision')} aguardando heartbeat."
+            )
+            st.rerun()
     with bot_control_col2:
         if st.button(
             "⏹️ Parar Bot Trader",
             key=f"{section_key}_stop",
-            disabled=managed_externally or not trader_bot_state.get("running"),
+            disabled=desired_state != "running" and not runtime_online,
         ):
-            success, message = stop_trader_bot_process()
-            if success:
-                st.warning(message)
-                st.rerun()
-            else:
-                st.error(message)
+            control_row = db.set_user_runtime_control(
+                user_id=runtime_user_id,
+                account_id=_runtime_credential_account_id(selected_use_testnet),
+                exchange=runtime_exchange,
+                symbol=runtime_symbol,
+                timeframe=runtime_timeframe,
+                desired_state="stopped",
+                requested_mode=selected_runtime_mode,
+                requested_by_user_id=runtime_user_id,
+                requested_by_scope="dashboard",
+                requested_reason="bot_trader_dashboard_stop",
+            )
+            st.warning(f"Comando de parada enviado para o `evo-bot` (revisão {control_row.get('command_revision')}).")
+            st.rerun()
     with bot_control_col3:
         if st.button(
             "🔄 Atualizar Painel",
@@ -2787,15 +2808,13 @@ def render_trader_bot_runtime_controls(
         ):
             st.rerun()
 
-    if managed_externally:
-        st.info("Runtime gerenciado externamente (RAILWAY_SERVICE_MODE=all). Status ON sincronizado pelo ambiente.")
     if not bool(allow_start):
         st.warning(block_reason or "Runtime bloqueado para esta conta.")
 
     st.caption(
-        "Controle manual do processo local via bot_runner.py. "
-        "Use para subir ou derrubar o bot trader sem sair da dashboard. "
-        "O botão de ligar injeta TESTNET=true/false conforme o modo escolhido."
+        f"Runtime key: `{runtime_key}` | "
+        f"Último comando: {(runtime_control or {}).get('last_command_at') or '-'} | "
+        f"Executor esperado: serviço Railway `evo-bot`."
     )
     st.markdown("### 👀 Monitor Operacional")
     st.caption("Este bloco atualiza sozinho a cada 5 segundos enquanto a aba estiver aberta.")

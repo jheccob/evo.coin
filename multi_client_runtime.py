@@ -120,6 +120,43 @@ def _fetch_account_record(control: dict) -> dict | None:
     return account_rows[0] if account_rows else None
 
 
+def _is_env_single_user_control(control: dict) -> bool:
+    configured_user_id = int(getattr(config, "SINGLE_USER_RUNTIME_USER_ID", 0) or 0)
+    if int(control.get("user_id") or 0) != configured_user_id:
+        return False
+    configured_account_id = str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "") or "env-primary").strip() or "env-primary"
+    account_id = str(control.get("account_id") or "").strip()
+    valid_account_ids = {
+        configured_account_id,
+        f"{configured_account_id}-real",
+        f"{configured_account_id}-testnet",
+    }
+    return account_id in valid_account_ids
+
+
+def _build_env_single_user_context(control: dict) -> dict:
+    exchange_name = str(
+        control.get("exchange") or getattr(config, "SINGLE_USER_RUNTIME_EXCHANGE", "") or "binanceusdm"
+    ).strip() or "binanceusdm"
+    account_id = str(
+        control.get("account_id") or getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "") or "env-primary"
+    ).strip() or "env-primary"
+    return {
+        "user_id": int(control.get("user_id") or getattr(config, "SINGLE_USER_RUNTIME_USER_ID", 0) or 0),
+        "account_id": account_id,
+        "account_alias": str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "") or account_id),
+        "exchange_name": exchange_name,
+        "exchange": exchange_name,
+        "live_enabled": True,
+        "paper_enabled": bool(config.TESTNET),
+        "use_env_credentials": True,
+        "credential_source": "env",
+        "api_key_ref": "env",
+        "reconciliation_status": "env",
+        "risk_profile": {"is_valid": True, "live_enabled": True},
+    }
+
+
 def _account_can_run(account: dict | None) -> tuple[bool, str]:
     if not account:
         return False, "Conta nao encontrada."
@@ -167,8 +204,9 @@ def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool,
     process_env["SYMBOL"] = symbol
     process_env["TIMEFRAME"] = timeframe
     process_env["PYTHONUNBUFFERED"] = "1"
-    process_env["RUNTIME_USE_ENV_CREDENTIALS"] = "0"
-    process_env["RUNTIME_CREDENTIAL_SOURCE"] = "vault"
+    use_env_credentials = bool(context.get("use_env_credentials"))
+    process_env["RUNTIME_USE_ENV_CREDENTIALS"] = "1" if use_env_credentials else "0"
+    process_env["RUNTIME_CREDENTIAL_SOURCE"] = "env" if use_env_credentials else "vault"
 
     stdout_log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_handle = None
@@ -333,7 +371,8 @@ def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[
             continue
 
         account = _fetch_account_record(control)
-        can_run, account_error = _account_can_run(account)
+        env_single_user = bool(not account and _is_env_single_user_control(control))
+        can_run, account_error = (True, "") if env_single_user else _account_can_run(account)
         if not can_run:
             if is_running:
                 stop_result = _stop_runtime(runtime_key)
@@ -434,35 +473,38 @@ def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[
             )
             continue
 
-        try:
-            context = db.build_account_execution_context(
-                user_id=int(control["user_id"]),
-                account_id=str(control["account_id"]),
-                exchange=str(control.get("exchange") or "binanceusdm"),
-                symbol=str(control.get("symbol") or config.SYMBOL),
-                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
-            )
-        except Exception as exc:
-            error_text = f"Falha ao montar contexto da conta: {exc}"
-            db.update_user_runtime_control_tracking(
-                user_id=int(control["user_id"]),
-                account_id=str(control["account_id"]),
-                exchange=str(control.get("exchange") or "binanceusdm"),
-                symbol=str(control.get("symbol") or config.SYMBOL),
-                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
-                last_error=error_text,
-            )
-            results.append(
-                {
-                    "runtime_key": runtime_key,
-                    "user_id": int(control["user_id"]),
-                    "account_id": str(control["account_id"]),
-                    "status": "failed_context",
-                    "action": "noop",
-                    "error": error_text,
-                }
-            )
-            continue
+        if env_single_user:
+            context = _build_env_single_user_context(control)
+        else:
+            try:
+                context = db.build_account_execution_context(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                )
+            except Exception as exc:
+                error_text = f"Falha ao montar contexto da conta: {exc}"
+                db.update_user_runtime_control_tracking(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                    last_error=error_text,
+                )
+                results.append(
+                    {
+                        "runtime_key": runtime_key,
+                        "user_id": int(control["user_id"]),
+                        "account_id": str(control["account_id"]),
+                        "status": "failed_context",
+                        "action": "noop",
+                        "error": error_text,
+                    }
+                )
+                continue
 
         db.update_user_runtime_control_tracking(
             user_id=int(control["user_id"]),
