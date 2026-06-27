@@ -105,6 +105,169 @@ UI_TRANSLATIONS = {
     }
 }
 
+STATIC_UI_EN_TRANSLATIONS = {
+    "Configurações": "Settings",
+    "Workspace Multiusuário": "Multi-user Workspace",
+    "Mercado": "Market",
+    "Bot Trader": "Trader Bot",
+    "Central de mercado e leitura operacional": "Market center and operational reading",
+    "Acompanhe streaming, gráfico, sinal e contexto sem misturar isso com o controle do runtime.": "Monitor streaming, chart, signal and context without mixing it with runtime control.",
+    "Bot em Operacao": "Bot in Operation",
+    "Trading de Mercado Futuro": "Futures Market Trading",
+    "Acompanhe se o evo-bot esta vivo, sincronizado e tomando decisoes.": "Track whether evo-bot is alive, synchronized and making decisions.",
+    "Runtime Remoto": "Remote Runtime",
+    "Meu Workspace": "My Workspace",
+    "Área isolada por usuário para contas, risco, credenciais e monitoramento operacional.": "User-isolated area for accounts, risk, credentials and operational monitoring.",
+    "Faça login na barra lateral para acessar seu workspace multiusuário.": "Sign in from the sidebar to access your multi-user workspace.",
+    "Sessão Admin ativa. Todas as ações da dashboard estão liberadas para uso operacional.": "Admin session active. All dashboard actions are enabled for operational use.",
+    "Sessão ativa": "Active session",
+    "Estado da Conta": "Account Status",
+    "Conta": "Account",
+    "Contas": "Accounts",
+    "Contas Ativas": "Active Accounts",
+    "Bloqueadas": "Blocked",
+    "Erros 24h": "24h Errors",
+    "Solicitações Pendentes": "Pending Requests",
+    "Solicitações Aprovadas": "Approved Requests",
+    "Solicitações Rejeitadas": "Rejected Requests",
+    "Solicitações de Cadastro": "Signup Requests",
+    "Não há solicitações pendentes no momento.": "There are no pending requests right now.",
+    "Histórico de solicitações": "Request history",
+    "Sem histórico de solicitações.": "No request history.",
+    "Acesso da Dashboard": "Dashboard Access",
+    "Login da Dashboard": "Dashboard Login",
+    "Senha Inicial": "Initial Password",
+    "Notas do Acesso": "Access Notes",
+    "Acesso da dashboard salvo com sucesso.": "Dashboard access saved successfully.",
+    "Licenças de IP/Dispositivo": "IP/Device Licenses",
+    "Assinaturas e Créditos": "Subscriptions and Credits",
+    "Assinatura": "Subscription",
+    "Perfil de Risco": "Risk Profile",
+    "Credenciais Criptografadas": "Encrypted Credentials",
+    "Painel Administrativo": "Admin Panel",
+    "Bootstrap do Workspace": "Workspace Bootstrap",
+    "Senha Admin": "Admin Password",
+    "Sessão Admin": "Admin Session",
+    "Acessos Criados": "Created Accesses",
+    "Configure ADMIN_PANEL_PASSWORD para liberar o painel admin.": "Set ADMIN_PANEL_PASSWORD to unlock the admin panel.",
+    "Sair": "Log out",
+    "Senha de Admin": "Admin Password",
+    "Sessão administrativa autenticada.": "Admin session authenticated.",
+    "Digite a senha de administrador para acessar o painel": "Enter the admin password to access the panel",
+    "Se a página parecer vazia, primeiro autentique com a senha de Admin.": "If the page looks empty, authenticate with the Admin password first.",
+    "Acesso autorizado!": "Access authorized!",
+    "Total Usuários": "Total Users",
+    "Usuários Free": "Free Users",
+    "Usuários Premium": "Premium Users",
+    "Ativos Hoje": "Active Today",
+    "Runtime Multiuser": "Multi-user Runtime",
+    "Segurança Multiuser": "Multi-user Security",
+    "Volume e Históricos": "Volume and History",
+    "Gerenciamento de Usuários": "User Management",
+    "Ações de Usuário": "User Actions",
+    "Configuração do Bot Telegram": "Telegram Bot Setup",
+    "Runtime do Bot Trader": "Trader Bot Runtime",
+    "Enviar Comunicado": "Send Announcement",
+    "Mensagem para todos os usuários": "Message for all users",
+    "Enviar para Todos": "Send to Everyone",
+    "Credenciais do Runtime": "Runtime Credentials",
+    "Notificações Telegram": "Telegram Notifications",
+    "Opcional. O bot trader pode ser ligado sem Telegram; este bloco serve apenas para alertas e mensagens.": "Optional. The trader bot can run without Telegram; this block is only for alerts and messages.",
+    "Configurar Telegram nesta aba": "Configure Telegram in this tab",
+    "Salvar Telegram": "Save Telegram",
+    "Testar Telegram": "Test Telegram",
+    "Testar Agora": "Test Now",
+    "Limpar Configuração da Sessão": "Clear Session Configuration",
+    "Mensagem de teste enviada com sucesso.": "Test message sent successfully.",
+    "Mensagem de teste enviada.": "Test message sent.",
+    "Preencha Token e Chat ID.": "Fill in Token and Chat ID.",
+    "Prontidão Conta Real": "Real Account Readiness",
+    "Ver checklist automático de go-live": "View automatic go-live checklist",
+    "Monitor Operacional": "Operational Monitor",
+    "Este bloco atualiza sozinho a cada 5 segundos enquanto a aba estiver aberta.": "This block auto-refreshes every 5 seconds while the tab is open.",
+    "Exportações": "Exports",
+    "Exportacoes": "Exports",
+    "Baixe dados atuais, histórico de sinais e artefatos do backtest sem sair da análise.": "Download current data, signal history and backtest artifacts without leaving the analysis.",
+    "Dados de Mercado": "Market Data",
+    "Histórico de Sinais": "Signal History",
+    "Resultados de Backtest": "Backtest Results",
+    "Nenhum dado atual disponível para exportar.": "No current data available to export.",
+    "Nenhum sinal disponível para exportar.": "No signal available to export.",
+    "Nenhum trade de backtest disponível para exportar.": "No backtest trade available to export.",
+    "Nenhum portfolio de backtest disponível para exportar.": "No backtest portfolio available to export.",
+    "Evolução do Portfólio": "Portfolio Evolution",
+    "Análise Atual": "Current Analysis",
+    "Análise Detalhada de Performance": "Detailed Performance Analysis",
+    "Histórico de Trades": "Trade History",
+    "Histórico de Testes": "Test History",
+    "Guia de Backtesting": "Backtesting Guide",
+    "Configuração Principal": "Main Configuration",
+    "Executar Backtest": "Run Backtest",
+    "Backtest concluído com sucesso!": "Backtest completed successfully!",
+    "Backtest salvo no banco com ID": "Backtest saved to database with ID",
+    "Backtest não retornou resultados válidos": "Backtest did not return valid results",
+    "Erro durante o backtest": "Error during backtest",
+    "Centro de validação histórica": "Historical validation center",
+    "Simulação, auditoria e comparação de desempenho sem confundir resultado histórico com sinal ao vivo.": "Simulation, audit and performance comparison without confusing historical results with live signals.",
+    "Fonte": "Source",
+    "Uso": "Use",
+    "Foco": "Focus",
+    "Validação": "Validation",
+    "Seguro": "Safe",
+    "Símbolo": "Symbol",
+    "Fonte Status": "Status Source",
+    "Controle": "Control",
+    "Processo": "Process",
+    "Autorização": "Authorization",
+    "Sessão": "Session",
+    "Status Remoto": "Remote Status",
+    "Desejado": "Desired",
+    "Modo": "Mode",
+    "Revisão": "Revision",
+    "Último Candle": "Last Candle",
+    "Ultimo Candle": "Last Candle",
+    "Último Sinal": "Last Signal",
+    "Ultimo Sinal": "Last Signal",
+    "Posição": "Position",
+    "Posicao": "Position",
+    "Live da Conta": "Account Live",
+    "Credencial": "Credential",
+    "Credenciais": "Credentials",
+    "PENDENTE": "PENDING",
+    "AUSENTE": "MISSING",
+    "NÃO CONFIGURADO": "NOT CONFIGURED",
+    "CONFIGURADO": "CONFIGURED",
+    "OPCIONAL": "OPTIONAL",
+    "SIM": "YES",
+    "NÃO": "NO",
+    "Ligado": "Running",
+    "Desligado": "Stopped",
+    "Ligar Bot": "Start Bot",
+    "Parar Bot": "Stop Bot",
+    "Atualizar": "Refresh",
+    "Abrir Admin": "Open Admin",
+    "Abrir Bot Trader": "Open Trader Bot",
+    "Abrir Mercado": "Open Market",
+    "Visão Operacional das Contas": "Operational Account View",
+    "Nenhuma conta operacional encontrada ainda. Você pode criá-las em `Admin > Contas`.": "No operational account found yet. You can create accounts in `Admin > Accounts`.",
+    "Por que o login do Workspace continua aparecendo?": "Why does the Workspace login still appear?",
+    "Sua conta exige troca de senha antes de uso recorrente. Atualize abaixo.": "Your account requires a password change before recurring use. Update it below.",
+    "Bloqueio operacional": "Operational block",
+    "Comando de parada enviado para o `evo-bot`.": "Stop command sent to `evo-bot`.",
+    "Runtime bloqueado para esta conta.": "Runtime locked for this account.",
+    "Runtime bloqueado": "Runtime locked",
+    "Último erro persistido": "Last persisted error",
+    "Ultimo erro persistido": "Last persisted error",
+    "Sem posição aberta no snapshot atual.": "No open position in the current snapshot.",
+    "Snapshot bruto do runtime": "Raw runtime snapshot",
+    "Sem conteúdo de log disponível neste arquivo.": "No log content available in this file.",
+    "Checklist de go-live indisponível no momento.": "Go-live checklist is unavailable right now.",
+    "Conta Real": "Real Account",
+    "Conta Real selecionada. O comando sera executado pelo serviço privado `evo-bot` usando as variáveis dele.": "Real Account selected. The private `evo-bot` service will execute the command using its own variables.",
+    "Conta Real bloqueada agora": "Real Account currently blocked",
+    "Admin autenticado": "Admin authenticated",
+}
+
 
 def get_dashboard_language() -> str:
     language = str(st.session_state.get("dashboard_language") or "pt").strip().lower()
@@ -117,6 +280,75 @@ def ui_text(key: str, default: str, **kwargs) -> str:
         return str(template).format(**kwargs)
     except Exception:
         return str(template)
+
+
+def translate_static_ui_text(value):
+    if get_dashboard_language() != "en":
+        return value
+    if isinstance(value, str):
+        translated = value
+        for source, target in sorted(STATIC_UI_EN_TRANSLATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+            translated = translated.replace(source, target)
+        return translated
+    if isinstance(value, list):
+        return [translate_static_ui_text(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(translate_static_ui_text(item) for item in value)
+    return value
+
+
+def install_dashboard_translation_layer() -> None:
+    if getattr(st, "_evo_translation_layer_installed", False):
+        return
+
+    methods_to_wrap = [
+        "button",
+        "caption",
+        "error",
+        "expander",
+        "info",
+        "markdown",
+        "metric",
+        "radio",
+        "selectbox",
+        "subheader",
+        "success",
+        "tabs",
+        "text_area",
+        "text_input",
+        "warning",
+    ]
+
+    def translated_call(original, method_name):
+        def wrapper(*args, **kwargs):
+            translated_args = []
+            for index, arg in enumerate(args):
+                if method_name in {"radio", "selectbox"} and index == 1:
+                    translated_args.append(arg)
+                else:
+                    translated_args.append(translate_static_ui_text(arg))
+            translated_kwargs = {}
+            for key, val in kwargs.items():
+                if key in {"key", "type", "format_func", "on_click", "args", "kwargs"}:
+                    translated_kwargs[key] = val
+                elif key == "options" and method_name in {"radio", "selectbox"}:
+                    translated_kwargs[key] = val
+                else:
+                    translated_kwargs[key] = translate_static_ui_text(val)
+            return original(*translated_args, **translated_kwargs)
+
+        return wrapper
+
+    for target in (st, type(st.sidebar)):
+        for method_name in methods_to_wrap:
+            original = getattr(target, method_name, None)
+            if original is None or getattr(original, "_evo_translation_wrapper", False):
+                continue
+            wrapper = translated_call(original, method_name)
+            wrapper._evo_translation_wrapper = True
+            setattr(target, method_name, wrapper)
+
+    st._evo_translation_layer_installed = True
 
 
 def inject_dashboard_theme() -> None:
@@ -5324,6 +5556,7 @@ def main():
     )
     selected_language = "en" if selected_language_label == "English" else "pt"
     st.session_state.dashboard_language = selected_language
+    install_dashboard_translation_layer()
 
     # Exchange selection
     st.sidebar.subheader("🌎 Exchange")
