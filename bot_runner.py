@@ -24,6 +24,7 @@ from services.risk_management_service import RiskManagementService
 from strategy_engine import StrategyParams, calculate_indicators, generate_entry_signal, get_min_required_rows
 from trading_bot_websocket import StreamlinedTradingBot
 from runtime_process import (
+    build_account_runtime_key,
     clear_runtime_process_state,
     clear_runtime_stop_request,
     get_runtime_execution_log_path,
@@ -167,10 +168,25 @@ def _runtime_key() -> str:
     if explicit_key:
         return explicit_key
     user_id = int(getattr(config, "SINGLE_USER_RUNTIME_USER_ID", 0) or 0)
-    account_id = str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "") or "").strip()
+    account_id = _runtime_account_id()
+    exchange_name = str(getattr(config, "SINGLE_USER_RUNTIME_EXCHANGE", "") or "binanceusdm").strip() or "binanceusdm"
     if user_id or account_id:
-        return f"account:{user_id}:{account_id or 'default'}:{config.SYMBOL}:{config.TIMEFRAME}"
+        return build_account_runtime_key(
+            user_id=user_id,
+            account_id=account_id or "default",
+            exchange=exchange_name,
+            symbol=config.SYMBOL,
+            timeframe=config.TIMEFRAME,
+        )
     return f"primary:{config.SYMBOL}:{config.TIMEFRAME}"
+
+
+def _runtime_account_id() -> str:
+    account_id = str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "") or "env-primary").strip() or "env-primary"
+    lowered = account_id.lower()
+    if lowered.endswith("-real") or lowered.endswith("-testnet"):
+        return account_id
+    return f"{account_id}-{'testnet' if bool(config.TESTNET) else 'real'}"
 
 
 def _runtime_process_state_path():
@@ -191,7 +207,7 @@ def _paper_tracking_enabled() -> bool:
 
 def _build_single_user_execution_context() -> dict:
     exchange_name = str(getattr(config, "SINGLE_USER_RUNTIME_EXCHANGE", "") or "binanceusdm").strip() or "binanceusdm"
-    account_id = str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "") or "env-primary").strip() or "env-primary"
+    account_id = _runtime_account_id()
     account_alias = (
         str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "") or "Primary Env Account").strip() or account_id
     )
