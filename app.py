@@ -68,6 +68,56 @@ ADMIN_SESSION_QUERY_KEY = "admin_session"
 ADMIN_SESSION_USER_ID = -1
 ADMIN_SESSION_LOGIN = "admin"
 
+UI_TRANSLATIONS = {
+    "en": {
+        "visitor": "Visitor",
+        "section": "Section",
+        "session": "Session",
+        "focus": "Focus",
+        "shell_title": "Visual control for bot, market and validation",
+        "shell_subtitle": "The dashboard prioritizes quick reading, operational status and cleaner navigation for daily monitoring.",
+        "workspace_sidebar": "Workspace",
+        "workspace_login": "Workspace Login",
+        "workspace_password": "Workspace Password",
+        "workspace_enter": "Enter Workspace",
+        "signup_caption": "Create a login to access the platform. The bot only starts after Admin approval/payment.",
+        "signup_expander": "📝 Create free account",
+        "signup_login": "Desired login",
+        "signup_password": "Password",
+        "signup_confirm": "Confirm password",
+        "signup_display": "Display name",
+        "signup_contact": "Telegram/e-mail contact",
+        "signup_notes": "Notes",
+        "signup_submit": "Create account",
+        "signup_missing": "Fill in login and password to create the account.",
+        "signup_mismatch": "Password confirmation does not match.",
+        "signup_success": "Account created (User ID {user_id}). Sign in above. The bot stays locked until the Admin activates your plan.",
+        "signup_error": "Could not create account: {error}",
+        "admin_active": "Admin session active: full access enabled.",
+        "admin_workspace_optional": "Workspace login below is optional and only useful to test the final user journey.",
+        "market_hero_title": "Market center and operational reading",
+        "market_hero_subtitle": "Monitor streaming, chart, signal and context without mixing it with runtime control.",
+        "bot_hero_title": "Runtime operational center",
+        "bot_hero_subtitle": "Start, stop and monitor the bot process with quick status reading. Charts, streaming and context stay in Market.",
+        "backtest_hero_title": "Backtest and strategy validation",
+        "backtest_hero_subtitle": "Validate settings with historical data, robustness checks and promotion criteria before touching the runtime.",
+        "subscription_locked": "You can access the platform and register your keys, but the bot start button stays locked until the Admin confirms payment and activates your plan.",
+    }
+}
+
+
+def get_dashboard_language() -> str:
+    language = str(st.session_state.get("dashboard_language") or "pt").strip().lower()
+    return "en" if language == "en" else "pt"
+
+
+def ui_text(key: str, default: str, **kwargs) -> str:
+    template = UI_TRANSLATIONS.get(get_dashboard_language(), {}).get(key, default)
+    try:
+        return str(template).format(**kwargs)
+    except Exception:
+        return str(template)
+
 
 def inject_dashboard_theme() -> None:
     st.markdown(
@@ -79,7 +129,8 @@ def inject_dashboard_theme() -> None:
             --dashboard-surface-strong: #fff8ee;
             --dashboard-border: #e5d8c4;
             --dashboard-ink: #1f2937;
-            --dashboard-muted: #667085;
+            --dashboard-muted: #344054;
+            --dashboard-readable: #111827;
             --dashboard-accent: #0f766e;
             --dashboard-accent-soft: #d8f1ec;
             --dashboard-warm: #c97a2b;
@@ -96,6 +147,20 @@ def inject_dashboard_theme() -> None:
             color: var(--dashboard-ink);
         }
 
+        .stApp,
+        .stMarkdown,
+        .stMarkdown p,
+        .stCaptionContainer,
+        .stText,
+        p,
+        span,
+        label,
+        div[data-testid="stWidgetLabel"],
+        div[data-testid="stWidgetLabel"] p {
+            color: var(--dashboard-readable) !important;
+            opacity: 1 !important;
+        }
+
         .main .block-container {
             max-width: 1440px;
             padding-top: 1.2rem;
@@ -106,6 +171,15 @@ def inject_dashboard_theme() -> None:
             background:
                 linear-gradient(180deg, rgba(255, 250, 242, 0.96) 0%, rgba(247, 239, 227, 0.96) 100%);
             border-right: 1px solid var(--dashboard-border);
+            color: var(--dashboard-readable);
+        }
+
+        section[data-testid="stSidebar"] *,
+        section[data-testid="stSidebar"] p,
+        section[data-testid="stSidebar"] label,
+        section[data-testid="stSidebar"] span {
+            color: var(--dashboard-readable) !important;
+            opacity: 1 !important;
         }
 
         h1, h2, h3 {
@@ -233,7 +307,7 @@ def inject_dashboard_theme() -> None:
         }
 
         div[data-testid="stMetric"] label {
-            color: var(--dashboard-muted) !important;
+            color: #1f2937 !important;
             font-size: 0.76rem !important;
             font-weight: 700 !important;
             letter-spacing: 0.08em;
@@ -241,7 +315,7 @@ def inject_dashboard_theme() -> None:
         }
 
         div[data-testid="stMetricValue"] {
-            color: var(--dashboard-ink);
+            color: var(--dashboard-readable) !important;
         }
 
         div[role="radiogroup"] {
@@ -250,11 +324,12 @@ def inject_dashboard_theme() -> None:
         }
 
         div[role="radiogroup"] label {
-            background: rgba(255, 255, 255, 0.72);
+            background: rgba(255, 255, 255, 0.94);
             border: 1px solid var(--dashboard-border);
             border-radius: 999px;
             padding: 0.2rem 0.8rem;
             box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+            color: var(--dashboard-readable) !important;
         }
 
         .stButton > button,
@@ -275,10 +350,17 @@ def inject_dashboard_theme() -> None:
         }
 
         [data-testid="stExpander"] {
-            background: rgba(255, 255, 255, 0.72);
+            background: rgba(255, 255, 255, 0.94);
             border: 1px solid var(--dashboard-border);
             border-radius: 18px;
             overflow: hidden;
+        }
+
+        [data-testid="stExpander"] summary,
+        [data-testid="stExpander"] summary * {
+            color: var(--dashboard-readable) !important;
+            opacity: 1 !important;
+            font-weight: 700 !important;
         }
 
         .stAlert {
@@ -291,6 +373,50 @@ def inject_dashboard_theme() -> None:
         .stSelectbox > div > div,
         .stTextArea textarea {
             border-radius: 14px !important;
+            color: var(--dashboard-readable) !important;
+            background: rgba(255, 255, 255, 0.98) !important;
+        }
+
+        input,
+        textarea,
+        [data-baseweb="select"] * {
+            color: var(--dashboard-readable) !important;
+            opacity: 1 !important;
+        }
+
+        small,
+        .caption,
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] * {
+            color: #243041 !important;
+            opacity: 1 !important;
+            font-weight: 500;
+        }
+
+        @media (max-width: 768px) {
+            .main .block-container {
+                padding-left: 0.85rem;
+                padding-right: 0.85rem;
+            }
+
+            .dashboard-shell,
+            .section-hero,
+            .dashboard-strip,
+            div[data-testid="stMetric"] {
+                background: rgba(255, 255, 255, 0.98) !important;
+                color: var(--dashboard-readable) !important;
+            }
+
+            .dashboard-shell h1,
+            .section-hero h2 {
+                font-size: 1.45rem;
+                line-height: 1.15;
+            }
+
+            .status-pill {
+                font-size: 0.82rem;
+                background: rgba(255, 255, 255, 0.98);
+            }
         }
         </style>
         """,
@@ -326,25 +452,24 @@ def render_dashboard_shell(
         session_label = "Admin"
         session_tone = "warm"
     else:
-        session_label = "Visitante"
+        session_label = ui_text("visitor", "Visitante")
         session_tone = "danger"
 
     badges = "".join(
         [
-            _build_status_pill("Seção", active_section_label, "accent"),
-            _build_status_pill("Sessão", session_label, session_tone),
+            _build_status_pill(ui_text("section", "Seção"), active_section_label, "accent"),
+            _build_status_pill(ui_text("session", "Sessão"), session_label, session_tone),
             _build_status_pill("Exchange", selected_exchange.upper(), "warm"),
-            _build_status_pill("Foco", "Runtime + Mercado", "default"),
+            _build_status_pill(ui_text("focus", "Foco"), "Runtime + Market" if get_dashboard_language() == "en" else "Runtime + Mercado", "default"),
         ]
     )
     st.markdown(
         f"""
         <section class="dashboard-shell">
             <span class="shell-kicker">Evo Coin Command</span>
-            <h1>Controle visual do bot, mercado e validação</h1>
+            <h1>{html.escape(ui_text("shell_title", "Controle visual do bot, mercado e validação"))}</h1>
             <p>
-                A dashboard agora prioriza leitura rápida, status operacional e navegação mais limpa
-                para deixar o acompanhamento diário mais confortável.
+                {html.escape(ui_text("shell_subtitle", "A dashboard agora prioriza leitura rápida, status operacional e navegação mais limpa para deixar o acompanhamento diário mais confortável."))}
             </p>
             <div class="shell-badges">{badges}</div>
         </section>
@@ -4652,7 +4777,10 @@ def render_multiuser_workspace_tab():
     else:
         st.warning(
             f"Assinatura {subscription_plan} está {subscription_status}. "
-            "Você pode acessar a plataforma e cadastrar suas chaves, mas o botão de ligar o bot fica bloqueado até o Admin confirmar pagamento e ativar seu plano."
+            + ui_text(
+                "subscription_locked",
+                "Você pode acessar a plataforma e cadastrar suas chaves, mas o botão de ligar o bot fica bloqueado até o Admin confirmar pagamento e ativar seu plano.",
+            )
         )
     if workspace_user.get("require_password_change"):
         st.warning("Sua conta exige troca de senha antes de uso recorrente. Atualize abaixo.")
@@ -5187,6 +5315,15 @@ def main():
 
     # Sidebar configuration - Move this section before session state initialization
     st.sidebar.title("🔧 Configurações")
+    language_options = {"pt": "Português", "en": "English"}
+    selected_language_label = st.sidebar.selectbox(
+        "Idioma / Language",
+        options=list(language_options.values()),
+        index=0 if get_dashboard_language() == "pt" else 1,
+        key="dashboard_language_selector",
+    )
+    selected_language = "en" if selected_language_label == "English" else "pt"
+    st.session_state.dashboard_language = selected_language
 
     # Exchange selection
     st.sidebar.subheader("🌎 Exchange")
@@ -5290,7 +5427,7 @@ def main():
             st.sidebar.error(message)
 
     st.sidebar.markdown("---")
-    st.sidebar.subheader("👤 Workspace Multiusuário")
+    st.sidebar.subheader(f"👤 {ui_text('workspace_sidebar', 'Workspace Multiusuário')}")
     if dashboard_user:
         dashboard_user_label = (
             dashboard_user.get("first_name")
@@ -5332,14 +5469,14 @@ def main():
             st.rerun()
     else:
         if admin_session_active:
-            st.sidebar.success("Sessão Admin ativa: acesso total liberado.")
+            st.sidebar.success(ui_text("admin_active", "Sessão Admin ativa: acesso total liberado."))
             st.sidebar.caption(
-                "O login do Workspace abaixo é opcional e serve apenas para testar a jornada do usuário final."
+                ui_text("admin_workspace_optional", "O login do Workspace abaixo é opcional e serve apenas para testar a jornada do usuário final.")
             )
         with st.sidebar.form("dashboard_user_login_form"):
-            login_value = st.text_input("Login do Workspace", key="dashboard_user_login")
-            password_value = st.text_input("Senha do Workspace", type="password", key="dashboard_user_password")
-            if st.form_submit_button("Entrar no Workspace"):
+            login_value = st.text_input(ui_text("workspace_login", "Login do Workspace"), key="dashboard_user_login")
+            password_value = st.text_input(ui_text("workspace_password", "Senha do Workspace"), type="password", key="dashboard_user_password")
+            if st.form_submit_button(ui_text("workspace_enter", "Entrar no Workspace")):
                 st.session_state.dashboard_user_auth_error = ""
                 authenticated_user = db.authenticate_dashboard_user(
                     login_name=login_value,
@@ -5377,23 +5514,23 @@ def main():
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
             st.sidebar.error(st.session_state.dashboard_user_auth_error)
-        st.sidebar.caption("Crie login para acessar a plataforma. O bot só liga após aprovação/pagamento pelo Admin.")
-        with st.sidebar.expander("📝 Criar conta grátis", expanded=False):
+        st.sidebar.caption(ui_text("signup_caption", "Crie login para acessar a plataforma. O bot só liga após aprovação/pagamento pelo Admin."))
+        with st.sidebar.expander(ui_text("signup_expander", "📝 Criar conta grátis"), expanded=False):
             with st.form("dashboard_self_signup_form"):
-                st.text_input("Login desejado", key="dashboard_self_signup_login")
-                st.text_input("Senha", type="password", key="dashboard_self_signup_password")
-                st.text_input("Confirmar senha", type="password", key="dashboard_self_signup_password_confirm")
-                st.text_input("Nome de exibição", key="dashboard_self_signup_display_name")
-                st.text_input("Contato Telegram/e-mail", key="dashboard_self_signup_contact")
-                st.text_area("Observações", key="dashboard_self_signup_notes")
-                if st.form_submit_button("Criar conta"):
+                st.text_input(ui_text("signup_login", "Login desejado"), key="dashboard_self_signup_login")
+                st.text_input(ui_text("signup_password", "Senha"), type="password", key="dashboard_self_signup_password")
+                st.text_input(ui_text("signup_confirm", "Confirmar senha"), type="password", key="dashboard_self_signup_password_confirm")
+                st.text_input(ui_text("signup_display", "Nome de exibição"), key="dashboard_self_signup_display_name")
+                st.text_input(ui_text("signup_contact", "Contato Telegram/e-mail"), key="dashboard_self_signup_contact")
+                st.text_area(ui_text("signup_notes", "Observações"), key="dashboard_self_signup_notes")
+                if st.form_submit_button(ui_text("signup_submit", "Criar conta")):
                     signup_login = str(st.session_state.get("dashboard_self_signup_login") or "").strip()
                     signup_password = str(st.session_state.get("dashboard_self_signup_password") or "")
                     signup_password_confirm = str(st.session_state.get("dashboard_self_signup_password_confirm") or "")
                     if not signup_login or not signup_password:
-                        st.error("Preencha login e senha para criar a conta.")
+                        st.error(ui_text("signup_missing", "Preencha login e senha para criar a conta."))
                     elif signup_password != signup_password_confirm:
-                        st.error("A confirmação da senha não confere.")
+                        st.error(ui_text("signup_mismatch", "A confirmação da senha não confere."))
                     else:
                         try:
                             created = db.register_dashboard_user_selfservice(
@@ -5406,8 +5543,11 @@ def main():
                                 }
                             )
                             st.success(
-                                f"Conta criada (User ID {created.get('user_id')}). "
-                                "Faça login acima. O bot ficará bloqueado até o Admin ativar seu plano."
+                                ui_text(
+                                    "signup_success",
+                                    "Conta criada (User ID {user_id}). Faça login acima. O bot ficará bloqueado até o Admin ativar seu plano.",
+                                    user_id=created.get("user_id"),
+                                )
                             )
                             st.session_state.dashboard_self_signup_login = ""
                             st.session_state.dashboard_self_signup_password = ""
@@ -5416,7 +5556,7 @@ def main():
                             st.session_state.dashboard_self_signup_contact = ""
                             st.session_state.dashboard_self_signup_notes = ""
                         except Exception as signup_exc:
-                            st.error(f"Não foi possível criar conta: {signup_exc}")
+                            st.error(ui_text("signup_error", "Não foi possível criar conta: {error}", error=signup_exc))
 
     # Continue with sidebar configuration
 
@@ -5832,8 +5972,11 @@ def main():
     if active_dashboard_section == "market":
         render_section_hero(
             kicker="Mercado",
-            title="Central de mercado e leitura operacional",
-            subtitle="Acompanhe streaming, gráfico, sinal e contexto sem misturar isso com o controle do runtime.",
+            title=ui_text("market_hero_title", "Central de mercado e leitura operacional"),
+            subtitle=ui_text(
+                "market_hero_subtitle",
+                "Acompanhe streaming, gráfico, sinal e contexto sem misturar isso com o controle do runtime.",
+            ),
             badges=[
                 _build_status_pill("Símbolo", symbol, "accent"),
                 _build_status_pill("Timeframe", timeframe, "default"),
@@ -7106,10 +7249,13 @@ def main():
 
         render_section_hero(
             kicker="Bot Trader",
-            title="Central operacional do runtime",
-            subtitle=(
-                "Ligue, pare e acompanhe o processo do bot com leitura rápida de status. "
-                "Gráficos, streaming e contexto ficam concentrados na aba Mercado."
+            title=ui_text("bot_hero_title", "Central operacional do runtime"),
+            subtitle=ui_text(
+                "bot_hero_subtitle",
+                (
+                    "Ligue, pare e acompanhe o processo do bot com leitura rápida de status. "
+                    "Gráficos, streaming e contexto ficam concentrados na aba Mercado."
+                ),
             ),
             badges=[
                 _build_status_pill("Processo", "ON" if bot_process_state.get("running") else "OFF", "accent" if bot_process_state.get("running") else "danger"),
@@ -7265,8 +7411,11 @@ def main():
     if active_dashboard_section == "backtest":
         render_section_hero(
             kicker="Backtest",
-            title="Centro de validação histórica",
-            subtitle="Simulação, auditoria e comparação de desempenho sem confundir resultado histórico com sinal ao vivo.",
+            title=ui_text("backtest_hero_title", "Centro de validação histórica"),
+            subtitle=ui_text(
+                "backtest_hero_subtitle",
+                "Simulação, auditoria e comparação de desempenho sem confundir resultado histórico com sinal ao vivo.",
+            ),
             badges=[
                 _build_status_pill("Fonte", "WebSocket persistida", "accent"),
                 _build_status_pill("Uso", "Validação", "warm"),
