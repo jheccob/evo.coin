@@ -64,6 +64,9 @@ _TELEGRAM_SERVICE_CLASS = None
 _TELEGRAM_SERVICE_AVAILABLE = None
 _BACKTEST_ENGINE_CLASS = None
 DASHBOARD_SESSION_QUERY_KEY = "workspace_session"
+ADMIN_SESSION_QUERY_KEY = "admin_session"
+ADMIN_SESSION_USER_ID = -1
+ADMIN_SESSION_LOGIN = "admin"
 
 
 def inject_dashboard_theme() -> None:
@@ -1186,6 +1189,76 @@ def _set_persistent_dashboard_session_token(session_token: str) -> None:
 def _clear_persistent_dashboard_session_token() -> None:
     st.session_state.dashboard_user_session_token = ""
     _set_dashboard_query_param_value(DASHBOARD_SESSION_QUERY_KEY, "")
+
+
+def _get_persistent_admin_session_token() -> str:
+    session_token = str(st.session_state.get("admin_session_token") or "").strip()
+    if session_token:
+        return session_token
+    query_token = _get_dashboard_query_param_value(ADMIN_SESSION_QUERY_KEY)
+    if query_token:
+        st.session_state.admin_session_token = query_token
+    return query_token
+
+
+def _set_persistent_admin_session_token(session_token: str) -> None:
+    normalized_token = str(session_token or "").strip()
+    st.session_state.admin_session_token = normalized_token
+    _set_dashboard_query_param_value(ADMIN_SESSION_QUERY_KEY, normalized_token)
+
+
+def _clear_persistent_admin_session_token() -> None:
+    st.session_state.admin_session_token = ""
+    _set_dashboard_query_param_value(ADMIN_SESSION_QUERY_KEY, "")
+
+
+def _restore_persistent_admin_session() -> bool:
+    if bool(st.session_state.get("admin_authenticated")):
+        return True
+    session_token = _get_persistent_admin_session_token()
+    if not session_token:
+        return False
+    try:
+        restored_auth = db.authenticate_dashboard_session(session_token)
+    except Exception:
+        restored_auth = None
+        logger.warning("Falha ao restaurar sessao persistente do admin.", exc_info=True)
+    if (
+        restored_auth
+        and int(restored_auth.get("user_id") or 0) == ADMIN_SESSION_USER_ID
+        and str(restored_auth.get("login_name") or "") == ADMIN_SESSION_LOGIN
+    ):
+        st.session_state.admin_authenticated = True
+        st.session_state.admin_auth_error = ""
+        return True
+    _clear_persistent_admin_session_token()
+    return False
+
+
+def _create_persistent_admin_session() -> str:
+    expires_at = (
+        now_brazil() + timedelta(hours=ProductionConfig.DASHBOARD_USER_SESSION_TIMEOUT_HOURS)
+    ).isoformat()
+    session_token = db.create_dashboard_user_session(
+        user_id=ADMIN_SESSION_USER_ID,
+        login_name=ADMIN_SESSION_LOGIN,
+        expires_at=expires_at,
+    )
+    _set_persistent_admin_session_token(session_token)
+    return session_token
+
+
+def clear_admin_dashboard_session(*, revoke_persistent: bool = True) -> None:
+    session_token = _get_persistent_admin_session_token()
+    if revoke_persistent and session_token:
+        try:
+            db.revoke_dashboard_user_session(session_token)
+        except Exception:
+            logger.warning("Falha ao revogar sessao persistente do admin.", exc_info=True)
+    _clear_persistent_admin_session_token()
+    st.session_state.admin_authenticated = False
+    st.session_state.admin_auth_error = ""
+    st.session_state.admin_pass = ""
 
 
 def ensure_trading_runtime(selected_exchange: str):
@@ -5154,6 +5227,7 @@ def main():
     if ProductionConfig.ENABLE_DASHBOARD_BACKGROUND_BOT:
         logger.warning("ENABLE_DASHBOARD_BACKGROUND_BOT foi definido, mas o modo recomendado e executar o bot por bot_runner.py")
 
+    _restore_persistent_admin_session()
     dashboard_user = get_authenticated_dashboard_user()
     admin_session_active = is_admin_dashboard_session_active()
     admin_entry_requested = is_admin_dashboard_entry_requested()
@@ -10104,9 +10178,7 @@ def main():
         else:
             if st.session_state.admin_authenticated:
                 if st.button("🔒 Sair", key="admin_logout"):
-                    st.session_state.admin_authenticated = False
-                    st.session_state.admin_auth_error = ""
-                    st.session_state.admin_pass = ""
+                    clear_admin_dashboard_session()
                     st.rerun()
             else:
                 with st.form("admin_login_form", clear_on_submit=False):
@@ -10117,6 +10189,10 @@ def main():
                         st.session_state.admin_authenticated = True
                         st.session_state.admin_auth_error = ""
                         st.session_state.admin_pass = ""
+                        try:
+                            _create_persistent_admin_session()
+                        except Exception:
+                            logger.warning("Falha ao criar sessao persistente do admin.", exc_info=True)
                         st.rerun()
                     else:
                         st.session_state.admin_auth_error = "❌ Senha incorreta"

@@ -2251,6 +2251,60 @@ class TradingDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 '''
+                SELECT session_token, user_id, login_name, expires_at AS session_expires_at, revoked
+                FROM dashboard_user_sessions
+                WHERE session_token = ?
+                LIMIT 1
+                ''',
+                (normalized_token,),
+            )
+            session_row = cursor.fetchone()
+            if not session_row:
+                return None
+
+            session_payload = dict(session_row)
+            if bool(session_payload.get("revoked")):
+                return None
+
+            expires_dt = self._to_utc_datetime(session_payload.get("session_expires_at"))
+            if not expires_dt or expires_dt <= datetime.now(UTC):
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_user_sessions
+                    SET revoked = 1, updated_at = CURRENT_TIMESTAMP
+                    WHERE session_token = ?
+                    ''',
+                    (normalized_token,),
+                )
+                conn.commit()
+                return None
+
+            if int(session_payload.get("user_id") or 0) == -1 and str(session_payload.get("login_name") or "") == "admin":
+                current_seen = datetime.now(UTC).isoformat()
+                cursor.execute(
+                    '''
+                    UPDATE dashboard_user_sessions
+                    SET last_seen_at = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE session_token = ?
+                    ''',
+                    (current_seen, normalized_token),
+                )
+                conn.commit()
+                return {
+                    "user_id": -1,
+                    "login_name": "admin",
+                    "display_name": "Admin",
+                    "is_active": True,
+                    "require_password_change": False,
+                    "expires_at": expires_dt.isoformat(),
+                    "session_token": normalized_token,
+                    "subscription": {"is_active": True, "plan_code": "admin"},
+                    "license": {"allowed": True, "reason": "admin_bypass"},
+                    "scope": "admin",
+                }
+
+            cursor.execute(
+                '''
                 SELECT
                     session_row.session_token,
                     session_row.expires_at AS session_expires_at,
@@ -2281,19 +2335,6 @@ class TradingDatabase:
 
             payload = dict(row)
             if not bool(payload.get("is_active")):
-                return None
-
-            expires_dt = self._to_utc_datetime(payload.get("session_expires_at"))
-            if not expires_dt or expires_dt <= datetime.now(UTC):
-                cursor.execute(
-                    '''
-                    UPDATE dashboard_user_sessions
-                    SET revoked = 1, updated_at = CURRENT_TIMESTAMP
-                    WHERE session_token = ?
-                    ''',
-                    (normalized_token,),
-                )
-                conn.commit()
                 return None
 
             current_seen = datetime.now(UTC).isoformat()
