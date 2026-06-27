@@ -235,6 +235,13 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Credencial": "Credential",
     "Credenciais": "Credentials",
     "API Key e Secret Key": "API Key and Secret Key",
+    "Exchange API": "Exchange API",
+    "Configurar API Key e Secret Key nesta aba": "Configure API Key and Secret Key in this tab",
+    "Cole a API Key e a Secret Key da Binance/Exchange para o bot operar a conta real. Assim como o Telegram, você pode configurar direto nesta aba.": "Paste the Binance/Exchange API Key and Secret Key so the bot can trade the real account. Just like Telegram, you can configure it directly in this tab.",
+    "Status da Credencial": "Credential Status",
+    "Salvar nesta sessão": "Save in this session",
+    "Salvar no Vault": "Save to Vault",
+    "Limpar sessão": "Clear session",
     "Capital e Limites do Bot": "Bot Capital and Limits",
     "Defina quanto da banca o bot pode usar e quais travas de perda ele deve respeitar. Exemplo: se sua banca tem 1.000 USDT e você quer usar 50%, informe 500 USDT como capital liberado.": "Define how much of the balance the bot can use and which loss locks it must respect. Example: if your balance is 1,000 USDT and you want to use 50%, enter 500 USDT as allocated capital.",
     "Capital liberado para o bot (USDT)": "Capital allocated to the bot (USDT)",
@@ -2745,6 +2752,135 @@ def render_runtime_credentials_panel(
 
             if not vault_ready:
                 st.caption("Vault indisponível neste ambiente. As chaves podem ser usadas nesta sessão, mas não ficam persistidas com criptografia.")
+
+
+def render_bot_exchange_credentials_panel(section_key: str = "bot_runtime_exchange_credentials") -> None:
+    use_testnet = False
+    slot = _runtime_credential_slot(use_testnet)
+    resolved = _resolve_runtime_credentials(use_testnet)
+    exchange_name = _runtime_credential_exchange_name()
+
+    try:
+        from services.credential_vault import CredentialVault
+
+        vault = CredentialVault(strict=False)
+    except Exception:
+        vault = None
+
+    vault_ready = bool(vault and vault.is_configured())
+
+    st.markdown("### 🔑 Exchange API")
+    st.caption(
+        "Cole a API Key e a Secret Key da Binance/Exchange para o bot operar a conta real. "
+        "Assim como o Telegram, você pode configurar direto nesta aba."
+    )
+
+    status_col1, status_col2, status_col3 = st.columns(3)
+    with status_col1:
+        st.metric("Status da Credencial", "OK" if resolved else "PENDENTE")
+    with status_col2:
+        st.metric("Origem Ativa", (resolved or {}).get("source_label", "-").upper())
+    with status_col3:
+        st.metric("Exchange", exchange_name)
+
+    if resolved:
+        st.caption(
+            f"API Key: {_mask_runtime_secret(resolved.get('api_key', ''))} | "
+            f"Secret Key: {_mask_runtime_secret(resolved.get('api_secret', ''))}"
+        )
+    else:
+        st.warning("Nenhuma API Key/Secret Key real cadastrada para o runtime ainda.")
+
+    with st.expander("Configurar API Key e Secret Key nesta aba", expanded=not bool(resolved)):
+        st.markdown(
+            """
+            1. Crie ou copie a API Key na Binance/Exchange
+            2. Garanta permissão de leitura e trade
+            3. Não habilite saque/withdraw
+            4. Salve aqui antes de ligar o bot
+            """
+        )
+        env_api_name, env_secret_name = _runtime_credential_env_names(use_testnet)
+        st.caption(
+            f"Conta real do runtime: `{_runtime_credential_account_id(use_testnet)}` | "
+            f"Fallback por Railway/env: `{env_api_name}` / `{env_secret_name}`."
+        )
+
+        with st.form(f"{section_key}_{slot}_form"):
+            api_key = st.text_input(
+                "API Key",
+                type="password",
+                key=f"{section_key}_{slot}_api_key",
+                help="Cole aqui a API Key real da exchange.",
+            )
+            api_secret = st.text_input(
+                "Secret Key",
+                type="password",
+                key=f"{section_key}_{slot}_api_secret",
+                help="Cole aqui a Secret Key da mesma chave.",
+            )
+
+            action_col1, action_col2, action_col3 = st.columns(3)
+            with action_col1:
+                save_session = st.form_submit_button("Salvar nesta sessão")
+            with action_col2:
+                save_vault = st.form_submit_button("Salvar no Vault", disabled=not vault_ready)
+            with action_col3:
+                clear_session = st.form_submit_button("Limpar sessão")
+
+            if save_session:
+                if api_key and api_secret:
+                    _store_runtime_session_credentials(
+                        use_testnet,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        source="session",
+                        persisted=False,
+                    )
+                    st.success("Credenciais carregadas nesta sessão da dashboard.")
+                    st.rerun()
+                else:
+                    st.warning("Preencha API Key e Secret Key para salvar nesta sessão.")
+
+            if save_vault:
+                if not vault_ready:
+                    st.error("Vault não configurado. Defina `CREDENTIAL_ENCRYPTION_KEY` para persistir com criptografia.")
+                elif api_key and api_secret:
+                    vault.store_exchange_credentials(
+                        db,
+                        user_id=_runtime_credential_user_id(),
+                        account_id=_runtime_credential_account_id(use_testnet),
+                        exchange=exchange_name,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        credential_alias=f"runtime-{slot}",
+                        permissions_read=True,
+                        permissions_trade=True,
+                        permissions_withdraw=False,
+                        permission_status="unknown",
+                        token_status="unknown",
+                        reconciliation_status="unknown",
+                        notes="Credencial real configurada pela aba Bot Trader.",
+                    )
+                    _store_runtime_session_credentials(
+                        use_testnet,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        source="vault",
+                        persisted=True,
+                    )
+                    st.success("Credenciais persistidas com criptografia e carregadas na sessão.")
+                    st.rerun()
+                else:
+                    st.warning("Preencha API Key e Secret Key antes de salvar no vault.")
+
+            if clear_session:
+                _clear_runtime_session_credentials(use_testnet)
+                st.success("Credenciais removidas da sessão atual.")
+                st.rerun()
+
+        if not vault_ready:
+            st.caption("Vault indisponível neste ambiente. As chaves podem ser usadas nesta sessão, mas não ficam persistidas com criptografia.")
 
 
 def render_bot_telegram_notifications_panel(section_key: str = "bot_runtime_telegram"):
@@ -7760,6 +7896,8 @@ def main():
                     "`Sidebar -> Entrar no Workspace` ou `Admin -> Entrar`."
                 )
 
+            render_bot_telegram_notifications_panel(section_key="bot_runtime_notifications")
+
             if workspace_session_active:
                 runtime_user_id = int(dashboard_user["user_id"])
                 runtime_accounts = db.get_user_workspace_accounts(user_id=runtime_user_id, limit=100)
@@ -7801,13 +7939,14 @@ def main():
                         execution_context=runtime_execution_context,
                         form_key_prefix="bot_runtime",
                     )
-                    render_workspace_credentials_panel(
-                        user_id=runtime_user_id,
-                        selected_account=runtime_account,
-                        selected_exchange=runtime_account_exchange,
-                        execution_context=runtime_execution_context,
-                        form_key_prefix="bot_runtime",
-                    )
+                    with st.expander("Configurar API Key e Secret Key nesta aba", expanded=not bool(runtime_execution_context.get("api_key_ref"))):
+                        render_workspace_credentials_panel(
+                            user_id=runtime_user_id,
+                            selected_account=runtime_account,
+                            selected_exchange=runtime_account_exchange,
+                            execution_context=runtime_execution_context,
+                            form_key_prefix="bot_runtime",
+                        )
                     render_workspace_account_runtime_panel(
                         user_id=runtime_user_id,
                         workspace_user=dashboard_user,
@@ -7816,7 +7955,7 @@ def main():
                         execution_context=runtime_execution_context,
                     )
             else:
-                render_bot_telegram_notifications_panel(section_key="bot_runtime_notifications")
+                render_bot_exchange_credentials_panel(section_key="bot_runtime_exchange_credentials")
                 st.markdown("### ▶️ Runtime")
                 render_trader_bot_runtime_controls(
                     section_key="bot_hub",
