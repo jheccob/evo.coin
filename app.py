@@ -2716,6 +2716,7 @@ def render_trader_bot_runtime_controls(
     section_key: str = "bot_trader_runtime",
     allow_start: bool = True,
     block_reason: str = "",
+    admin_session_active: bool = False,
 ):
     selected_runtime_mode_for_key = str(
         st.session_state.get(f"{section_key}_runtime_mode")
@@ -2819,8 +2820,15 @@ def render_trader_bot_runtime_controls(
             st.error(f"Conta Real bloqueada agora: {real_preflight_message}")
 
     live_go_live_report = render_live_go_live_status_panel(section_key=f"{section_key}_go_live")
-    if not selected_use_testnet and live_go_live_report and not bool(live_go_live_report.get("structure_aligned_for_conservative_live")):
+    if (
+        not admin_session_active
+        and not selected_use_testnet
+        and live_go_live_report
+        and not bool(live_go_live_report.get("structure_aligned_for_conservative_live"))
+    ):
         st.warning("A estrutura do projeto ainda não está suficientemente alinhada para um piloto real conservador.")
+    elif admin_session_active and live_go_live_report and not bool(live_go_live_report.get("structure_aligned_for_conservative_live")):
+        st.info("Admin autenticado: checklist estrutural exibido como alerta informativo, sem bloquear o comando do `evo-bot`.")
 
     render_dashboard_strip(
         "O start/stop abaixo grava uma intenção no Postgres. O daemon do `evo-bot` reconcilia em poucos segundos.",
@@ -7200,6 +7208,7 @@ def main():
                 section_key="bot_hub",
                 allow_start=bot_start_allowed,
                 block_reason=bot_start_block_reason,
+                admin_session_active=admin_session_active,
             )
 
         elif bot_view_mode == "Prontidao":
