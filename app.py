@@ -235,6 +235,33 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Credencial": "Credential",
     "Credenciais": "Credentials",
     "API Key e Secret Key": "API Key and Secret Key",
+    "Capital e Limites do Bot": "Bot Capital and Limits",
+    "Defina quanto da banca o bot pode usar e quais travas de perda ele deve respeitar. Exemplo: se sua banca tem 1.000 USDT e você quer usar 50%, informe 500 USDT como capital liberado.": "Define how much of the balance the bot can use and which loss locks it must respect. Example: if your balance is 1,000 USDT and you want to use 50%, enter 500 USDT as allocated capital.",
+    "Capital liberado para o bot (USDT)": "Capital allocated to the bot (USDT)",
+    "Exposição operacional máxima da banca (%)": "Maximum operational exposure of balance (%)",
+    "Risco por operação (%)": "Risk per trade (%)",
+    "Perda máxima diária (%)": "Maximum daily loss (%)",
+    "Drawdown máximo (%)": "Maximum drawdown (%)",
+    "Máx. posições simultâneas": "Max simultaneous positions",
+    "Alavancagem máxima": "Maximum leverage",
+    "Modo de risco": "Risk mode",
+    "Símbolos preferidos": "Preferred symbols",
+    "Perfil válido": "Valid profile",
+    "Liberar operação real neste perfil": "Enable real trading in this profile",
+    "Liberar paper neste perfil": "Enable paper trading in this profile",
+    "Salvar Capital e Limites": "Save Capital and Limits",
+    "Capital e limites atualizados com sucesso.": "Capital and limits updated successfully.",
+    "Como definir o capital do bot?": "How should the bot capital be defined?",
+    "Valor fixo em USDT": "Fixed value in USDT",
+    "Percentual da banca": "Percentage of balance",
+    "Banca total informada (USDT)": "Reported total balance (USDT)",
+    "Quanto da banca usar (%)": "How much of the balance to use (%)",
+    "Capital liberado": "Allocated capital",
+    "Capital final salvo": "Final saved capital",
+    "Com esses limites": "With these limits",
+    "risco por operação": "risk per trade",
+    "perda diária máxima": "maximum daily loss",
+    "exposição operacional": "operational exposure",
     "Cadastre aqui as chaves da Binance/Exchange desta conta. Elas são salvas criptografadas no vault e o botão de ligar o bot só libera quando existir credencial.": "Register this account's Binance/Exchange keys here. They are stored encrypted in the vault and the bot start button only unlocks when credentials exist.",
     "Antes de ligar o bot, cadastre ou confirme a API Key e Secret Key desta conta. O `evo-bot` usa essas credenciais criptografadas para operar a conta real.": "Before starting the bot, register or confirm this account's API Key and Secret Key. `evo-bot` uses these encrypted credentials to trade the real account.",
     "Alias da Credencial": "Credential Alias",
@@ -323,6 +350,7 @@ def install_dashboard_translation_layer() -> None:
         "info",
         "markdown",
         "metric",
+        "number_input",
         "radio",
         "selectbox",
         "subheader",
@@ -331,6 +359,7 @@ def install_dashboard_translation_layer() -> None:
         "text_area",
         "text_input",
         "warning",
+        "checkbox",
     ]
 
     def translated_call(original, method_name):
@@ -4728,6 +4757,211 @@ def render_workspace_credentials_panel(
                 st.rerun()
 
 
+def render_workspace_capital_risk_panel(
+    *,
+    user_id: int,
+    selected_account: dict,
+    selected_exchange: str,
+    execution_context: dict,
+    form_key_prefix: str,
+) -> None:
+    selected_account_id = str(selected_account["account_id"])
+    risk_profile = execution_context.get("risk_profile") or {}
+
+    st.markdown("### 💰 Capital e Limites do Bot")
+    st.caption(
+        "Defina quanto da banca o bot pode usar e quais travas de perda ele deve respeitar. "
+        "Exemplo: se sua banca tem 1.000 USDT e você quer usar 50%, informe 500 USDT como capital liberado."
+    )
+
+    current_capital = float(selected_account.get("capital_base", 0.0) or 0.0)
+    current_risk_per_trade = float(risk_profile.get("max_risk_per_trade", 0.5) or 0.5)
+    current_daily_loss = float(risk_profile.get("max_daily_loss", 2.0) or 2.0)
+    current_open_risk = float(risk_profile.get("max_portfolio_open_risk_pct", 2.0) or 2.0)
+
+    with st.form(f"{form_key_prefix}_capital_risk_form_{selected_account_id}"):
+        allocation_mode = st.radio(
+            "Como definir o capital do bot?",
+            options=["Valor fixo em USDT", "Percentual da banca"],
+            horizontal=True,
+            key=f"{form_key_prefix}_allocation_mode_{selected_account_id}",
+            format_func=translate_static_ui_text,
+        )
+        capital_col1, capital_col2, capital_col3 = st.columns(3)
+        if allocation_mode == "Percentual da banca":
+            with capital_col1:
+                informed_total_balance = st.number_input(
+                    "Banca total informada (USDT)",
+                    min_value=0.0,
+                    value=current_capital if current_capital > 0 else 1000.0,
+                    step=50.0,
+                    key=f"{form_key_prefix}_total_balance_{selected_account_id}",
+                    help="Informe o tamanho aproximado da banca para calcular o capital liberado.",
+                )
+            with capital_col2:
+                allocation_pct = st.number_input(
+                    "Quanto da banca usar (%)",
+                    min_value=0.0,
+                    max_value=100.0,
+                    value=100.0,
+                    step=5.0,
+                    key=f"{form_key_prefix}_allocation_pct_{selected_account_id}",
+                    help="Percentual da banca que o bot pode usar como capital operacional.",
+                )
+            capital_base = float(informed_total_balance) * float(allocation_pct) / 100.0
+            with capital_col3:
+                st.metric("Capital liberado", f"{capital_base:.2f} USDT")
+        else:
+            with capital_col1:
+                capital_base = st.number_input(
+                    "Capital liberado para o bot (USDT)",
+                    min_value=0.0,
+                    value=current_capital,
+                    step=50.0,
+                    key=f"{form_key_prefix}_capital_base_{selected_account_id}",
+                    help="Valor máximo da banca que o bot pode considerar para calcular posições.",
+                )
+            with capital_col2:
+                st.metric("Capital liberado", f"{float(capital_base):.2f} USDT")
+
+        exposure_col1, exposure_col2 = st.columns(2)
+        with exposure_col1:
+            st.metric("Capital final salvo", f"{float(capital_base):.2f} USDT")
+        with exposure_col2:
+            max_portfolio_open_risk_pct = st.number_input(
+                "Exposição operacional máxima da banca (%)",
+                min_value=0.0,
+                value=current_open_risk,
+                step=0.1,
+                key=f"{form_key_prefix}_open_risk_{selected_account_id}",
+                help="Quanto do capital liberado pode ficar exposto em operações abertas ao mesmo tempo.",
+            )
+
+        loss_col1, loss_col2, loss_col3 = st.columns(3)
+        with loss_col1:
+            max_risk_per_trade = st.number_input(
+                "Risco por operação (%)",
+                min_value=0.0,
+                value=current_risk_per_trade,
+                step=0.1,
+                key=f"{form_key_prefix}_risk_trade_{selected_account_id}",
+                help="Perda planejada máxima por operação, calculada sobre o capital liberado.",
+            )
+        with loss_col2:
+            max_daily_loss = st.number_input(
+                "Perda máxima diária (%)",
+                min_value=0.0,
+                value=current_daily_loss,
+                step=0.1,
+                key=f"{form_key_prefix}_daily_loss_{selected_account_id}",
+                help="Trava diária. Ao atingir esse limite, o bot deve parar novas entradas.",
+            )
+        with loss_col3:
+            max_drawdown = st.number_input(
+                "Drawdown máximo (%)",
+                min_value=0.0,
+                value=float(risk_profile.get("max_drawdown", 10.0) or 10.0),
+                step=0.5,
+                key=f"{form_key_prefix}_drawdown_{selected_account_id}",
+            )
+
+        guard_col1, guard_col2, guard_col3 = st.columns(3)
+        with guard_col1:
+            allowed_position_count = st.number_input(
+                "Máx. posições simultâneas",
+                min_value=0,
+                value=int(risk_profile.get("allowed_position_count", 3) or 3),
+                step=1,
+                key=f"{form_key_prefix}_positions_{selected_account_id}",
+            )
+        with guard_col2:
+            leverage_cap = st.number_input(
+                "Alavancagem máxima",
+                min_value=0.0,
+                value=float(risk_profile.get("leverage_cap", 5.0) or 5.0),
+                step=0.5,
+                key=f"{form_key_prefix}_leverage_{selected_account_id}",
+            )
+        with guard_col3:
+            risk_mode_profile = st.selectbox(
+                "Modo de risco",
+                options=["normal", "reduced", "blocked"],
+                index=["normal", "reduced", "blocked"].index(
+                    str(risk_profile.get("risk_mode") or "normal")
+                    if str(risk_profile.get("risk_mode") or "normal") in {"normal", "reduced", "blocked"}
+                    else "normal"
+                ),
+                key=f"{form_key_prefix}_profile_mode_{selected_account_id}",
+            )
+
+        preferred_symbols = st.text_input(
+            "Símbolos preferidos",
+            value=",".join(risk_profile.get("preferred_symbols", execution_context.get("allowed_symbols", []))),
+            key=f"{form_key_prefix}_pref_symbols_{selected_account_id}",
+        )
+        risk_is_valid = st.checkbox(
+            "Perfil válido",
+            value=bool(risk_profile.get("is_valid", True)),
+            key=f"{form_key_prefix}_profile_valid_{selected_account_id}",
+        )
+        risk_live_enabled = st.checkbox(
+            "Liberar operação real neste perfil",
+            value=bool(risk_profile.get("live_enabled", True)),
+            key=f"{form_key_prefix}_risk_live_{selected_account_id}",
+        )
+        risk_paper_enabled = st.checkbox(
+            "Liberar paper neste perfil",
+            value=bool(risk_profile.get("paper_enabled", True)),
+            key=f"{form_key_prefix}_risk_paper_{selected_account_id}",
+        )
+
+        estimated_trade_loss = float(capital_base) * float(max_risk_per_trade) / 100.0
+        estimated_daily_loss = float(capital_base) * float(max_daily_loss) / 100.0
+        estimated_open_risk = float(capital_base) * float(max_portfolio_open_risk_pct) / 100.0
+        st.caption(
+            f"Com esses limites: risco por operação ≈ {estimated_trade_loss:.2f} USDT | "
+            f"perda diária máxima ≈ {estimated_daily_loss:.2f} USDT | "
+            f"exposição operacional ≈ {estimated_open_risk:.2f} USDT."
+        )
+
+        if st.form_submit_button("Salvar Capital e Limites"):
+            db.upsert_user_account(
+                {
+                    "user_id": user_id,
+                    "account_id": selected_account_id,
+                    "account_alias": selected_account.get("account_alias") or selected_account_id,
+                    "exchange": selected_exchange,
+                    "status": selected_account.get("status") or "active",
+                    "live_enabled": bool(selected_account.get("live_enabled")),
+                    "paper_enabled": bool(selected_account.get("paper_enabled")),
+                    "capital_base": float(capital_base),
+                    "risk_mode": selected_account.get("risk_mode") or risk_mode_profile,
+                    "allowed_symbols": selected_account.get("allowed_symbols") or [],
+                    "allowed_timeframes": selected_account.get("allowed_timeframes") or [],
+                    "notes": selected_account.get("notes"),
+                }
+            )
+            db.upsert_user_risk_profile(
+                {
+                    "user_id": user_id,
+                    "account_id": selected_account_id,
+                    "max_risk_per_trade": float(max_risk_per_trade),
+                    "max_daily_loss": float(max_daily_loss),
+                    "max_drawdown": float(max_drawdown),
+                    "max_portfolio_open_risk_pct": float(max_portfolio_open_risk_pct),
+                    "allowed_position_count": int(allowed_position_count),
+                    "preferred_symbols": [item.strip() for item in preferred_symbols.split(",") if item.strip()],
+                    "leverage_cap": float(leverage_cap),
+                    "risk_mode": risk_mode_profile,
+                    "is_valid": bool(risk_is_valid),
+                    "live_enabled": bool(risk_live_enabled),
+                    "paper_enabled": bool(risk_paper_enabled),
+                }
+            )
+            st.success("Capital e limites atualizados com sucesso.")
+            st.rerun()
+
+
 def render_workspace_account_runtime_panel(
     *,
     user_id: int,
@@ -5357,106 +5591,13 @@ def render_multiuser_workspace_tab():
                             st.rerun()
 
         with detail_tab2:
-            risk_profile = execution_context.get("risk_profile") or {}
-            with st.form(f"workspace_risk_form_{selected_account_id}"):
-                risk_col1, risk_col2, risk_col3 = st.columns(3)
-                with risk_col1:
-                    max_risk_per_trade = st.number_input(
-                        "Risco por Trade %",
-                        min_value=0.0,
-                        value=float(risk_profile.get("max_risk_per_trade", 0.5) or 0.5),
-                        step=0.1,
-                        key=f"workspace_risk_trade_{selected_account_id}",
-                    )
-                    max_daily_loss = st.number_input(
-                        "Loss Diário %",
-                        min_value=0.0,
-                        value=float(risk_profile.get("max_daily_loss", 2.0) or 2.0),
-                        step=0.1,
-                        key=f"workspace_daily_loss_{selected_account_id}",
-                    )
-                with risk_col2:
-                    max_drawdown = st.number_input(
-                        "Drawdown Máx %",
-                        min_value=0.0,
-                        value=float(risk_profile.get("max_drawdown", 10.0) or 10.0),
-                        step=0.5,
-                        key=f"workspace_drawdown_{selected_account_id}",
-                    )
-                    max_portfolio_open_risk_pct = st.number_input(
-                        "Risco Aberto Máx %",
-                        min_value=0.0,
-                        value=float(risk_profile.get("max_portfolio_open_risk_pct", 2.0) or 2.0),
-                        step=0.1,
-                        key=f"workspace_open_risk_{selected_account_id}",
-                    )
-                with risk_col3:
-                    allowed_position_count = st.number_input(
-                        "Máx Posições",
-                        min_value=0,
-                        value=int(risk_profile.get("allowed_position_count", 3) or 3),
-                        step=1,
-                        key=f"workspace_positions_{selected_account_id}",
-                    )
-                    leverage_cap = st.number_input(
-                        "Leverage Cap",
-                        min_value=0.0,
-                        value=float(risk_profile.get("leverage_cap", 5.0) or 5.0),
-                        step=0.5,
-                        key=f"workspace_leverage_{selected_account_id}",
-                    )
-
-                preferred_symbols = st.text_input(
-                    "Símbolos Preferidos",
-                    value=",".join(risk_profile.get("preferred_symbols", execution_context.get("allowed_symbols", []))),
-                    key=f"workspace_pref_symbols_{selected_account_id}",
-                )
-                risk_mode_profile = st.selectbox(
-                    "Modo do Perfil",
-                    options=["normal", "reduced", "blocked"],
-                    index=["normal", "reduced", "blocked"].index(
-                        str(risk_profile.get("risk_mode") or "normal")
-                        if str(risk_profile.get("risk_mode") or "normal") in {"normal", "reduced", "blocked"}
-                        else "normal"
-                    ),
-                    key=f"workspace_profile_mode_{selected_account_id}",
-                )
-                risk_is_valid = st.checkbox(
-                    "Perfil Válido",
-                    value=bool(risk_profile.get("is_valid", True)),
-                    key=f"workspace_profile_valid_{selected_account_id}",
-                )
-                risk_live_enabled = st.checkbox(
-                    "Live liberado no risco",
-                    value=bool(risk_profile.get("live_enabled", True)),
-                    key=f"workspace_risk_live_{selected_account_id}",
-                )
-                risk_paper_enabled = st.checkbox(
-                    "Paper liberado no risco",
-                    value=bool(risk_profile.get("paper_enabled", True)),
-                    key=f"workspace_risk_paper_{selected_account_id}",
-                )
-
-                if st.form_submit_button("Salvar Perfil de Risco"):
-                    db.upsert_user_risk_profile(
-                        {
-                            "user_id": user_id,
-                            "account_id": selected_account_id,
-                            "max_risk_per_trade": float(max_risk_per_trade),
-                            "max_daily_loss": float(max_daily_loss),
-                            "max_drawdown": float(max_drawdown),
-                            "max_portfolio_open_risk_pct": float(max_portfolio_open_risk_pct),
-                            "allowed_position_count": int(allowed_position_count),
-                            "preferred_symbols": [item.strip() for item in preferred_symbols.split(",") if item.strip()],
-                            "leverage_cap": float(leverage_cap),
-                            "risk_mode": risk_mode_profile,
-                            "is_valid": bool(risk_is_valid),
-                            "live_enabled": bool(risk_live_enabled),
-                            "paper_enabled": bool(risk_paper_enabled),
-                        }
-                    )
-                    st.success("Perfil de risco atualizado com sucesso.")
-                    st.rerun()
+            render_workspace_capital_risk_panel(
+                user_id=user_id,
+                selected_account=selected_account,
+                selected_exchange=selected_exchange,
+                execution_context=execution_context,
+                form_key_prefix="workspace",
+            )
 
         with detail_tab3:
             render_workspace_credentials_panel(
@@ -7652,6 +7793,13 @@ def main():
                             _build_status_pill("Exchange", runtime_account_exchange or "-", "default"),
                             _build_status_pill("Credencial", "OK" if runtime_execution_context.get("api_key_ref") else "PENDENTE", "accent" if runtime_execution_context.get("api_key_ref") else "danger"),
                         ],
+                    )
+                    render_workspace_capital_risk_panel(
+                        user_id=runtime_user_id,
+                        selected_account=runtime_account,
+                        selected_exchange=runtime_account_exchange,
+                        execution_context=runtime_execution_context,
+                        form_key_prefix="bot_runtime",
                     )
                     render_workspace_credentials_panel(
                         user_id=runtime_user_id,
