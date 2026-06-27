@@ -5,7 +5,7 @@ set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "PROJECT_ROOT=%%~fI"
 set "LOG_DIR=%PROJECT_ROOT%\logs"
 set "HOST=127.0.0.1"
-set "PORT=8501"
+set "PORT=8080"
 set "APP_URL=http://%HOST%:%PORT%"
 
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%"

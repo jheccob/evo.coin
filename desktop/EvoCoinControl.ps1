@@ -14,7 +14,7 @@ $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $script:ScriptDir
 $script:DataDir = Join-Path $script:ProjectRoot "data"
 $script:LogsDir = Join-Path $script:ProjectRoot "logs"
 $script:DashboardCmd = Join-Path $script:ScriptDir "EvoCoinDashboard.cmd"
-$script:DashboardUrl = "http://127.0.0.1:8501"
+$script:DashboardUrl = "http://127.0.0.1:8080"
 $script:UiWindowTitle = "Evo Coin Bot"
 $script:UiBuildStamp = (Get-Item -LiteralPath $MyInvocation.MyCommand.Path).LastWriteTime.ToString("yyyy-MM-dd HH:mm")
 $script:ProcessStatePath = Join-Path $script:LogsDir "trader_bot_process.json"
@@ -1196,6 +1196,8 @@ validation = service.validate_account_connection(context, testnet=False)
 snapshot = config.build_runtime_strategy_snapshot()
 result = {
     "validation": validation,
+    "reconcile": None,
+    "ok": False,
 }
 if validation.get("ok"):
     reconcile = service.reconcile_account_state(
@@ -1238,15 +1240,46 @@ print(json.dumps(result, ensure_ascii=True))
 
         $result = $raw | ConvertFrom-Json
         if (-not $result.ok) {
-            $reconcile = $(if ($null -ne $result.PSObject.Properties["reconcile"]) { $result.reconcile } else { $null })
-            $validation = $(if ($null -ne $result.PSObject.Properties["validation"]) { $result.validation } else { $null })
-            if ($null -ne $reconcile -and $null -ne $reconcile.PSObject.Properties["ok"] -and -not $reconcile.ok) {
-                $reconcileError = $(if ($null -ne $reconcile.PSObject.Properties["error"]) { [string]$reconcile.error } else { "erro nao informado" })
-                $Reason.Value = "Falha na conexao real com a Binance Futures: $reconcileError"
+            $reconcileProperty = $null
+            $validationProperty = $null
+            if ($null -ne $result -and $null -ne $result.PSObject) {
+                $reconcileProperty = $result.PSObject.Properties.Match("reconcile") | Select-Object -First 1
+                $validationProperty = $result.PSObject.Properties.Match("validation") | Select-Object -First 1
             }
-            elseif ($null -ne $validation -and $null -ne $validation.PSObject.Properties["ok"] -and -not $validation.ok) {
-                $validationError = $(if ($null -ne $validation.PSObject.Properties["error"]) { [string]$validation.error } else { "erro nao informado" })
-                $Reason.Value = "Falha na validacao da conta real: $validationError"
+
+            $reconcile = if ($null -ne $reconcileProperty) { $reconcileProperty.Value } else { $null }
+            $validation = if ($null -ne $validationProperty) { $validationProperty.Value } else { $null }
+
+            $reconcileOkProperty = if ($null -ne $reconcile -and $null -ne $reconcile.PSObject) {
+                $reconcile.PSObject.Properties.Match("ok") | Select-Object -First 1
+            } else { $null }
+            $validationOkProperty = if ($null -ne $validation -and $null -ne $validation.PSObject) {
+                $validation.PSObject.Properties.Match("ok") | Select-Object -First 1
+            } else { $null }
+
+            if ($null -ne $reconcileOkProperty -and -not [bool]$reconcileOkProperty.Value) {
+                $reconcileErrorProperty = if ($null -ne $reconcile -and $null -ne $reconcile.PSObject) {
+                    $reconcile.PSObject.Properties.Match("error") | Select-Object -First 1
+                } else { $null }
+                $reconcileError = if ($null -ne $reconcileErrorProperty) { [string]$reconcileErrorProperty.Value } else { "erro nao informado" }
+                if ($reconcileError -match "-1021|outside of the recvWindow|Timestamp for this request") {
+                    $Reason.Value = "Falha na conexao real com a Binance Futures: $reconcileError Ajuste a data e hora do Windows para sincronizacao automatica antes de ligar o live."
+                }
+                else {
+                    $Reason.Value = "Falha na conexao real com a Binance Futures: $reconcileError"
+                }
+            }
+            elseif ($null -ne $validationOkProperty -and -not [bool]$validationOkProperty.Value) {
+                $validationErrorProperty = if ($null -ne $validation -and $null -ne $validation.PSObject) {
+                    $validation.PSObject.Properties.Match("error") | Select-Object -First 1
+                } else { $null }
+                $validationError = if ($null -ne $validationErrorProperty) { [string]$validationErrorProperty.Value } else { "erro nao informado" }
+                if ($validationError -match "-1021|outside of the recvWindow|Timestamp for this request") {
+                    $Reason.Value = "Falha na validacao da conta real: $validationError Ajuste a data e hora do Windows para sincronizacao automatica antes de ligar o live."
+                }
+                else {
+                    $Reason.Value = "Falha na validacao da conta real: $validationError"
+                }
             }
             else {
                 $Reason.Value = "Falha na validacao da conta real."

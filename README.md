@@ -73,17 +73,20 @@ Sem os arquivos de `reports/validation`, o dashboard sobe normalmente, mas o run
 
 ## Execucao local
 
+O launch local agora prioriza a `.venv` do projeto e usa a porta `8080` por padrao.
+Se a variavel `PORT` existir, ela continua tendo prioridade.
+
 Dashboard:
 
 ```bash
-python start_railway.py
+.venv\Scripts\python.exe start_railway.py
 ```
 
 Bot:
 
 ```bash
 set RAILWAY_SERVICE_MODE=bot
-python start_railway.py
+.venv\Scripts\python.exe start_railway.py
 ```
 
 Backtest:
@@ -91,3 +94,9 @@ Backtest:
 ```bash
 python backtest.py --candles 3000
 ```
+
+## Porta no Railway
+
+No Railway, o servico nao fica preso na `8080`.
+Ele escuta a porta definida pela variavel `PORT` que a plataforma injeta no deploy.
+Sem `PORT`, o fallback local continua sendo `8080`.

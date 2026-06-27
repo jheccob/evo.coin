@@ -1218,6 +1218,13 @@ class ExchangeConfig:
                 exchange.set_sandbox_mode(True)
             except Exception:
                 pass
+        if hasattr(exchange, "load_time_difference"):
+            try:
+                # Prime the exchange clock offset before the first signed request.
+                # This helps reduce Binance -1021 recvWindow failures on hosts with clock drift.
+                exchange.load_time_difference()
+            except Exception:
+                pass
         return exchange
 
     @staticmethod

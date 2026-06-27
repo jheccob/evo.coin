@@ -1,44 +1,56 @@
 # Deploy no Railway
 
-Guia prático para subir o projeto no Railway com banco PostgreSQL.
+Guia pratico para subir o projeto no Railway com PostgreSQL e arquitetura separada para dashboard e bot.
 
 ## Arquitetura recomendada
 
-Use 3 serviços no mesmo projeto Railway:
+Use 3 servicos no mesmo projeto Railway:
 
 1. `evo-postgres`
    Banco PostgreSQL gerenciado pelo Railway.
 2. `evo-dashboard`
-   Serviço público com `RAILWAY_SERVICE_MODE=dashboard`.
+   Servico publico com `RAILWAY_SERVICE_MODE=dashboard`.
 3. `evo-bot`
-   Serviço privado com `RAILWAY_SERVICE_MODE=bot`.
+   Servico privado com `RAILWAY_SERVICE_MODE=bot`.
 
-Essa separação é mais estável do que usar `RAILWAY_SERVICE_MODE=all`, porque o dashboard e o bot ficam independentes.
+Essa separacao e mais estavel do que usar `RAILWAY_SERVICE_MODE=all`, porque dashboard e bot ficam independentes.
 
-## O que o projeto já faz
+No modelo multiusuario:
 
-- O Railway já vai usar o `Dockerfile` da raiz.
-- O start command já está configurado em `railway.json` para `python start_railway.py`.
-- O banco é inicializado automaticamente no boot.
-- Se `DATABASE_URL` apontar para Postgres, o projeto usa Postgres.
-- Se `DATABASE_URL` não existir, ele cai para SQLite local.
+- a dashboard publica grava comandos de start e stop no banco
+- o servico privado `evo-bot` reconcilia esses comandos em background
+- cada conta ativa roda em contexto isolado
 
-No Railway, prefira sempre Postgres. Não use SQLite em produção sem volume persistente.
+## O que o projeto ja faz
 
-## Ordem correta de configuração
+- o Railway usa o `Dockerfile` da raiz
+- o start command ja esta em `railway.json` como `python start_railway.py`
+- o banco e inicializado automaticamente no boot
+- se `DATABASE_URL` apontar para Postgres, o projeto usa Postgres
+- se `DATABASE_URL` nao existir, ele cai para SQLite local
 
-1. Criar um novo projeto no Railway a partir do repositório GitHub.
-2. Adicionar o serviço PostgreSQL no mesmo projeto.
-3. Criar ou duplicar um serviço de app para o dashboard.
-4. Criar ou duplicar um segundo serviço de app para o bot.
-5. Em ambos os serviços de app, adicionar `DATABASE_URL` como reference variable do serviço Postgres.
-6. Configurar as variáveis do dashboard.
-7. Configurar as variáveis do bot.
+No Railway, prefira sempre Postgres. Nao use SQLite em producao sem volume persistente.
+
+Sobre porta:
+
+- localmente, este projeto usa `8080` como fallback
+- no Railway, a aplicacao deve escutar a `PORT` injetada pela plataforma
+- se `PORT` existir, ela sempre tem prioridade sobre o fallback local
+
+## Ordem correta de configuracao
+
+1. Criar um novo projeto no Railway a partir do repositorio GitHub.
+2. Adicionar o servico PostgreSQL no mesmo projeto.
+3. Criar ou duplicar um servico de app para o dashboard.
+4. Criar ou duplicar um segundo servico de app para o bot.
+5. Nos dois servicos de app, adicionar `DATABASE_URL` como reference variable do Postgres.
+6. Configurar as variaveis do dashboard.
+7. Configurar as variaveis do bot.
 8. Fazer o primeiro deploy em `TESTNET=true`.
-9. Gerar domínio público apenas para o dashboard.
-10. Validar login, conexão com banco e status do runtime.
+9. Gerar dominio publico apenas para o dashboard.
+10. Validar login, conexao com banco e status do runtime.
 
-## Serviço 1: PostgreSQL
+## Servico 1: PostgreSQL
 
 No canvas do Railway:
 
@@ -46,7 +58,7 @@ No canvas do Railway:
 2. Escolha `Database`.
 3. Escolha `PostgreSQL`.
 
-Depois disso o Railway cria variáveis como:
+Depois disso o Railway cria variaveis como:
 
 - `PGHOST`
 - `PGPORT`
@@ -55,13 +67,13 @@ Depois disso o Railway cria variáveis como:
 - `PGDATABASE`
 - `DATABASE_URL`
 
-No app, a variável que interessa é `DATABASE_URL`.
+No app, a variavel que interessa e `DATABASE_URL`.
 
-## Serviço 2: Dashboard
+## Servico 2: Dashboard
 
-Crie um serviço conectado ao mesmo repositório e branch `main`.
+Crie um servico conectado ao mesmo repositorio e branch `main`.
 
-### Variáveis obrigatórias do dashboard
+### Variaveis obrigatorias do dashboard
 
 ```env
 RAILWAY_SERVICE_MODE=dashboard
@@ -84,7 +96,7 @@ AI_MODEL_PATH=data/models/runtime_model.tflite
 AI_MODEL_METADATA_PATH=data/models/runtime_model_metadata.json
 ```
 
-### Variáveis opcionais do dashboard
+### Variaveis opcionais do dashboard
 
 ```env
 TELEGRAM_BOT_TOKEN=
@@ -94,16 +106,17 @@ CREDENTIAL_ENCRYPTION_KEY=
 
 Se quiser salvar credenciais da exchange pelo dashboard com criptografia, defina `CREDENTIAL_ENCRYPTION_KEY`.
 
-## Serviço 3: Bot
+## Servico 3: Bot
 
-Crie outro serviço no mesmo repositório.
+Crie outro servico no mesmo repositorio.
 
-### Variáveis obrigatórias do bot
+### Variaveis obrigatorias do bot
 
 ```env
 RAILWAY_SERVICE_MODE=bot
 DATABASE_URL=<reference variable do Postgres>
 TESTNET=true
+ENABLE_MULTIUSER_RUNTIME=true
 SYMBOL=BTC/USDT
 TIMEFRAME=15m
 SINGLE_USER_RUNTIME_EXCHANGE=binanceusdm
@@ -117,16 +130,33 @@ RUNTIME_SYMBOL_APPROVAL_OVERRIDE=false
 ENABLE_AI_ASSISTANT=true
 AI_MODEL_PATH=data/models/runtime_model.tflite
 AI_MODEL_METADATA_PATH=data/models/runtime_model_metadata.json
+CREDENTIAL_ENCRYPTION_KEY=<mesma-chave-do-dashboard-se-usar-vault>
 ```
 
-### Credenciais para rodar em testnet
+### Credenciais em modo multiusuario
+
+Se os usuarios vao salvar as proprias chaves pela dashboard:
+
+- defina a mesma `CREDENTIAL_ENCRYPTION_KEY` no `evo-dashboard` e no `evo-bot`
+- deixe `ENABLE_MULTIUSER_RUNTIME=true` no servico `evo-bot`
+- use a aba `Runtime` do workspace para enviar start e stop remoto por conta
+
+Observacao importante:
+
+- para o fluxo do cliente final, voce pode operar com uma unica conta logica por usuario
+- essa conta guarda um unico par de chaves reais por `user_id + account_id + exchange`
+- testnet pode ficar apenas para uso interno ou administracao, se voce ainda quiser manter esse ambiente
+
+### Credenciais para modo single-user ou fallback
+
+#### Testnet
 
 ```env
 BINANCE_TESTNET_API_KEY=...
 BINANCE_TESTNET_SECRET_KEY=...
 ```
 
-### Credenciais para rodar em conta real
+#### Conta real
 
 ```env
 BINANCE_API_KEY=...
@@ -136,84 +166,86 @@ LIVE_TRADING_CONFIRMATION=EU_ASSUMO_RISCO
 TESTNET=false
 ```
 
-Só vire essas variáveis para produção depois que a testnet estiver estável.
+So vire essas variaveis para producao depois que a testnet estiver estavel.
 
 ## Como ligar o banco corretamente
 
-Não copie uma URL manual se puder evitar.
+Nao copie uma URL manual se puder evitar.
 
 No Railway:
 
-1. Entre no serviço `evo-dashboard`.
+1. Entre no servico `evo-dashboard`.
 2. Abra a aba `Variables`.
 3. Clique em `Add Reference Variable`.
-4. Escolha o serviço Postgres.
+4. Escolha o servico Postgres.
 5. Selecione `DATABASE_URL`.
 
 Repita a mesma coisa no `evo-bot`.
 
-Assim a variável continua sincronizada se o Railway trocar credenciais internas do banco.
+Assim a variavel continua sincronizada se o Railway trocar credenciais internas do banco.
 
-## Migração e criação de tabelas
+## Migracao e criacao de tabelas
 
-Não existe um passo manual de migration separado neste projeto.
+Nao existe um passo manual de migration separado neste projeto.
 
-O arquivo `database/database.py` chama `init_database()` no startup e executa vários `CREATE TABLE IF NOT EXISTS`.
+O arquivo `database/database.py` chama `init_database()` no startup e executa varios `CREATE TABLE IF NOT EXISTS`.
 
-Na prática:
+Na pratica:
 
 - subiu com `DATABASE_URL` correto
 - conectou no Postgres
-- as tabelas são criadas automaticamente
+- as tabelas sao criadas automaticamente
 
-## Domínio público
+## Dominio publico
 
-Gere domínio apenas no dashboard.
+Gere dominio apenas no dashboard.
 
-No serviço `evo-dashboard`:
+No servico `evo-dashboard`:
 
 1. Abra `Settings`.
-2. Vá em `Networking`.
+2. Va em `Networking`.
 3. Em `Public Networking`, clique em `Generate Domain`.
 
-O bot não precisa de domínio público.
+O bot nao precisa de dominio publico.
 
 ## Primeira subida recomendada
 
-Faça assim:
+Faca assim:
 
 1. Suba o `evo-dashboard` com `TESTNET=true`.
-2. Abra o domínio gerado e confirme que o Streamlit carregou.
+2. Abra o dominio gerado e confirme que o Streamlit carregou.
 3. Verifique no dashboard se o backend mostra Postgres em vez de SQLite.
 4. Suba o `evo-bot` ainda em `TESTNET=true`.
-5. Confira os logs do bot e veja se ele inicializa sem erro de governança, banco ou credenciais.
+5. Confira os logs do bot e veja se ele inicializa sem erro de governanca, banco ou credenciais.
+6. Entre no workspace, salve credenciais criptografadas reais e use a aba `Runtime` da conta para enviar um start remoto.
 
-## Checklist de validação depois do deploy
+## Checklist de validacao depois do deploy
 
 ### Dashboard
 
-- o domínio abre
+- o dominio abre
 - o login admin funciona
-- o dashboard não mostra erro de `ADMIN_PANEL_PASSWORD`
+- o dashboard nao mostra erro de `ADMIN_PANEL_PASSWORD`
 - o banco aparece como Postgres
 
 ### Banco
 
-- `DATABASE_URL` está definido por reference variable
-- o serviço Postgres está `healthy`
-- o app não está caindo para `sqlite`
+- `DATABASE_URL` esta definido por reference variable
+- o servico Postgres esta `healthy`
+- o app nao esta caindo para `sqlite`
 
 ### Bot
 
 - logs mostram boot normal
-- não há erro de `DATABASE_URL`
-- não há erro de `BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP`
-- não há erro de credencial Binance
-- não há erro de símbolo bloqueado por governança
+- nao ha erro de `DATABASE_URL`
+- `ENABLE_MULTIUSER_RUNTIME=true` esta definido se o bot for operar contas do workspace
+- nao ha erro de `BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP`
+- nao ha erro de credencial Binance
+- nao ha erro de simbolo bloqueado por governanca
 
-## Variáveis opcionais que você não precisa no primeiro deploy
+## Variaveis opcionais que voce nao precisa no primeiro deploy
 
-Pode deixar vazio no começo:
+Pode deixar vazio no comeco:
 
 - `REDIS_URL`
 - `STRIPE_SECRET_KEY`
@@ -239,7 +271,7 @@ CREDENTIAL_ENCRYPTION_KEY=<chave-gerada>
 
 Se usar vault, coloque a mesma chave no dashboard e no bot.
 
-## Configuração mínima para funcionar hoje
+## Configuracao minima para funcionar hoje
 
 ### Dashboard
 
@@ -257,16 +289,15 @@ BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP=false
 RAILWAY_SERVICE_MODE=bot
 DATABASE_URL=<reference variable do Postgres>
 TESTNET=true
-BINANCE_TESTNET_API_KEY=<sua-chave>
-BINANCE_TESTNET_SECRET_KEY=<seu-secret>
+ENABLE_MULTIUSER_RUNTIME=true
 BOT_REQUIRE_LOCAL_CSV_BOOTSTRAP=false
 ```
 
 ## Alternativa simples
 
-Se quiser começar mais rápido, dá para usar:
+Se quiser comecar mais rapido, da para usar:
 
-- 1 serviço Postgres
-- 1 serviço app com `RAILWAY_SERVICE_MODE=all`
+- 1 servico Postgres
+- 1 servico app com `RAILWAY_SERVICE_MODE=all`
 
-Funciona, mas não é o melhor desenho para operação contínua. O recomendado continua sendo separar dashboard e bot.
+Funciona, mas nao e o melhor desenho para operacao continua. O recomendado continua sendo separar dashboard e bot.

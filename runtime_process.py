@@ -14,6 +14,25 @@ BOT_RUNNER_STDOUT_LOG_PATH = LOGS_DIR / "bot_runner_stdout.log"
 BOT_RUNNER_STDERR_LOG_PATH = LOGS_DIR / "bot_runner_stderr.log"
 
 
+def build_account_runtime_key(
+    *,
+    user_id: int,
+    account_id: str,
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+) -> str:
+    resolved_user_id = int(user_id or 0)
+    resolved_account_id = str(account_id or "default").strip() or "default"
+    resolved_exchange = str(exchange or "binanceusdm").strip() or "binanceusdm"
+    resolved_symbol = str(symbol or "").strip() or "UNKNOWN"
+    resolved_timeframe = str(timeframe or "").strip() or "na"
+    return (
+        f"account:{resolved_user_id}:"
+        f"{resolved_account_id}:{resolved_exchange}:{resolved_symbol}:{resolved_timeframe}"
+    )
+
+
 def runtime_key_to_slug(runtime_key: str | None) -> str:
     raw_value = str(runtime_key or "primary").strip() or "primary"
     safe_chars = []

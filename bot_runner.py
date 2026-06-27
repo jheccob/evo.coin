@@ -196,6 +196,9 @@ def _build_single_user_execution_context() -> dict:
         str(getattr(config, "SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "") or "Primary Env Account").strip() or account_id
     )
     user_id = int(getattr(config, "SINGLE_USER_RUNTIME_USER_ID", 0) or 0)
+    runtime_use_env_credentials = str(os.getenv("RUNTIME_USE_ENV_CREDENTIALS", "1")).strip().lower()
+    use_env_credentials = runtime_use_env_credentials not in {"0", "false", "no", "off"}
+    credential_source = str(os.getenv("RUNTIME_CREDENTIAL_SOURCE", "env" if use_env_credentials else "vault")).strip()
     return {
         "user_id": user_id,
         "account_id": account_id,
@@ -204,8 +207,8 @@ def _build_single_user_execution_context() -> dict:
         "exchange": exchange_name,
         "live_enabled": True,
         "paper_enabled": bool(config.TESTNET),
-        "use_env_credentials": True,
-        "credential_source": "env",
+        "use_env_credentials": bool(use_env_credentials),
+        "credential_source": credential_source or ("env" if use_env_credentials else "vault"),
     }
 
 

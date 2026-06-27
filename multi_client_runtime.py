@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import config
 from database.database import db
 from runtime_process import (
+    build_account_runtime_key,
     clear_runtime_process_state,
     clear_runtime_stop_request,
     get_runtime_execution_log_path,
@@ -19,16 +24,34 @@ from runtime_process import (
     get_runtime_stop_request_path,
     read_runtime_process_state,
     request_runtime_stop,
+    tail_text_file,
 )
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 BOT_RUNNER = PROJECT_ROOT / "bot_runner.py"
+STOP_EVENT = threading.Event()
 
 
 def _runtime_key(context: dict, *, symbol: str, timeframe: str) -> str:
     exchange_name = str(context.get("exchange_name") or context.get("exchange") or "binanceusdm").strip() or "binanceusdm"
-    return f"account:{int(context['user_id'])}:{context['account_id']}:{exchange_name}:{symbol}:{timeframe}"
+    return build_account_runtime_key(
+        user_id=int(context["user_id"]),
+        account_id=str(context["account_id"]),
+        exchange=exchange_name,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+
+
+def _runtime_key_from_control(control: dict) -> str:
+    return build_account_runtime_key(
+        user_id=int(control["user_id"]),
+        account_id=str(control["account_id"]),
+        exchange=str(control.get("exchange") or "binanceusdm"),
+        symbol=str(control.get("symbol") or config.SYMBOL),
+        timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+    )
 
 
 def _is_process_running(pid) -> bool:
@@ -49,6 +72,62 @@ def _eligible_contexts(symbol: str, timeframe: str, strategy_version: str | None
         timeframe=timeframe,
         strategy_version=strategy_version,
     )
+
+
+def _runtime_mode_uses_testnet(value: Any) -> bool:
+    return str(value or "testnet").strip().lower() not in {"real", "live", "mainnet", "conta_real", "conta-real"}
+
+
+def _state_uses_testnet(state: dict | None) -> bool:
+    payload = state or {}
+    if payload.get("use_testnet") is not None:
+        return bool(payload.get("use_testnet"))
+    mode_label = str(payload.get("mode_label") or "").strip().lower()
+    return mode_label not in {"conta real", "real", "live", "mainnet"}
+
+
+def _parse_iso_datetime(raw_value: Any):
+    if raw_value in (None, ""):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw_value))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _should_delay_restart(control: dict, cooldown_seconds: float) -> bool:
+    last_start_attempt_at = _parse_iso_datetime(control.get("last_start_attempt_at"))
+    if last_start_attempt_at is None:
+        return False
+    last_command_at = _parse_iso_datetime(control.get("last_command_at"))
+    if last_command_at and last_command_at > last_start_attempt_at:
+        return False
+    if not str(control.get("last_error") or "").strip():
+        return False
+    age_seconds = (datetime.now(UTC) - last_start_attempt_at).total_seconds()
+    return age_seconds < max(float(cooldown_seconds), 0.0)
+
+
+def _fetch_account_record(control: dict) -> dict | None:
+    account_rows = db.get_user_accounts(
+        user_id=int(control["user_id"]),
+        account_id=str(control["account_id"]),
+        status=None,
+    )
+    return account_rows[0] if account_rows else None
+
+
+def _account_can_run(account: dict | None) -> tuple[bool, str]:
+    if not account:
+        return False, "Conta nao encontrada."
+    if str(account.get("status") or "").strip().lower() != "active":
+        return False, "Conta inativa ou desabilitada."
+    if not bool(account.get("live_enabled")):
+        return False, "Conta sem live_enabled para o runtime remoto."
+    return True, ""
 
 
 def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool, force: bool = False) -> dict:
@@ -88,6 +167,8 @@ def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool,
     process_env["SYMBOL"] = symbol
     process_env["TIMEFRAME"] = timeframe
     process_env["PYTHONUNBUFFERED"] = "1"
+    process_env["RUNTIME_USE_ENV_CREDENTIALS"] = "0"
+    process_env["RUNTIME_CREDENTIAL_SOURCE"] = "vault"
 
     stdout_log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_handle = None
@@ -118,6 +199,7 @@ def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool,
             "status": "failed",
             "pid": None,
             "stderr_log": str(stderr_log_path),
+            "error": tail_text_file(stderr_log_path, max_lines=40, max_chars=4000) or "Processo encerrou logo apos o start.",
         }
 
     return {
@@ -139,27 +221,38 @@ def start_all(*, symbol: str, timeframe: str, testnet: bool, force: bool = False
     return results
 
 
+def _stop_runtime(runtime_key: str) -> dict:
+    process_state_path = get_runtime_process_state_path(runtime_key)
+    stop_request_path = get_runtime_stop_request_path(runtime_key)
+    state = read_runtime_process_state(path=process_state_path) or {}
+    pid = state.get("pid")
+    request_runtime_stop(path=stop_request_path)
+    deadline = time.time() + 8.0
+    while pid and _is_process_running(pid) and time.time() < deadline:
+        time.sleep(0.5)
+    running_after_request = bool(pid and _is_process_running(pid))
+    if not running_after_request:
+        clear_runtime_process_state(path=process_state_path)
+        clear_runtime_stop_request(path=stop_request_path)
+    return {
+        "runtime_key": runtime_key,
+        "pid": pid,
+        "status": "stopped" if not running_after_request else "stop_requested",
+    }
+
+
 def stop_all(*, symbol: str, timeframe: str) -> list[dict]:
     results = []
     for context in _eligible_contexts(symbol, timeframe):
         runtime_key = _runtime_key(context, symbol=symbol, timeframe=timeframe)
-        process_state_path = get_runtime_process_state_path(runtime_key)
-        stop_request_path = get_runtime_stop_request_path(runtime_key)
-        state = read_runtime_process_state(path=process_state_path) or {}
-        pid = state.get("pid")
-        request_runtime_stop(path=stop_request_path)
-        deadline = time.time() + 8.0
-        while pid and _is_process_running(pid) and time.time() < deadline:
-            time.sleep(0.5)
-        results.append(
+        result = _stop_runtime(runtime_key)
+        result.update(
             {
-                "runtime_key": runtime_key,
                 "user_id": int(context["user_id"]),
                 "account_id": str(context["account_id"]),
-                "pid": pid,
-                "status": "stopped" if not pid or not _is_process_running(pid) else "stop_requested",
             }
         )
+        results.append(result)
     return results
 
 
@@ -183,26 +276,306 @@ def status_all(*, symbol: str, timeframe: str) -> list[dict]:
     return results
 
 
-def main() -> int:
+def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[dict]:
+    controls = db.list_user_runtime_controls(limit=5000)
+    results: list[dict] = []
+
+    for control in controls:
+        runtime_key = _runtime_key_from_control(control)
+        process_state_path = get_runtime_process_state_path(runtime_key)
+        process_state = read_runtime_process_state(path=process_state_path) or {}
+        current_pid = process_state.get("pid")
+        is_running = _is_process_running(current_pid)
+        desired_state = str(control.get("desired_state") or "stopped").strip().lower()
+        desired_testnet = _runtime_mode_uses_testnet(control.get("requested_mode"))
+        now_iso = datetime.now(UTC).isoformat()
+
+        if desired_state != "running":
+            if is_running:
+                stop_result = _stop_runtime(runtime_key)
+                db.update_user_runtime_control_tracking(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                    last_stop_requested_at=now_iso,
+                    last_stopped_at=now_iso if stop_result.get("status") == "stopped" else None,
+                    last_error="",
+                )
+                results.append(
+                    {
+                        **stop_result,
+                        "user_id": int(control["user_id"]),
+                        "account_id": str(control["account_id"]),
+                        "action": "stop",
+                    }
+                )
+            else:
+                db.update_user_runtime_control_tracking(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                    last_stopped_at=now_iso,
+                    last_error="",
+                )
+                results.append(
+                    {
+                        "runtime_key": runtime_key,
+                        "user_id": int(control["user_id"]),
+                        "account_id": str(control["account_id"]),
+                        "status": "idle_stopped",
+                        "action": "noop",
+                    }
+                )
+            continue
+
+        account = _fetch_account_record(control)
+        can_run, account_error = _account_can_run(account)
+        if not can_run:
+            if is_running:
+                stop_result = _stop_runtime(runtime_key)
+                db.update_user_runtime_control_tracking(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                    last_stop_requested_at=now_iso,
+                    last_stopped_at=now_iso if stop_result.get("status") == "stopped" else None,
+                    last_error=account_error,
+                )
+                results.append(
+                    {
+                        **stop_result,
+                        "user_id": int(control["user_id"]),
+                        "account_id": str(control["account_id"]),
+                        "action": "forced_stop",
+                        "error": account_error,
+                    }
+                )
+            else:
+                db.update_user_runtime_control_tracking(
+                    user_id=int(control["user_id"]),
+                    account_id=str(control["account_id"]),
+                    exchange=str(control.get("exchange") or "binanceusdm"),
+                    symbol=str(control.get("symbol") or config.SYMBOL),
+                    timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                    last_error=account_error,
+                )
+                results.append(
+                    {
+                        "runtime_key": runtime_key,
+                        "user_id": int(control["user_id"]),
+                        "account_id": str(control["account_id"]),
+                        "status": "blocked",
+                        "action": "noop",
+                        "error": account_error,
+                    }
+                )
+            continue
+
+        if is_running and _state_uses_testnet(process_state) == desired_testnet:
+            db.update_user_runtime_control_tracking(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                last_started_at=process_state.get("started_at") or now_iso,
+                last_error="",
+            )
+            results.append(
+                {
+                    "runtime_key": runtime_key,
+                    "user_id": int(control["user_id"]),
+                    "account_id": str(control["account_id"]),
+                    "pid": current_pid,
+                    "status": "running",
+                    "action": "noop",
+                }
+            )
+            continue
+
+        if is_running and _state_uses_testnet(process_state) != desired_testnet:
+            stop_result = _stop_runtime(runtime_key)
+            db.update_user_runtime_control_tracking(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                last_stop_requested_at=now_iso,
+                last_stopped_at=now_iso if stop_result.get("status") == "stopped" else None,
+                last_error="",
+            )
+            results.append(
+                {
+                    **stop_result,
+                    "user_id": int(control["user_id"]),
+                    "account_id": str(control["account_id"]),
+                    "action": "restart_mode",
+                }
+            )
+            continue
+
+        if _should_delay_restart(control, retry_cooldown_seconds):
+            results.append(
+                {
+                    "runtime_key": runtime_key,
+                    "user_id": int(control["user_id"]),
+                    "account_id": str(control["account_id"]),
+                    "status": "cooldown",
+                    "action": "noop",
+                    "error": control.get("last_error"),
+                }
+            )
+            continue
+
+        try:
+            context = db.build_account_execution_context(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+            )
+        except Exception as exc:
+            error_text = f"Falha ao montar contexto da conta: {exc}"
+            db.update_user_runtime_control_tracking(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                last_error=error_text,
+            )
+            results.append(
+                {
+                    "runtime_key": runtime_key,
+                    "user_id": int(control["user_id"]),
+                    "account_id": str(control["account_id"]),
+                    "status": "failed_context",
+                    "action": "noop",
+                    "error": error_text,
+                }
+            )
+            continue
+
+        db.update_user_runtime_control_tracking(
+            user_id=int(control["user_id"]),
+            account_id=str(control["account_id"]),
+            exchange=str(control.get("exchange") or "binanceusdm"),
+            symbol=str(control.get("symbol") or config.SYMBOL),
+            timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+            last_start_attempt_at=now_iso,
+        )
+        start_result = _start_account(
+            context,
+            symbol=str(control.get("symbol") or config.SYMBOL),
+            timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+            testnet=desired_testnet,
+            force=True,
+        )
+        if start_result.get("status") in {"started", "already_running"}:
+            db.update_user_runtime_control_tracking(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                last_started_at=now_iso,
+                last_error="",
+            )
+            results.append({**start_result, "action": "start"})
+        else:
+            error_text = str(start_result.get("error") or "Falha ao iniciar subprocesso do runtime.")
+            db.update_user_runtime_control_tracking(
+                user_id=int(control["user_id"]),
+                account_id=str(control["account_id"]),
+                exchange=str(control.get("exchange") or "binanceusdm"),
+                symbol=str(control.get("symbol") or config.SYMBOL),
+                timeframe=str(control.get("timeframe") or config.TIMEFRAME),
+                last_error=error_text,
+            )
+            results.append({**start_result, "action": "start_failed", "error": error_text})
+
+    return results
+
+
+def _handle_stop_signal(_signum, _frame) -> None:
+    STOP_EVENT.set()
+
+
+def run_daemon(*, poll_seconds: float = 5.0, retry_cooldown_seconds: float = 45.0) -> int:
+    signal.signal(signal.SIGTERM, _handle_stop_signal)
+    signal.signal(signal.SIGINT, _handle_stop_signal)
+    print(
+        f"[multi-runtime] daemon online | poll={poll_seconds:.1f}s | retry_cooldown={retry_cooldown_seconds:.1f}s",
+        flush=True,
+    )
+
+    while not STOP_EVENT.is_set():
+        try:
+            results = reconcile_runtime_controls(retry_cooldown_seconds=retry_cooldown_seconds)
+            meaningful_results = [
+                item
+                for item in results
+                if str(item.get("action") or "") not in {"noop"}
+                or str(item.get("status") or "") not in {"running", "idle_stopped", "cooldown"}
+            ]
+            for item in meaningful_results:
+                print(f"[multi-runtime] {item}", flush=True)
+        except Exception as exc:
+            print(f"[multi-runtime] reconcile error: {exc}", flush=True)
+
+        STOP_EVENT.wait(max(float(poll_seconds), 1.0))
+
+    print("[multi-runtime] daemon shutdown requested", flush=True)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Gerenciador multi-cliente do Evo Coin bot.")
-    parser.add_argument("action", choices=["start", "stop", "status"])
+    parser.add_argument("action", choices=["start", "stop", "status", "reconcile", "daemon"])
     parser.add_argument("--symbol", default=config.SYMBOL)
     parser.add_argument("--timeframe", default=config.TIMEFRAME)
     parser.add_argument("--testnet", action="store_true", help="Inicia todos em testnet.")
     parser.add_argument("--force", action="store_true", help="Ignora state file antigo quando o PID nao existe.")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=float(os.getenv("MULTI_RUNTIME_POLL_SECONDS", "5") or "5"),
+        help="Intervalo entre reconciliacoes do daemon.",
+    )
+    parser.add_argument(
+        "--retry-cooldown-seconds",
+        type=float,
+        default=float(os.getenv("MULTI_RUNTIME_RETRY_COOLDOWN_SECONDS", "45") or "45"),
+        help="Cooldown antes de repetir um start que falhou.",
+    )
+    args = parser.parse_args(argv)
 
     if args.action == "start":
         results = start_all(symbol=args.symbol, timeframe=args.timeframe, testnet=bool(args.testnet), force=bool(args.force))
     elif args.action == "stop":
         results = stop_all(symbol=args.symbol, timeframe=args.timeframe)
-    else:
+    elif args.action == "status":
         results = status_all(symbol=args.symbol, timeframe=args.timeframe)
+    elif args.action == "reconcile":
+        results = reconcile_runtime_controls(retry_cooldown_seconds=float(args.retry_cooldown_seconds))
+    else:
+        return run_daemon(
+            poll_seconds=float(args.poll_seconds),
+            retry_cooldown_seconds=float(args.retry_cooldown_seconds),
+        )
 
     for item in results:
         print(item)
     if not results:
-        print("Nenhuma conta elegivel encontrada. Verifique user_accounts.live_enabled e credenciais.")
+        print("Nenhuma conta elegivel/controle encontrado. Verifique contas, credenciais e runtime controls.")
     return 0
 
 

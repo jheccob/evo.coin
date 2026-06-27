@@ -28,6 +28,7 @@ from runtime_process import (
     BOT_RUNNER_STDERR_LOG_PATH,
     BOT_RUNNER_STDOUT_LOG_PATH,
     RUNTIME_PROCESS_STATE_PATH,
+    build_account_runtime_key,
     clear_runtime_process_state,
     clear_runtime_stop_request,
     get_runtime_execution_log_path,
@@ -1989,6 +1990,7 @@ def start_trader_bot_process(use_testnet: bool = True):
     process_env["TESTNET"] = "true" if bool(use_testnet) else "false"
     process_env["TRADER_BOT_LAUNCH_SOURCE"] = "dashboard"
     process_env["PYTHONUNBUFFERED"] = "1"
+    process_env["RUNTIME_USE_ENV_CREDENTIALS"] = "1"
     process_env["SINGLE_USER_RUNTIME_USER_ID"] = str(_runtime_credential_user_id())
     process_env["SINGLE_USER_RUNTIME_ACCOUNT_ID"] = _runtime_credential_account_id(use_testnet)
     process_env["SINGLE_USER_RUNTIME_EXCHANGE"] = _runtime_credential_exchange_name()
@@ -3969,6 +3971,354 @@ def render_market_signal_history(symbol: str, timeframe: str, require_volume: bo
                 st.warning(f"⚠️ Erro ao carregar estatísticas: {str(e)}")
 
 
+def _workspace_runtime_symbol_options(execution_context):
+    options = [
+        str(item).strip()
+        for item in (execution_context.get("allowed_symbols") or [])
+        if str(item).strip()
+    ]
+    if options:
+        return list(dict.fromkeys(options))
+    fallback_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    return [fallback_symbol]
+
+
+def _workspace_runtime_timeframe_options(execution_context):
+    options = [
+        str(item).strip()
+        for item in (execution_context.get("allowed_timeframes") or [])
+        if str(item).strip()
+    ]
+    if options:
+        return list(dict.fromkeys(options))
+    fallback_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    return [fallback_timeframe]
+
+
+def _build_workspace_remote_runtime_health(control_row, runtime_db_state):
+    desired_state = str((control_row or {}).get("desired_state") or "stopped").strip().lower()
+    requested_mode = str((control_row or {}).get("requested_mode") or "real").strip().lower()
+    heartbeat_age_seconds = _runtime_heartbeat_age_seconds(runtime_db_state)
+    heartbeat_fresh = _runtime_heartbeat_is_recent(runtime_db_state)
+    last_command_at = _parse_runtime_datetime((control_row or {}).get("last_command_at"))
+    recent_command = False
+    if last_command_at is not None:
+        try:
+            recent_command = (datetime.now(last_command_at.tzinfo) - last_command_at).total_seconds() <= 90
+        except Exception:
+            recent_command = False
+
+    if heartbeat_fresh:
+        status_label = "ON"
+        tone = "accent"
+    elif desired_state == "running" and recent_command:
+        status_label = "PARTINDO"
+        tone = "warm"
+    elif desired_state == "running":
+        status_label = "SEM HEARTBEAT"
+        tone = "danger"
+    else:
+        status_label = "OFF"
+        tone = "default"
+
+    return {
+        "desired_state": desired_state,
+        "requested_mode": requested_mode,
+        "heartbeat_fresh": heartbeat_fresh,
+        "heartbeat_age_seconds": heartbeat_age_seconds,
+        "status_label": status_label,
+        "tone": tone,
+    }
+
+
+def render_workspace_account_runtime_panel(
+    *,
+    user_id: int,
+    workspace_user: dict,
+    workspace_subscription: dict,
+    selected_account: dict,
+    execution_context: dict,
+):
+    selected_account_id = str(selected_account["account_id"])
+    selected_account_alias = str(
+        execution_context.get("account_alias")
+        or selected_account.get("account_alias")
+        or selected_account_id
+    )
+    selected_exchange = str(
+        execution_context.get("exchange_name")
+        or selected_account.get("exchange")
+        or "binanceusdm"
+    )
+
+    symbol_options = _workspace_runtime_symbol_options(execution_context)
+    timeframe_options = _workspace_runtime_timeframe_options(execution_context)
+    default_symbol = str(os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    default_timeframe = str(os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    symbol_index = symbol_options.index(default_symbol) if default_symbol in symbol_options else 0
+    timeframe_index = timeframe_options.index(default_timeframe) if default_timeframe in timeframe_options else 0
+
+    st.markdown("### Runtime Remoto")
+    st.caption(
+        "Este painel não sobe processo local na dashboard. "
+        "Ele grava o comando no Postgres para o serviço privado `evo-bot` ligar ou parar o runtime da sua conta."
+    )
+
+    selector_col1, selector_col2, selector_col3 = st.columns([1.2, 1.0, 1.0])
+    with selector_col1:
+        runtime_symbol = st.selectbox(
+            "Símbolo do Runtime",
+            options=symbol_options,
+            index=symbol_index,
+            key=f"workspace_runtime_symbol_{selected_account_id}",
+        )
+    with selector_col2:
+        runtime_timeframe = st.selectbox(
+            "Timeframe do Runtime",
+            options=timeframe_options,
+            index=timeframe_index,
+            key=f"workspace_runtime_timeframe_{selected_account_id}",
+        )
+
+    runtime_control = db.get_user_runtime_control(
+        user_id=user_id,
+        account_id=selected_account_id,
+        exchange=selected_exchange,
+        symbol=runtime_symbol,
+        timeframe=runtime_timeframe,
+    )
+    requested_mode = str((runtime_control or {}).get("requested_mode") or "real").strip().lower()
+    with selector_col3:
+        st.metric(
+            "Ambiente",
+            "Conta Real",
+        )
+        selected_mode = "real"
+        if requested_mode != "real":
+            st.caption("Comandos antigos em testnet serao normalizados para conta real no proximo start.")
+
+    runtime_key = build_account_runtime_key(
+        user_id=user_id,
+        account_id=selected_account_id,
+        exchange=selected_exchange,
+        symbol=runtime_symbol,
+        timeframe=runtime_timeframe,
+    )
+    runtime_rows = db.get_bot_runtime_state(runtime_key=runtime_key, limit=1)
+    runtime_db_state = runtime_rows[0] if runtime_rows else None
+    runtime_health = _build_workspace_remote_runtime_health(runtime_control, runtime_db_state)
+    desired_state = str(runtime_health.get("desired_state") or "stopped").strip().lower()
+    desired_state_label = "RUNNING" if desired_state == "running" else "STOPPED"
+    runtime_online = bool(runtime_health.get("heartbeat_fresh"))
+    latest_position = str((runtime_db_state or {}).get("position_side") or "flat")
+    latest_signal = str((runtime_db_state or {}).get("last_signal") or "-")
+    db_status = str((runtime_db_state or {}).get("status") or "-")
+
+    render_dashboard_strip(
+        "O botão aciona um comando persistido. O daemon multiusuário do `evo-bot` reconciliará esse estado em poucos segundos.",
+        badges=[
+            _build_status_pill("Runtime", runtime_health.get("status_label", "OFF"), runtime_health.get("tone", "default")),
+            _build_status_pill("Desejado", desired_state_label, "accent" if desired_state == "running" else "default"),
+            _build_status_pill("Modo", "Conta Real", "danger"),
+            _build_status_pill("Mercado", f"{runtime_symbol} · {runtime_timeframe}", "default"),
+        ],
+    )
+
+    runtime_col1, runtime_col2, runtime_col3, runtime_col4, runtime_col5 = st.columns(5)
+    with runtime_col1:
+        st.metric("Status Remoto", runtime_health.get("status_label", "OFF"))
+    with runtime_col2:
+        st.metric("Desejado", desired_state_label)
+    with runtime_col3:
+        st.metric("Heartbeat", _format_age_label(runtime_health.get("heartbeat_age_seconds")))
+    with runtime_col4:
+        st.metric("DB Status", db_status)
+    with runtime_col5:
+        st.metric("Posição", latest_position)
+
+    runtime_meta_col1, runtime_meta_col2, runtime_meta_col3, runtime_meta_col4 = st.columns(4)
+    with runtime_meta_col1:
+        st.metric("Último Sinal", latest_signal)
+    with runtime_meta_col2:
+        st.metric("Revisão", int((runtime_control or {}).get("command_revision", 0) or 0))
+    with runtime_meta_col3:
+        st.metric("Live da Conta", "ON" if bool(selected_account.get("live_enabled")) else "OFF")
+    with runtime_meta_col4:
+        st.metric("Credencial", "OK" if execution_context.get("api_key_ref") else "PENDENTE")
+
+    st.caption(
+        f"Runtime key: `{runtime_key}` | "
+        f"Último comando: {(runtime_control or {}).get('last_command_at') or '-'} | "
+        f"Último start: {(runtime_control or {}).get('last_started_at') or '-'} | "
+        f"Último stop: {(runtime_control or {}).get('last_stopped_at') or '-'}"
+    )
+
+    risk_profile = execution_context.get("risk_profile") or {}
+    license_payload = (workspace_user or {}).get("license") or {}
+    subscription_gate_required = bool(ProductionConfig.REQUIRE_ACTIVE_SUBSCRIPTION_FOR_BOT)
+    subscription_gate_satisfied = bool(
+        (not subscription_gate_required) or bool(workspace_subscription.get("is_active"))
+    )
+    license_gate_required = bool(getattr(ProductionConfig, "REQUIRE_DASHBOARD_DEVICE_LICENSE", True))
+    license_gate_satisfied = bool((not license_gate_required) or license_payload.get("allowed"))
+
+    start_block_reasons = []
+    if subscription_gate_required and not subscription_gate_satisfied:
+        start_block_reasons.append("Assinatura inativa ou expirada para uso do runtime.")
+    if license_gate_required and not license_gate_satisfied:
+        start_block_reasons.append(
+            f"Licença de dispositivo/IP bloqueada: {license_payload.get('reason') or 'não autorizada'}."
+        )
+    if str(selected_account.get("status") or "disabled").strip().lower() != "active":
+        start_block_reasons.append("Conta está desabilitada.")
+    if not bool(selected_account.get("live_enabled")):
+        start_block_reasons.append("Ative `Live Enabled` na conta para usar o runtime remoto.")
+    if not bool(execution_context.get("api_key_ref")):
+        start_block_reasons.append("Cadastre uma credencial criptografada na aba Credenciais.")
+    if not bool(risk_profile.get("is_valid", False)):
+        start_block_reasons.append("Perfil de risco inválido ou ausente.")
+    if not bool(risk_profile.get("live_enabled", False)):
+        start_block_reasons.append("Perfil de risco ainda não liberou operação live/runtime.")
+    if bool(execution_context.get("governance_blocked")):
+        start_block_reasons.append(
+            execution_context.get("governance_block_reason") or "Governança bloqueou a conta."
+        )
+
+    runtime_control_error = str((runtime_control or {}).get("last_error") or "").strip()
+    runtime_db_error = str((runtime_db_state or {}).get("last_error") or "").strip()
+    if runtime_db_state and runtime_db_state.get("blocked"):
+        st.warning(
+            f"Runtime bloqueado no DB: {runtime_db_state.get('block_reason') or 'sem motivo informado'}"
+        )
+    if runtime_control_error:
+        st.error(f"Último erro do reconciliador: {runtime_control_error}")
+    if runtime_db_error:
+        st.error(f"Último erro persistido pelo bot: {runtime_db_error}")
+    if requested_mode != "real" or str((runtime_db_state or {}).get("environment") or "").strip().lower() == "testnet":
+        st.warning(
+            "Este workspace agora opera somente em conta real. "
+            "Se houver runtime antigo em testnet, pare-o e ligue novamente para normalizar."
+        )
+    if desired_state == "running" and not runtime_online:
+        st.info(
+            "Existe um comando de start pendente ou degradado. "
+            "O `evo-bot` privado deve reconciliar isso no próximo ciclo."
+        )
+
+    st.info(
+        "O fluxo do cliente neste workspace usa apenas credenciais reais. "
+        "Cada conta opera com um runtime isolado e um unico par de chaves por `conta + exchange`."
+    )
+
+    runtime_action_col1, runtime_action_col2, runtime_action_col3 = st.columns([1.1, 1.1, 0.8])
+    start_label = "🔁 Reenviar Start" if desired_state == "running" and not runtime_online else "▶️ Ligar Runtime"
+    stop_disabled = desired_state != "running" and not runtime_online
+    with runtime_action_col1:
+        if st.button(
+            start_label,
+            key=f"workspace_runtime_start_{selected_account_id}_{runtime_symbol}_{runtime_timeframe}",
+            disabled=bool(runtime_online) or bool(start_block_reasons),
+        ):
+            control_row = db.set_user_runtime_control(
+                user_id=user_id,
+                account_id=selected_account_id,
+                exchange=selected_exchange,
+                symbol=runtime_symbol,
+                timeframe=runtime_timeframe,
+                desired_state="running",
+                requested_mode=selected_mode,
+                requested_by_user_id=user_id,
+                requested_by_scope="workspace",
+                requested_reason=f"workspace_runtime_start:{selected_account_alias}",
+            )
+            db.save_user_execution_event(
+                {
+                    "user_id": user_id,
+                    "account_id": selected_account_id,
+                    "exchange": selected_exchange,
+                    "symbol": runtime_symbol,
+                    "timeframe": runtime_timeframe,
+                    "strategy_version": None,
+                    "event_type": "runtime_control_request",
+                    "event_status": "queued",
+                    "message": (
+                        f"Start remoto solicitado para {selected_account_alias} em conta real."
+                    ),
+                    "details_json": {
+                        "runtime_key": runtime_key,
+                        "desired_state": "running",
+                        "requested_mode": selected_mode,
+                        "command_revision": control_row.get("command_revision"),
+                        "requested_by_scope": "workspace",
+                    },
+                }
+            )
+            st.success(
+                "Comando enviado para o `evo-bot`. "
+                "Aguarde alguns segundos para o primeiro heartbeat aparecer."
+            )
+            st.rerun()
+    with runtime_action_col2:
+        if st.button(
+            "⏹️ Parar Runtime",
+            key=f"workspace_runtime_stop_{selected_account_id}_{runtime_symbol}_{runtime_timeframe}",
+            disabled=bool(stop_disabled),
+        ):
+            control_row = db.set_user_runtime_control(
+                user_id=user_id,
+                account_id=selected_account_id,
+                exchange=selected_exchange,
+                symbol=runtime_symbol,
+                timeframe=runtime_timeframe,
+                desired_state="stopped",
+                requested_mode=selected_mode,
+                requested_by_user_id=user_id,
+                requested_by_scope="workspace",
+                requested_reason=f"workspace_runtime_stop:{selected_account_alias}",
+            )
+            db.save_user_execution_event(
+                {
+                    "user_id": user_id,
+                    "account_id": selected_account_id,
+                    "exchange": selected_exchange,
+                    "symbol": runtime_symbol,
+                    "timeframe": runtime_timeframe,
+                    "strategy_version": None,
+                    "event_type": "runtime_control_request",
+                    "event_status": "queued",
+                    "message": f"Stop remoto solicitado para {selected_account_alias}.",
+                    "details_json": {
+                        "runtime_key": runtime_key,
+                        "desired_state": "stopped",
+                        "requested_mode": selected_mode,
+                        "command_revision": control_row.get("command_revision"),
+                        "requested_by_scope": "workspace",
+                    },
+                }
+            )
+            st.warning("Comando de parada enviado para o `evo-bot`.")
+            st.rerun()
+    with runtime_action_col3:
+        if st.button(
+            "🔄 Atualizar",
+            key=f"workspace_runtime_refresh_{selected_account_id}_{runtime_symbol}_{runtime_timeframe}",
+        ):
+            st.rerun()
+
+    if start_block_reasons:
+        for reason in start_block_reasons:
+            st.warning(reason)
+
+    with st.expander("Diagnóstico bruto do runtime remoto", expanded=False):
+        st.json(
+            {
+                "control_row": runtime_control or {},
+                "runtime_db_state": runtime_db_state or {},
+                "runtime_health": runtime_health,
+            }
+        )
+
+
 def render_multiuser_workspace_tab():
     workspace_user = get_authenticated_dashboard_user()
     admin_session_active = is_admin_dashboard_session_active()
@@ -4197,8 +4547,8 @@ def render_multiuser_workspace_tab():
         if execution_context.get("governance_block_reason"):
             st.warning(f"Bloqueio operacional: {execution_context.get('governance_block_reason')}")
 
-        detail_tab1, detail_tab2, detail_tab3, detail_tab4 = st.tabs(
-            ["⚙️ Conta", "🛡️ Risco", "🔑 Credenciais", "📜 Eventos"]
+        detail_tab1, detail_tab2, detail_tab3, detail_tab4, detail_tab5 = st.tabs(
+            ["⚙️ Conta", "🛡️ Risco", "🔑 Credenciais", "▶️ Runtime", "📜 Eventos"]
         )
 
         with detail_tab1:
@@ -4502,6 +4852,15 @@ def render_multiuser_workspace_tab():
                             st.rerun()
 
         with detail_tab4:
+            render_workspace_account_runtime_panel(
+                user_id=user_id,
+                workspace_user=workspace_user,
+                workspace_subscription=workspace_subscription,
+                selected_account=selected_account,
+                execution_context=execution_context,
+            )
+
+        with detail_tab5:
             events = db.get_user_execution_events(user_id=user_id, account_id=selected_account_id, limit=20)
             positions = db.get_user_live_positions(user_id=user_id, account_id=selected_account_id)
             orders = db.get_user_live_orders(user_id=user_id, account_id=selected_account_id)

@@ -1117,6 +1117,34 @@ class TradingDatabase:
             '''
         )
 
+        cursor.execute(
+            '''
+            CREATE TABLE IF NOT EXISTS user_runtime_controls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                account_id TEXT NOT NULL,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                desired_state TEXT NOT NULL DEFAULT 'stopped',
+                requested_mode TEXT NOT NULL DEFAULT 'testnet',
+                requested_by_user_id INTEGER,
+                requested_by_scope TEXT,
+                requested_reason TEXT,
+                command_revision INTEGER NOT NULL DEFAULT 0,
+                last_command_at TEXT,
+                last_start_attempt_at TEXT,
+                last_started_at TEXT,
+                last_stop_requested_at TEXT,
+                last_stopped_at TEXT,
+                last_error TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, account_id, exchange, symbol, timeframe)
+            )
+            '''
+        )
+
         self._ensure_column(cursor, 'trading_signals', 'context_timeframe', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'strategy_version', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'regime', 'TEXT')
@@ -1322,6 +1350,18 @@ class TradingDatabase:
             '''
             CREATE INDEX IF NOT EXISTS idx_bot_runtime_state_lookup
             ON bot_runtime_state(symbol, timeframe, updated_at)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_user_runtime_controls_lookup
+            ON user_runtime_controls(user_id, account_id, exchange, symbol, timeframe)
+            '''
+        )
+        cursor.execute(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_user_runtime_controls_desired_state
+            ON user_runtime_controls(desired_state, updated_at)
             '''
         )
 
@@ -1650,6 +1690,238 @@ class TradingDatabase:
                 row["blocked"] = bool(row.get("blocked", False))
                 row["state_payload"] = self._from_json_text(row.get("state_payload"))
             return rows
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _normalize_runtime_control_state(value: Any) -> str:
+        normalized = str(value or "stopped").strip().lower()
+        if normalized in {"running", "start", "started", "on", "ligar", "ativo"}:
+            return "running"
+        return "stopped"
+
+    @staticmethod
+    def _normalize_runtime_requested_mode(value: Any) -> str:
+        normalized = str(value or "testnet").strip().lower()
+        if normalized in {"real", "live", "mainnet", "conta_real", "conta-real"}:
+            return "real"
+        return "testnet"
+
+    def get_user_runtime_control(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self.list_user_runtime_controls(
+            user_id=user_id,
+            account_id=account_id,
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=1,
+        )
+        return rows[0] if rows else None
+
+    def list_user_runtime_controls(
+        self,
+        *,
+        user_id: Optional[int] = None,
+        account_id: Optional[str] = None,
+        exchange: Optional[str] = None,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        desired_state: Optional[str] = None,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT *
+                FROM user_runtime_controls
+                WHERE (? IS NULL OR user_id = ?)
+                  AND (? IS NULL OR account_id = ?)
+                  AND (? IS NULL OR exchange = ?)
+                  AND (? IS NULL OR symbol = ?)
+                  AND (? IS NULL OR timeframe = ?)
+                  AND (? IS NULL OR desired_state = ?)
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                ''',
+                (
+                    user_id,
+                    user_id,
+                    account_id,
+                    account_id,
+                    exchange,
+                    exchange,
+                    symbol,
+                    symbol,
+                    timeframe,
+                    timeframe,
+                    desired_state,
+                    desired_state,
+                    int(limit),
+                ),
+            )
+            rows = [dict(row) for row in cursor.fetchall()]
+            for row in rows:
+                row["desired_state"] = self._normalize_runtime_control_state(row.get("desired_state"))
+                row["requested_mode"] = self._normalize_runtime_requested_mode(row.get("requested_mode"))
+            return rows
+        finally:
+            conn.close()
+
+    def set_user_runtime_control(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        desired_state: str,
+        requested_mode: str = "testnet",
+        requested_by_user_id: Optional[int] = None,
+        requested_by_scope: Optional[str] = None,
+        requested_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resolved_user_id = int(user_id)
+        resolved_account_id = str(account_id)
+        resolved_exchange = str(exchange)
+        resolved_symbol = str(symbol)
+        resolved_timeframe = str(timeframe)
+        resolved_state = self._normalize_runtime_control_state(desired_state)
+        resolved_mode = self._normalize_runtime_requested_mode(requested_mode)
+        now_iso = datetime.now(UTC).isoformat()
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT command_revision
+                FROM user_runtime_controls
+                WHERE user_id = ? AND account_id = ? AND exchange = ? AND symbol = ? AND timeframe = ?
+                LIMIT 1
+                ''',
+                (
+                    resolved_user_id,
+                    resolved_account_id,
+                    resolved_exchange,
+                    resolved_symbol,
+                    resolved_timeframe,
+                ),
+            )
+            existing = cursor.fetchone()
+            next_revision = int((dict(existing).get("command_revision") if existing else 0) or 0) + 1
+
+            cursor.execute(
+                '''
+                INSERT INTO user_runtime_controls (
+                    user_id, account_id, exchange, symbol, timeframe,
+                    desired_state, requested_mode,
+                    requested_by_user_id, requested_by_scope, requested_reason,
+                    command_revision, last_command_at, last_error, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, account_id, exchange, symbol, timeframe) DO UPDATE SET
+                    desired_state = excluded.desired_state,
+                    requested_mode = excluded.requested_mode,
+                    requested_by_user_id = excluded.requested_by_user_id,
+                    requested_by_scope = excluded.requested_by_scope,
+                    requested_reason = excluded.requested_reason,
+                    command_revision = excluded.command_revision,
+                    last_command_at = excluded.last_command_at,
+                    last_error = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                ''',
+                (
+                    resolved_user_id,
+                    resolved_account_id,
+                    resolved_exchange,
+                    resolved_symbol,
+                    resolved_timeframe,
+                    resolved_state,
+                    resolved_mode,
+                    requested_by_user_id,
+                    requested_by_scope,
+                    requested_reason,
+                    next_revision,
+                    now_iso,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        row = self.get_user_runtime_control(
+            user_id=resolved_user_id,
+            account_id=resolved_account_id,
+            exchange=resolved_exchange,
+            symbol=resolved_symbol,
+            timeframe=resolved_timeframe,
+        )
+        if not row:
+            raise ValueError("Falha ao persistir controle de runtime.")
+        return row
+
+    def update_user_runtime_control_tracking(
+        self,
+        *,
+        user_id: int,
+        account_id: str,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        last_start_attempt_at: Optional[str] = None,
+        last_started_at: Optional[str] = None,
+        last_stop_requested_at: Optional[str] = None,
+        last_stopped_at: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> bool:
+        updates = []
+        params: List[Any] = []
+
+        if last_start_attempt_at is not None:
+            updates.append("last_start_attempt_at = ?")
+            params.append(str(last_start_attempt_at))
+        if last_started_at is not None:
+            updates.append("last_started_at = ?")
+            params.append(str(last_started_at))
+        if last_stop_requested_at is not None:
+            updates.append("last_stop_requested_at = ?")
+            params.append(str(last_stop_requested_at))
+        if last_stopped_at is not None:
+            updates.append("last_stopped_at = ?")
+            params.append(str(last_stopped_at))
+        if last_error is not None:
+            updates.append("last_error = ?")
+            params.append(str(last_error))
+
+        if not updates:
+            return False
+
+        updates.append("updated_at = CURRENT_TIMESTAMP")
+        params.extend([int(user_id), str(account_id), str(exchange), str(symbol), str(timeframe)])
+
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f'''
+                UPDATE user_runtime_controls
+                SET {', '.join(updates)}
+                WHERE user_id = ? AND account_id = ? AND exchange = ? AND symbol = ? AND timeframe = ?
+                ''',
+                tuple(params),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
         finally:
             conn.close()
 
