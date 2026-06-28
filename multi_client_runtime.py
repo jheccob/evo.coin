@@ -31,6 +31,9 @@ from runtime_process import (
 PROJECT_ROOT = Path(__file__).resolve().parent
 BOT_RUNNER = PROJECT_ROOT / "bot_runner.py"
 STOP_EVENT = threading.Event()
+MANAGED_PROCESSES: dict[str, subprocess.Popen] = {}
+MANAGED_PROCESS_METADATA: dict[str, dict[str, Any]] = {}
+MANAGED_PROCESS_LOCK = threading.Lock()
 
 
 def _runtime_key(context: dict, *, symbol: str, timeframe: str) -> str:
@@ -58,12 +61,93 @@ def _is_process_running(pid) -> bool:
     if not pid:
         return False
     try:
-        os.kill(int(pid), 0)
+        resolved_pid = int(pid)
+    except Exception:
+        return False
+    with MANAGED_PROCESS_LOCK:
+        for process in MANAGED_PROCESSES.values():
+            if process.pid == resolved_pid:
+                return process.poll() is None
+    try:
+        os.kill(resolved_pid, 0)
     except OSError:
         return False
     except Exception:
         return False
     return True
+
+
+def _register_managed_process(runtime_key: str, process: subprocess.Popen, metadata: dict[str, Any]) -> None:
+    with MANAGED_PROCESS_LOCK:
+        MANAGED_PROCESSES[runtime_key] = process
+        MANAGED_PROCESS_METADATA[runtime_key] = dict(metadata)
+
+
+def _drop_managed_process(runtime_key: str) -> None:
+    with MANAGED_PROCESS_LOCK:
+        MANAGED_PROCESSES.pop(runtime_key, None)
+        MANAGED_PROCESS_METADATA.pop(runtime_key, None)
+
+
+def _snapshot_managed_processes() -> list[tuple[str, subprocess.Popen, dict[str, Any]]]:
+    with MANAGED_PROCESS_LOCK:
+        return [
+            (runtime_key, process, dict(MANAGED_PROCESS_METADATA.get(runtime_key) or {}))
+            for runtime_key, process in MANAGED_PROCESSES.items()
+        ]
+
+
+def _record_runtime_exit_error(metadata: dict[str, Any], error_text: str) -> None:
+    try:
+        db.update_user_runtime_control_tracking(
+            user_id=int(metadata["user_id"]),
+            account_id=str(metadata["account_id"]),
+            exchange=str(metadata.get("exchange") or "binanceusdm"),
+            symbol=str(metadata.get("symbol") or config.SYMBOL),
+            timeframe=str(metadata.get("timeframe") or config.TIMEFRAME),
+            last_stopped_at=datetime.now(UTC).isoformat(),
+            last_error=error_text,
+        )
+    except Exception as exc:
+        print(f"[multi-runtime] failed to record child exit in db: {exc}", flush=True)
+
+
+def reap_finished_processes() -> list[dict[str, Any]]:
+    reaped: list[dict[str, Any]] = []
+    for runtime_key, process, metadata in _snapshot_managed_processes():
+        exit_code = process.poll()
+        if exit_code is None:
+            continue
+
+        _drop_managed_process(runtime_key)
+        stderr_log_path = get_runtime_stderr_log_path(runtime_key)
+        stderr_tail = tail_text_file(stderr_log_path, max_lines=60, max_chars=6000)
+        error_text = f"Runtime saiu com codigo {exit_code}."
+        if stderr_tail:
+            error_text = f"{error_text} Ultimas linhas stderr: {stderr_tail}"
+
+        clear_runtime_process_state(path=get_runtime_process_state_path(runtime_key))
+        print(
+            "[multi-runtime] child process exited | "
+            f"runtime_key={runtime_key} pid={process.pid} exit_code={exit_code}",
+            flush=True,
+        )
+        if stderr_tail:
+            print(f"[multi-runtime] child stderr tail | {runtime_key}\n{stderr_tail}", flush=True)
+
+        if int(exit_code or 0) != 0:
+            _record_runtime_exit_error(metadata, error_text)
+
+        reaped.append(
+            {
+                "runtime_key": runtime_key,
+                "pid": process.pid,
+                "exit_code": exit_code,
+                "status": "exited",
+                "error": error_text if int(exit_code or 0) != 0 else "",
+            }
+        )
+    return reaped
 
 
 def _eligible_contexts(symbol: str, timeframe: str, strategy_version: str | None = None) -> list[dict]:
@@ -240,6 +324,18 @@ def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool,
             "error": tail_text_file(stderr_log_path, max_lines=40, max_chars=4000) or "Processo encerrou logo apos o start.",
         }
 
+    _register_managed_process(
+        runtime_key,
+        process,
+        {
+            "user_id": int(context["user_id"]),
+            "account_id": str(context["account_id"]),
+            "exchange": str(context.get("exchange_name") or context.get("exchange") or "binanceusdm"),
+            "symbol": symbol,
+            "timeframe": timeframe,
+        },
+    )
+
     return {
         "runtime_key": runtime_key,
         "user_id": int(context["user_id"]),
@@ -270,6 +366,7 @@ def _stop_runtime(runtime_key: str) -> dict:
         time.sleep(0.5)
     running_after_request = bool(pid and _is_process_running(pid))
     if not running_after_request:
+        _drop_managed_process(runtime_key)
         clear_runtime_process_state(path=process_state_path)
         clear_runtime_stop_request(path=stop_request_path)
     return {
@@ -315,6 +412,7 @@ def status_all(*, symbol: str, timeframe: str) -> list[dict]:
 
 
 def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[dict]:
+    reap_finished_processes()
     controls = db.list_user_runtime_controls(limit=5000)
     results: list[dict] = []
 

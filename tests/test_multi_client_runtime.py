@@ -5,6 +5,11 @@ import multi_client_runtime
 
 
 class MultiClientRuntimeReconcileTests(unittest.TestCase):
+    def tearDown(self):
+        with multi_client_runtime.MANAGED_PROCESS_LOCK:
+            multi_client_runtime.MANAGED_PROCESSES.clear()
+            multi_client_runtime.MANAGED_PROCESS_METADATA.clear()
+
     def test_reconcile_requests_start_for_running_control(self):
         control_row = {
             "user_id": 11,
@@ -118,6 +123,40 @@ class MultiClientRuntimeReconcileTests(unittest.TestCase):
         self.assertEqual(start_context["credential_source"], "env")
         self.assertEqual(start_context["account_id"], "railway-primary-real")
         db_mock.build_account_execution_context.assert_not_called()
+
+    def test_reap_finished_process_records_child_error_for_railway_logs(self):
+        process = mock.Mock()
+        process.pid = 4567
+        process.poll.return_value = 1
+        metadata = {
+            "user_id": 0,
+            "account_id": "railway-primary-real",
+            "exchange": "binanceusdm",
+            "symbol": "BTC/USDT",
+            "timeframe": "15m",
+        }
+
+        db_mock = mock.Mock()
+        with multi_client_runtime.MANAGED_PROCESS_LOCK:
+            multi_client_runtime.MANAGED_PROCESSES["runtime-key"] = process
+            multi_client_runtime.MANAGED_PROCESS_METADATA["runtime-key"] = metadata
+
+        with mock.patch.object(multi_client_runtime, "db", db_mock), \
+            mock.patch.object(multi_client_runtime, "get_runtime_stderr_log_path", return_value="stderr.log"), \
+            mock.patch.object(multi_client_runtime, "get_runtime_process_state_path", return_value="state.json"), \
+            mock.patch.object(multi_client_runtime, "tail_text_file", return_value="RuntimeError: API indisponivel"), \
+            mock.patch.object(multi_client_runtime, "clear_runtime_process_state") as clear_mock:
+            result = multi_client_runtime.reap_finished_processes()
+
+        self.assertEqual(result[0]["runtime_key"], "runtime-key")
+        self.assertEqual(result[0]["exit_code"], 1)
+        self.assertIn("API indisponivel", result[0]["error"])
+        clear_mock.assert_called_once_with(path="state.json")
+        db_mock.update_user_runtime_control_tracking.assert_called_once()
+        kwargs = db_mock.update_user_runtime_control_tracking.call_args.kwargs
+        self.assertEqual(kwargs["user_id"], 0)
+        self.assertEqual(kwargs["account_id"], "railway-primary-real")
+        self.assertIn("API indisponivel", kwargs["last_error"])
 
 
 if __name__ == "__main__":

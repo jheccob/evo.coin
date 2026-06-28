@@ -6,6 +6,6 @@
   },
   "deploy": {
     "startCommand": "python start_railway.py",
-    "restartPolicyType": "ON_FAILURE"
+    "restartPolicyType": "ALWAYS"
   }
 }
