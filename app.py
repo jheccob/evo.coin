@@ -3230,6 +3230,7 @@ def render_live_go_live_status_panel(section_key: str = "bot_go_live_status"):
 def render_trader_bot_runtime_controls(
     section_key: str = "bot_trader_runtime",
     allow_start: bool = True,
+    allow_stop: bool = True,
     block_reason: str = "",
     admin_session_active: bool = False,
 ):
@@ -3394,7 +3395,11 @@ def render_trader_bot_runtime_controls(
         if st.button(
             "⏹️ Parar Bot Trader",
             key=f"{section_key}_stop",
-            disabled=(desired_state != "running" and not runtime_online) or (running_on_railway and not shared_database_ready),
+            disabled=(
+                not bool(allow_stop)
+                or (desired_state != "running" and not runtime_online)
+                or (running_on_railway and not shared_database_ready)
+            ),
         ):
             control_row = db.set_user_runtime_control(
                 user_id=runtime_user_id,
@@ -3419,6 +3424,8 @@ def render_trader_bot_runtime_controls(
 
     if not bool(allow_start):
         st.warning(block_reason or "Runtime bloqueado para esta conta.")
+    if not bool(allow_stop):
+        st.warning("Somente Admin autenticado ou usuário logado pode parar o bot.")
 
     st.caption(
         f"Runtime key: `{runtime_key}` | "
@@ -7953,6 +7960,7 @@ def main():
                 render_trader_bot_runtime_controls(
                     section_key="bot_hub",
                     allow_start=bot_start_allowed,
+                    allow_stop=operator_session_active,
                     block_reason=bot_start_block_reason,
                     admin_session_active=admin_session_active,
                 )
