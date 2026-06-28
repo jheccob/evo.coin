@@ -354,6 +354,7 @@ def _start_account(context: dict, *, symbol: str, timeframe: str, testnet: bool,
             "exchange": str(context.get("exchange_name") or context.get("exchange") or "binanceusdm"),
             "symbol": symbol,
             "timeframe": timeframe,
+            "testnet": bool(testnet),
         },
     )
 
@@ -447,6 +448,7 @@ def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[
             if managed_process.poll() is None and not current_pid:
                 current_pid = managed_process.pid
                 process_state["pid"] = managed_process.pid
+                process_state["use_testnet"] = bool(managed_metadata.get("testnet"))
             elif managed_process.poll() is not None:
                 _drop_managed_process(runtime_key)
                 _report_reaped_process(runtime_key, managed_process, managed_metadata)
