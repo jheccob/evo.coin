@@ -239,9 +239,7 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Configurar API Key e Secret Key nesta aba": "Configure API Key and Secret Key in this tab",
     "Cole a API Key e a Secret Key da Binance/Exchange para o bot operar a conta real. Assim como o Telegram, você pode configurar direto nesta aba.": "Paste the Binance/Exchange API Key and Secret Key so the bot can trade the real account. Just like Telegram, you can configure it directly in this tab.",
     "Status da Credencial": "Credential Status",
-    "Salvar nesta sessão": "Save in this session",
-    "Salvar no Vault": "Save to Vault",
-    "Limpar sessão": "Clear session",
+    "Salvar Credenciais Criptografadas": "Save Encrypted Credentials",
     "Capital e Limites do Bot": "Bot Capital and Limits",
     "Defina quanto da banca o bot pode usar e quais travas de perda ele deve respeitar. Exemplo: se sua banca tem 1.000 USDT e você quer usar 50%, informe 500 USDT como capital liberado.": "Define how much of the balance the bot can use and which loss locks it must respect. Example: if your balance is 1,000 USDT and you want to use 50%, enter 500 USDT as allocated capital.",
     "Capital liberado para o bot (USDT)": "Capital allocated to the bot (USDT)",
@@ -2822,29 +2820,12 @@ def render_bot_exchange_credentials_panel(section_key: str = "bot_runtime_exchan
                 help="Cole aqui a Secret Key da mesma chave.",
             )
 
-            action_col1, action_col2, action_col3 = st.columns(3)
-            with action_col1:
-                save_session = st.form_submit_button("Salvar nesta sessão")
-            with action_col2:
-                save_vault = st.form_submit_button("Salvar no Vault", disabled=not vault_ready)
-            with action_col3:
-                clear_session = st.form_submit_button("Limpar sessão")
+            save_credentials = st.form_submit_button(
+                "Salvar Credenciais Criptografadas",
+                disabled=not vault_ready,
+            )
 
-            if save_session:
-                if api_key and api_secret:
-                    _store_runtime_session_credentials(
-                        use_testnet,
-                        api_key=api_key,
-                        api_secret=api_secret,
-                        source="session",
-                        persisted=False,
-                    )
-                    st.success("Credenciais carregadas nesta sessão da dashboard.")
-                    st.rerun()
-                else:
-                    st.warning("Preencha API Key e Secret Key para salvar nesta sessão.")
-
-            if save_vault:
+            if save_credentials:
                 if not vault_ready:
                     st.error("Vault não configurado. Defina `CREDENTIAL_ENCRYPTION_KEY` para persistir com criptografia.")
                 elif api_key and api_secret:
@@ -2871,18 +2852,13 @@ def render_bot_exchange_credentials_panel(section_key: str = "bot_runtime_exchan
                         source="vault",
                         persisted=True,
                     )
-                    st.success("Credenciais persistidas com criptografia e carregadas na sessão.")
+                    st.success("Credenciais salvas com criptografia no banco/vault.")
                     st.rerun()
                 else:
                     st.warning("Preencha API Key e Secret Key antes de salvar no vault.")
 
-            if clear_session:
-                _clear_runtime_session_credentials(use_testnet)
-                st.success("Credenciais removidas da sessão atual.")
-                st.rerun()
-
         if not vault_ready:
-            st.caption("Vault indisponível neste ambiente. As chaves podem ser usadas nesta sessão, mas não ficam persistidas com criptografia.")
+            st.caption("Vault indisponível neste ambiente. Configure `CREDENTIAL_ENCRYPTION_KEY` para salvar as chaves criptografadas no banco.")
 
 
 def render_bot_telegram_notifications_panel(section_key: str = "bot_runtime_telegram"):
