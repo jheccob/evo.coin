@@ -78,9 +78,15 @@ def _is_process_running(pid) -> bool:
 
 
 def _register_managed_process(runtime_key: str, process: subprocess.Popen, metadata: dict[str, Any]) -> None:
+    previous_process = None
+    previous_metadata: dict[str, Any] = {}
     with MANAGED_PROCESS_LOCK:
+        previous_process = MANAGED_PROCESSES.get(runtime_key)
+        previous_metadata = dict(MANAGED_PROCESS_METADATA.get(runtime_key) or {})
         MANAGED_PROCESSES[runtime_key] = process
         MANAGED_PROCESS_METADATA[runtime_key] = dict(metadata)
+    if previous_process is not None and previous_process.poll() is not None:
+        _report_reaped_process(runtime_key, previous_process, previous_metadata, clear_state=False)
 
 
 def _drop_managed_process(runtime_key: str) -> None:
@@ -112,41 +118,49 @@ def _record_runtime_exit_error(metadata: dict[str, Any], error_text: str) -> Non
         print(f"[multi-runtime] failed to record child exit in db: {exc}", flush=True)
 
 
+def _report_reaped_process(
+    runtime_key: str,
+    process: subprocess.Popen,
+    metadata: dict[str, Any],
+    *,
+    clear_state: bool = True,
+) -> dict[str, Any]:
+    exit_code = process.poll()
+    stderr_log_path = get_runtime_stderr_log_path(runtime_key)
+    stderr_tail = tail_text_file(stderr_log_path, max_lines=60, max_chars=6000)
+    error_text = f"Runtime saiu com codigo {exit_code}."
+    if stderr_tail:
+        error_text = f"{error_text} Ultimas linhas stderr: {stderr_tail}"
+
+    if clear_state:
+        clear_runtime_process_state(path=get_runtime_process_state_path(runtime_key))
+    print(
+        "[multi-runtime] child process exited | "
+        f"runtime_key={runtime_key} pid={process.pid} exit_code={exit_code}",
+        flush=True,
+    )
+    if stderr_tail:
+        print(f"[multi-runtime] child stderr tail | {runtime_key}\n{stderr_tail}", flush=True)
+
+    if int(exit_code or 0) != 0:
+        _record_runtime_exit_error(metadata, error_text)
+
+    return {
+        "runtime_key": runtime_key,
+        "pid": process.pid,
+        "exit_code": exit_code,
+        "status": "exited",
+        "error": error_text if int(exit_code or 0) != 0 else "",
+    }
+
+
 def reap_finished_processes() -> list[dict[str, Any]]:
     reaped: list[dict[str, Any]] = []
     for runtime_key, process, metadata in _snapshot_managed_processes():
-        exit_code = process.poll()
-        if exit_code is None:
+        if process.poll() is None:
             continue
-
         _drop_managed_process(runtime_key)
-        stderr_log_path = get_runtime_stderr_log_path(runtime_key)
-        stderr_tail = tail_text_file(stderr_log_path, max_lines=60, max_chars=6000)
-        error_text = f"Runtime saiu com codigo {exit_code}."
-        if stderr_tail:
-            error_text = f"{error_text} Ultimas linhas stderr: {stderr_tail}"
-
-        clear_runtime_process_state(path=get_runtime_process_state_path(runtime_key))
-        print(
-            "[multi-runtime] child process exited | "
-            f"runtime_key={runtime_key} pid={process.pid} exit_code={exit_code}",
-            flush=True,
-        )
-        if stderr_tail:
-            print(f"[multi-runtime] child stderr tail | {runtime_key}\n{stderr_tail}", flush=True)
-
-        if int(exit_code or 0) != 0:
-            _record_runtime_exit_error(metadata, error_text)
-
-        reaped.append(
-            {
-                "runtime_key": runtime_key,
-                "pid": process.pid,
-                "exit_code": exit_code,
-                "status": "exited",
-                "error": error_text if int(exit_code or 0) != 0 else "",
-            }
-        )
+        reaped.append(_report_reaped_process(runtime_key, process, metadata))
     return reaped
 
 
