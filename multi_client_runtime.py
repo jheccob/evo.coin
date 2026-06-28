@@ -103,6 +103,13 @@ def _snapshot_managed_processes() -> list[tuple[str, subprocess.Popen, dict[str,
         ]
 
 
+def _get_managed_process(runtime_key: str) -> tuple[subprocess.Popen, dict[str, Any]] | tuple[None, dict[str, Any]]:
+    with MANAGED_PROCESS_LOCK:
+        process = MANAGED_PROCESSES.get(runtime_key)
+        metadata = dict(MANAGED_PROCESS_METADATA.get(runtime_key) or {})
+    return process, metadata
+
+
 def _record_runtime_exit_error(metadata: dict[str, Any], error_text: str) -> None:
     try:
         db.update_user_runtime_control_tracking(
@@ -435,6 +442,16 @@ def reconcile_runtime_controls(*, retry_cooldown_seconds: float = 45.0) -> list[
         process_state_path = get_runtime_process_state_path(runtime_key)
         process_state = read_runtime_process_state(path=process_state_path) or {}
         current_pid = process_state.get("pid")
+        managed_process, managed_metadata = _get_managed_process(runtime_key)
+        if managed_process is not None:
+            if managed_process.poll() is None and not current_pid:
+                current_pid = managed_process.pid
+                process_state["pid"] = managed_process.pid
+            elif managed_process.poll() is not None:
+                _drop_managed_process(runtime_key)
+                _report_reaped_process(runtime_key, managed_process, managed_metadata)
+                process_state = read_runtime_process_state(path=process_state_path) or {}
+                current_pid = process_state.get("pid")
         is_running = _is_process_running(current_pid)
         desired_state = str(control.get("desired_state") or "stopped").strip().lower()
         desired_testnet = _runtime_mode_uses_testnet(control.get("requested_mode"))
