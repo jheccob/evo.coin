@@ -2256,6 +2256,18 @@ def _get_active_bot_runtime_state() -> tuple[str, dict | None, dict]:
     )
 
 
+def _get_primary_runtime_control(symbol: str | None = None, timeframe: str | None = None):
+    runtime_symbol = str(symbol or os.getenv("SYMBOL", AppConfig.DEFAULT_SYMBOL)).strip() or AppConfig.DEFAULT_SYMBOL
+    runtime_timeframe = str(timeframe or os.getenv("TIMEFRAME", AppConfig.DEFAULT_TIMEFRAME)).strip() or AppConfig.DEFAULT_TIMEFRAME
+    return db.get_user_runtime_control(
+        user_id=_runtime_credential_user_id(),
+        account_id=_runtime_credential_account_id(_runtime_env_uses_testnet()),
+        exchange=_runtime_credential_exchange_name(),
+        symbol=runtime_symbol,
+        timeframe=runtime_timeframe,
+    )
+
+
 def _is_process_running(pid):
     if not pid:
         return False
@@ -3084,11 +3096,13 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
     get_cached_bot_runtime_db_state.clear()
     runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
     trader_bot_state = get_trader_bot_process_state(runtime_db_state=runtime_db_state, runtime_key=runtime_key)
+    runtime_control = _get_primary_runtime_control()
+    runtime_health = _build_workspace_remote_runtime_health(runtime_control, runtime_db_state)
     monitor_health = {
-        "desired_state": "running" if trader_bot_state.get("running") else "stopped",
-        "heartbeat_fresh": bool(trader_bot_state.get("heartbeat_fresh")),
-        "heartbeat_age_seconds": trader_bot_state.get("heartbeat_age_seconds"),
-        "status_label": "ON" if trader_bot_state.get("heartbeat_fresh") else ("OFF" if not trader_bot_state.get("running") else "SEM HEARTBEAT"),
+        "desired_state": runtime_health.get("desired_state"),
+        "heartbeat_fresh": bool(runtime_health.get("heartbeat_fresh")),
+        "heartbeat_age_seconds": runtime_health.get("heartbeat_age_seconds"),
+        "status_label": runtime_health.get("status_label"),
     }
     process_metadata = trader_bot_state.get("metadata") or {}
     payload = (runtime_db_state or {}).get("state_payload") or {}
@@ -3103,6 +3117,7 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
         runtime_health=monitor_health,
         trader_bot_state=trader_bot_state,
         runtime_db_state=runtime_db_state,
+        runtime_control=runtime_control,
         section_key=f"{section_key}_life",
     )
 
@@ -7902,8 +7917,15 @@ def main():
         )
         runtime_family_label = AppConfig.get_symbol_profile_family_label(symbol)
         bot_runtime_key = _resolve_account_runtime_key(bool(st.session_state.get("trader_bot_testnet", _env_testnet_default())))
+        bot_runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=bot_runtime_key, limit=1)
+        bot_runtime_control = _get_primary_runtime_control(symbol=symbol, timeframe=timeframe)
+        bot_runtime_health = _build_workspace_remote_runtime_health(bot_runtime_control, bot_runtime_db_state)
+        bot_desired_state = str(bot_runtime_health.get("desired_state") or "stopped").strip().lower()
+        bot_remote_status_label = _runtime_remote_status_label(bot_runtime_health.get("status_label"))
+        bot_desired_state_label = _runtime_desired_state_label(bot_desired_state)
+        bot_heartbeat_fresh = bool(bot_runtime_health.get("heartbeat_fresh"))
         bot_process_state = get_trader_bot_process_state(
-            runtime_db_state=get_cached_bot_runtime_db_state(runtime_key=bot_runtime_key, limit=1),
+            runtime_db_state=bot_runtime_db_state,
             runtime_key=bot_runtime_key,
         )
         workspace_session_active = bool(dashboard_user)
@@ -7952,7 +7974,8 @@ def main():
                 ),
             ),
             badges=[
-                _build_status_pill("Processo", "ON" if bot_process_state.get("running") else "OFF", "accent" if bot_process_state.get("running") else "danger"),
+                _build_status_pill("Motor", bot_remote_status_label, bot_runtime_health.get("tone", "default")),
+                _build_status_pill("Comando", bot_desired_state_label, "accent" if bot_desired_state == "running" else "default"),
                 _build_status_pill("Sessão", operator_session_label, "warm" if operator_session_active else "danger"),
                 _build_status_pill("WebSocket", "OK" if websocket_library_ready else "Pendente", "accent" if websocket_library_ready else "danger"),
                 _build_status_pill("Assinatura", subscription_plan if subscription_gate_satisfied else f"{subscription_plan} OFF", "accent" if subscription_gate_satisfied else "danger"),
@@ -8005,18 +8028,24 @@ def main():
 
         readiness_col1, readiness_col2, readiness_col3, readiness_col4, readiness_col5, readiness_col6 = st.columns(6)
         with readiness_col1:
-            st.metric("Processo", "ON" if bot_process_state.get("running") else "OFF")
+            st.metric("Motor", bot_remote_status_label)
         with readiness_col2:
-            st.metric("Sessão Operador", operator_session_label)
+            st.metric("Comando", bot_desired_state_label)
         with readiness_col3:
-            st.metric("Lib Telegram", "OK" if telegram_library_ready else "PENDENTE")
+            st.metric("Pulso", _format_age_label(bot_runtime_health.get("heartbeat_age_seconds")))
         with readiness_col4:
-            st.metric("Notif. Sessao", "ON" if session_notifications_enabled else "OFF")
+            st.metric("Sessão", operator_session_label)
         with readiness_col5:
             subscription_status_label = "ADMIN BYPASS" if admin_session_active and subscription_gate_required else f"{subscription_plan} {'ON' if subscription_active else 'OFF'}"
             st.metric("Assinatura", subscription_status_label)
         with readiness_col6:
             st.metric("Lib WebSocket", "OK" if websocket_library_ready else "PENDENTE")
+
+        if bot_desired_state == "running" and not bot_heartbeat_fresh:
+            st.warning(
+                "O comando salvo no banco está como Ligado, mas o pulso ainda não está recente. "
+                "Isso pode ser reinício do Railway, atraso de heartbeat ou falha do bot; confira o erro no painel Runtime."
+            )
 
         if admin_session_active and not workspace_session_active:
             st.info(
