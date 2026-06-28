@@ -231,7 +231,7 @@ STATIC_UI_EN_TRANSLATIONS = {
     "Ultimo Sinal": "Last Signal",
     "Posição": "Position",
     "Posicao": "Position",
-    "Live da Conta": "Account Live",
+    "Conta Liberada": "Account Enabled",
     "Credencial": "Credential",
     "Credenciais": "Credentials",
     "API Key e Secret Key": "API Key and Secret Key",
@@ -2128,6 +2128,111 @@ def _runtime_heartbeat_is_recent(runtime_db_state: dict | None) -> bool:
     return heartbeat_age <= freshness_window
 
 
+def _runtime_desired_state_label(value: str | None) -> str:
+    return "Ligado" if str(value or "").strip().lower() == "running" else "Parado"
+
+
+def _runtime_remote_status_label(value: str | None) -> str:
+    status = str(value or "").strip().upper()
+    mapping = {
+        "ON": "Motor vivo",
+        "OFF": "Parado",
+        "PARTINDO": "Iniciando",
+        "SEM HEARTBEAT": "Sem pulso",
+        "RUNNING": "Ligado",
+        "STOPPED": "Parado",
+    }
+    return mapping.get(status, status.title() if status else "-")
+
+
+def _runtime_process_source_label(value: str | None) -> str:
+    source = str(value or "").strip().lower()
+    mapping = {
+        "pid": "Processo local",
+        "embedded": "Embutido",
+        "heartbeat": "Pulso remoto",
+        "offline": "Offline",
+    }
+    return mapping.get(source, source or "-")
+
+
+def _runtime_signal_label(value: str | None) -> str:
+    signal = str(value or "").strip().lower()
+    mapping = {
+        "buy": "Compra",
+        "long": "Compra",
+        "sell": "Venda",
+        "short": "Venda",
+        "hold": "Aguardando",
+        "none": "-",
+    }
+    return mapping.get(signal, str(value or "-").upper())
+
+
+def _runtime_position_label(value: str | None) -> str:
+    side = str(value or "").strip().lower()
+    mapping = {
+        "flat": "Sem posição",
+        "none": "Sem posição",
+        "buy": "Comprado",
+        "long": "Comprado",
+        "sell": "Vendido",
+        "short": "Vendido",
+    }
+    return mapping.get(side, str(value or "-"))
+
+
+def render_runtime_liveness_panel(
+    *,
+    runtime_key: str,
+    runtime_health: dict,
+    trader_bot_state: dict | None = None,
+    runtime_db_state: dict | None = None,
+    runtime_control: dict | None = None,
+    section_key: str = "runtime_liveness",
+) -> None:
+    desired_state = str(runtime_health.get("desired_state") or "stopped").strip().lower()
+    heartbeat_age = runtime_health.get("heartbeat_age_seconds")
+    heartbeat_fresh = bool(runtime_health.get("heartbeat_fresh"))
+    status_label = _runtime_remote_status_label(runtime_health.get("status_label"))
+    desired_label = _runtime_desired_state_label(desired_state)
+    pid = (trader_bot_state or {}).get("pid")
+    source_label = _runtime_process_source_label((trader_bot_state or {}).get("status_source"))
+    last_error = str(
+        (runtime_control or {}).get("last_error")
+        or (runtime_db_state or {}).get("last_error")
+        or ""
+    ).strip()
+
+    if heartbeat_fresh:
+        st.success(f"Motor vivo: pulso recebido há {_format_age_label(heartbeat_age)}.")
+    elif desired_state == "running":
+        st.warning(
+            "Motor sem pulso recente. O supervisor do `evo-bot` deve tentar recuperar; "
+            "se persistir, veja o último erro abaixo."
+        )
+    else:
+        st.info("Motor parado por comando. Para operar, envie um novo comando de ligar.")
+
+    live_col1, live_col2, live_col3, live_col4 = st.columns(4)
+    with live_col1:
+        st.metric("Vida do Motor", status_label)
+    with live_col2:
+        st.metric("Último Pulso", _format_age_label(heartbeat_age))
+    with live_col3:
+        st.metric("Comando Atual", desired_label)
+    with live_col4:
+        st.metric("Processo", f"PID {pid}" if pid else source_label)
+
+    detail_col1, detail_col2 = st.columns([1.4, 1])
+    with detail_col1:
+        st.caption(f"Chave do runtime: `{runtime_key}`")
+    with detail_col2:
+        st.caption(f"Último comando: {(runtime_control or {}).get('last_command_at') or '-'}")
+    if last_error:
+        st.error(f"Último erro do motor: {last_error}")
+
+
 def _runtime_env_uses_testnet() -> bool:
     testnet_env = os.getenv("TESTNET")
     if testnet_env is not None:
@@ -2979,6 +3084,12 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
     get_cached_bot_runtime_db_state.clear()
     runtime_db_state = get_cached_bot_runtime_db_state(runtime_key=runtime_key, limit=1)
     trader_bot_state = get_trader_bot_process_state(runtime_db_state=runtime_db_state, runtime_key=runtime_key)
+    monitor_health = {
+        "desired_state": "running" if trader_bot_state.get("running") else "stopped",
+        "heartbeat_fresh": bool(trader_bot_state.get("heartbeat_fresh")),
+        "heartbeat_age_seconds": trader_bot_state.get("heartbeat_age_seconds"),
+        "status_label": "ON" if trader_bot_state.get("heartbeat_fresh") else ("OFF" if not trader_bot_state.get("running") else "SEM HEARTBEAT"),
+    }
     process_metadata = trader_bot_state.get("metadata") or {}
     payload = (runtime_db_state or {}).get("state_payload") or {}
     position = payload.get("position") or {}
@@ -2987,21 +3098,29 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
     entry_runtime = payload.get("entry_runtime") or {}
     last_signal_details = payload.get("last_signal_details") or {}
 
+    render_runtime_liveness_panel(
+        runtime_key=runtime_key,
+        runtime_health=monitor_health,
+        trader_bot_state=trader_bot_state,
+        runtime_db_state=runtime_db_state,
+        section_key=f"{section_key}_life",
+    )
+
     monitor_col1, monitor_col2, monitor_col3, monitor_col4 = st.columns(4)
     with monitor_col1:
-        st.metric("Fonte Status", str(trader_bot_state.get("status_source") or "-").upper())
+        st.metric("Fonte do Status", _runtime_process_source_label(trader_bot_state.get("status_source")))
     with monitor_col2:
-        st.metric("Heartbeat", _format_age_label(trader_bot_state.get("heartbeat_age_seconds")))
+        st.metric("Pulso", _format_age_label(trader_bot_state.get("heartbeat_age_seconds")))
     with monitor_col3:
-        st.metric("Controle", "SIM" if trader_bot_state.get("controllable") else "MONITOR")
+        st.metric("Controle", "Sim" if trader_bot_state.get("controllable") else "Somente monitor")
     with monitor_col4:
-        st.metric("Process File", "OK" if process_metadata else "AUSENTE")
+        st.metric("Arquivo do Processo", "OK" if process_metadata else "Ausente")
 
     if process_metadata:
         st.caption(
-            f"Process state: {trader_bot_state.get('process_state_file')} | "
-            f"source={process_metadata.get('source') or '-'} | "
-            f"started_at={process_metadata.get('started_at') or '-'}"
+            f"Estado do processo: {trader_bot_state.get('process_state_file')} | "
+            f"origem={process_metadata.get('source') or '-'} | "
+            f"iniciado_em={process_metadata.get('started_at') or '-'}"
         )
 
     runtime_tab1, runtime_tab2, runtime_tab3, runtime_tab4 = st.tabs(["Operação", "Entradas", "Posição", "Logs"])
@@ -3010,17 +3129,17 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
         if runtime_db_state:
             op_col1, op_col2, op_col3, op_col4 = st.columns(4)
             with op_col1:
-                st.metric("DB Status", runtime_db_state.get("status") or "-")
+                st.metric("Status no Banco", runtime_db_state.get("status") or "-")
             with op_col2:
                 st.metric("Último Candle", str(runtime_db_state.get("last_candle_timestamp") or "-"))
             with op_col3:
-                st.metric("Último Sinal", str(runtime_db_state.get("last_signal") or "-"))
+                st.metric("Último Sinal", _runtime_signal_label(runtime_db_state.get("last_signal")))
             with op_col4:
                 st.metric("Preço Sinal", f"{float(runtime_db_state.get('last_signal_price') or 0.0):.2f}" if runtime_db_state.get("last_signal_price") is not None else "-")
 
             st.caption(
                 f"Motivo do último sinal: {runtime_db_state.get('last_signal_reason') or '-'} | "
-                f"Strategy version: {runtime_db_state.get('strategy_version') or '-'}"
+                f"Versão da estratégia: {runtime_db_state.get('strategy_version') or '-'}"
             )
             if runtime_db_state.get("blocked"):
                 st.warning(f"Runtime bloqueado: {runtime_db_state.get('block_reason') or 'sem motivo informado'}")
@@ -3066,7 +3185,7 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
             st.markdown("#### Último Sinal Avaliado")
             signal_col1, signal_col2, signal_col3, signal_col4 = st.columns(4)
             with signal_col1:
-                st.metric("Sinal", str(last_signal_details.get("signal") or "-").upper())
+                st.metric("Sinal", _runtime_signal_label(last_signal_details.get("signal")))
             with signal_col2:
                 st.metric("Setup", str(last_signal_details.get("setup_name") or "-"))
             with signal_col3:
@@ -3082,7 +3201,7 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
             st.markdown("#### Última Entrada")
             entry_info_col1, entry_info_col2, entry_info_col3, entry_info_col4 = st.columns(4)
             with entry_info_col1:
-                st.metric("Side", str(last_entry.get("side") or "-").upper())
+                st.metric("Lado", _runtime_position_label(last_entry.get("side")))
             with entry_info_col2:
                 st.metric("Setup", str(last_entry.get("setup_name") or "-"))
             with entry_info_col3:
@@ -3092,7 +3211,7 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
                 st.metric("Modo Execução", str(last_entry.get("execution_mode") or "-"))
             st.caption(
                 f"Preço: {float(last_entry.get('entry_price') or 0.0):.2f} | "
-                f"Qty: {float(last_entry.get('quantity') or 0.0):.6f} | "
+                f"Quantidade: {float(last_entry.get('quantity') or 0.0):.6f} | "
                 f"Candle: {last_entry.get('candle_timestamp') or '-'} | "
                 f"Motivo: {last_entry.get('reason') or '-'}"
             )
@@ -3114,7 +3233,7 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
     with runtime_tab3:
         risk_col1, risk_col2, risk_col3 = st.columns(3)
         with risk_col1:
-            st.metric("Daily PnL %", f"{float(risk_state.get('daily_realized_pct', 0.0) or 0.0):.2f}%")
+            st.metric("Resultado Diário %", f"{float(risk_state.get('daily_realized_pct', 0.0) or 0.0):.2f}%")
         with risk_col2:
             st.metric("Losses Seguidas", int(risk_state.get("consecutive_losses", 0) or 0))
         with risk_col3:
@@ -3123,17 +3242,17 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
         if position:
             pos_col1, pos_col2, pos_col3, pos_col4 = st.columns(4)
             with pos_col1:
-                st.metric("Side", str(position.get("side") or "-").upper())
+                st.metric("Lado", _runtime_position_label(position.get("side")))
             with pos_col2:
-                st.metric("Entry", f"{float(position.get('entry_price') or 0.0):.2f}")
+                st.metric("Entrada", f"{float(position.get('entry_price') or 0.0):.2f}")
             with pos_col3:
                 st.metric("Stop Atual", f"{float(position.get('current_stop') or 0.0):.2f}")
             with pos_col4:
                 st.metric("Alvo Parcial", f"{float(position.get('partial_target') or 0.0):.2f}")
             st.caption(
-                f"Best price: {float(position.get('best_price') or 0.0):.2f} | "
-                f"Execution profile: {position.get('execution_profile') or '-'} | "
-                f"Entry timestamp: {position.get('entry_timestamp') or '-'}"
+                f"Melhor preço: {float(position.get('best_price') or 0.0):.2f} | "
+                f"Perfil de execução: {position.get('execution_profile') or '-'} | "
+                f"Entrada em: {position.get('entry_timestamp') or '-'}"
             )
         else:
             st.info("Sem posição aberta no snapshot atual.")
@@ -3152,8 +3271,8 @@ def render_trader_bot_runtime_monitor(runtime_key: str, section_key: str = "bot_
     with runtime_tab4:
         log_options = {
             "Execução": BOT_EXECUTION_LOG_PATH,
-            "Runner stdout": BOT_RUNNER_STDOUT_LOG_PATH,
-            "Runner stderr": BOT_RUNNER_STDERR_LOG_PATH,
+            "Saída do runner": BOT_RUNNER_STDOUT_LOG_PATH,
+            "Erros do runner": BOT_RUNNER_STDERR_LOG_PATH,
         }
         selected_log = st.selectbox(
             "Arquivo de log",
@@ -3256,23 +3375,34 @@ def render_trader_bot_runtime_controls(
     runtime_health = _build_workspace_remote_runtime_health(runtime_control, runtime_db_state)
     desired_state = str(runtime_health.get("desired_state") or "stopped").strip().lower()
     runtime_online = bool(runtime_health.get("heartbeat_fresh"))
+    desired_state_label = _runtime_desired_state_label(desired_state)
+    remote_status_label = _runtime_remote_status_label(runtime_health.get("status_label"))
 
     render_dashboard_strip(
         "Este botão controla o `evo-bot` privado pela fila de comandos no banco. A dashboard não sobe processo fictício/local.",
         badges=[
-            _build_status_pill("Runtime", runtime_health.get("status_label", "OFF"), runtime_health.get("tone", "default")),
-            _build_status_pill("Desejado", "RUNNING" if desired_state == "running" else "STOPPED", "accent" if desired_state == "running" else "default"),
+            _build_status_pill("Motor", remote_status_label, runtime_health.get("tone", "default")),
+            _build_status_pill("Comando", desired_state_label, "accent" if desired_state == "running" else "default"),
             _build_status_pill("Modo", trader_bot_state.get("mode_label", "Testnet"), "warm"),
             _build_status_pill("Mercado", f"{runtime_symbol} · {runtime_timeframe}", "default"),
             _build_status_pill("Executor", "evo-bot", "accent"),
         ],
     )
 
+    render_runtime_liveness_panel(
+        runtime_key=runtime_key,
+        runtime_health=runtime_health,
+        trader_bot_state=trader_bot_state,
+        runtime_db_state=runtime_db_state,
+        runtime_control=runtime_control,
+        section_key=f"{section_key}_life",
+    )
+
     bot_runtime_col1, bot_runtime_col2, bot_runtime_col3, bot_runtime_col4 = st.columns(4)
     with bot_runtime_col1:
-        st.metric("Status Remoto", runtime_health.get("status_label", "OFF"))
+        st.metric("Status Remoto", remote_status_label)
     with bot_runtime_col2:
-        st.metric("Desejado", "RUNNING" if desired_state == "running" else "STOPPED")
+        st.metric("Comando", desired_state_label)
     with bot_runtime_col3:
         st.metric("Modo", trader_bot_state.get("mode_label", "Testnet"))
     with bot_runtime_col4:
@@ -3285,18 +3415,18 @@ def render_trader_bot_runtime_controls(
         current_position = str(runtime_db_state.get("position_side") or "flat")
         runtime_db_col1, runtime_db_col2, runtime_db_col3, runtime_db_col4 = st.columns(4)
         with runtime_db_col1:
-            st.metric("DB Status", runtime_db_state.get("status") or "-")
+            st.metric("Status no Banco", runtime_db_state.get("status") or "-")
         with runtime_db_col2:
-            st.metric("Ultimo Candle", str(runtime_db_state.get("last_candle_timestamp") or "-"))
+            st.metric("Último Candle", str(runtime_db_state.get("last_candle_timestamp") or "-"))
         with runtime_db_col3:
-            st.metric("Ultimo Sinal", last_signal_label)
+            st.metric("Último Sinal", _runtime_signal_label(last_signal_label))
         with runtime_db_col4:
-            st.metric("Posicao", current_position)
+            st.metric("Posição", _runtime_position_label(current_position))
 
         st.caption(
-            f"Heartbeat: {heartbeat_value} | "
-            f"Runtime DB: {runtime_key} | "
-            f"Motivo do ultimo sinal: {last_signal_reason}"
+            f"Pulso: {heartbeat_value} | "
+            f"Chave do runtime: {runtime_key} | "
+            f"Motivo do último sinal: {last_signal_reason}"
         )
         if runtime_db_state.get("blocked"):
             st.warning(f"Runtime bloqueado no DB: {runtime_db_state.get('block_reason') or 'sem motivo informado'}")
@@ -3350,7 +3480,7 @@ def render_trader_bot_runtime_controls(
         "O start/stop abaixo grava uma intenção no Postgres. O daemon do `evo-bot` reconcilia em poucos segundos.",
         badges=[
             _build_status_pill("Ambiente", "Testnet" if selected_use_testnet else "Conta Real", "accent" if selected_use_testnet else "danger"),
-            _build_status_pill("Credencial", "env do evo-bot", "warm"),
+            _build_status_pill("Credencial", "Variáveis do evo-bot", "warm"),
         ],
     )
     shared_database_ready = bool(str(os.getenv("DATABASE_URL", "")).strip())
@@ -3428,7 +3558,7 @@ def render_trader_bot_runtime_controls(
         st.warning("Somente Admin autenticado ou usuário logado pode parar o bot.")
 
     st.caption(
-        f"Runtime key: `{runtime_key}` | "
+        f"Chave do runtime: `{runtime_key}` | "
         f"Último comando: {(runtime_control or {}).get('last_command_at') or '-'} | "
         f"Executor esperado: serviço Railway `evo-bot`."
     )
@@ -4298,7 +4428,7 @@ def render_bot_operation_snapshot(symbol, timeframe, stream_status=None):
             _build_status_pill("Bot", status_label, status_kind),
             _build_status_pill("Modo", trader_bot_state.get("mode_label", "Testnet"), "warm"),
             _build_status_pill("Mercado", f"{symbol} · {timeframe}", "default"),
-            _build_status_pill("Heartbeat", _format_age_label(heartbeat_age), "accent" if heartbeat_fresh else "danger"),
+            _build_status_pill("Pulso", _format_age_label(heartbeat_age), "accent" if heartbeat_fresh else "danger"),
         ],
     )
 
@@ -4308,40 +4438,40 @@ def render_bot_operation_snapshot(symbol, timeframe, stream_status=None):
     with metric_col2:
         st.metric("Ambiente", trader_bot_state.get("mode_label", "Testnet"))
     with metric_col3:
-        st.metric("Ultimo Sinal", str((runtime_db_state or {}).get("last_signal") or "-").upper())
+        st.metric("Último Sinal", _runtime_signal_label((runtime_db_state or {}).get("last_signal")))
     with metric_col4:
-        st.metric("Posicao", str((runtime_db_state or {}).get("position_side") or "flat").upper())
+        st.metric("Posição", _runtime_position_label((runtime_db_state or {}).get("position_side") or "flat"))
 
     detail_col1, detail_col2, detail_col3 = st.columns(3)
     with detail_col1:
-        st.metric("Ultimo Candle", str((runtime_db_state or {}).get("last_candle_timestamp") or "-"))
+        st.metric("Último Candle", str((runtime_db_state or {}).get("last_candle_timestamp") or "-"))
     with detail_col2:
-        st.metric("Heartbeat", _format_age_label(heartbeat_age))
+        st.metric("Pulso", _format_age_label(heartbeat_age))
     with detail_col3:
         pid_label = trader_bot_state.get("pid") or (
             "EMBEDDED" if trader_bot_state.get("managed_externally") else trader_bot_state.get("status_source", "-")
         )
-        st.metric("Origem", str(pid_label).upper())
+        st.metric("Origem", _runtime_process_source_label(pid_label) if not trader_bot_state.get("pid") else f"PID {pid_label}")
 
     last_reason = str((runtime_db_state or {}).get("last_signal_reason") or "").strip()
     if runtime_db_state:
-        st.caption(f"Runtime DB: {runtime_key} | Motivo do ultimo sinal: {last_reason or '-'}")
+        st.caption(f"Chave do runtime: {runtime_key} | Motivo do último sinal: {last_reason or '-'}")
     else:
-        st.warning("Ainda nao encontrei snapshot do bot no banco. Assim que o evo-bot gravar o primeiro heartbeat, esta area atualiza sozinha.")
+        st.warning("Ainda não encontrei snapshot do bot no banco. Assim que o evo-bot gravar o primeiro pulso, esta área atualiza sozinha.")
 
     if stream_status:
         stream_label = "conectado" if stream_status.get("connected") else "conectando"
-        st.caption(f"Stream de mercado auxiliar: {stream_label}. Ele serve como contexto; a decisao vem do runtime do bot.")
+        st.caption(f"Stream de mercado auxiliar: {stream_label}. Ele serve como contexto; a decisão vem do runtime do bot.")
 
     if blocked:
         st.warning(f"Runtime bloqueado: {(runtime_db_state or {}).get('block_reason') or 'sem motivo informado'}")
     if last_error:
-        st.error(f"Ultimo erro persistido: {last_error}")
+        st.error(f"Último erro persistido: {last_error}")
 
     payload = (runtime_db_state or {}).get("state_payload") or {}
     last_signal_details = payload.get("last_signal_details") or {}
     if last_signal_details:
-        with st.expander("Detalhes do ultimo sinal do bot", expanded=False):
+        with st.expander("Detalhes do último sinal do bot", expanded=False):
             st.json(last_signal_details)
 
 
@@ -5174,31 +5304,40 @@ def render_workspace_account_runtime_panel(
     runtime_db_state = runtime_rows[0] if runtime_rows else None
     runtime_health = _build_workspace_remote_runtime_health(runtime_control, runtime_db_state)
     desired_state = str(runtime_health.get("desired_state") or "stopped").strip().lower()
-    desired_state_label = "RUNNING" if desired_state == "running" else "STOPPED"
+    desired_state_label = _runtime_desired_state_label(desired_state)
+    remote_status_label = _runtime_remote_status_label(runtime_health.get("status_label"))
     runtime_online = bool(runtime_health.get("heartbeat_fresh"))
-    latest_position = str((runtime_db_state or {}).get("position_side") or "flat")
-    latest_signal = str((runtime_db_state or {}).get("last_signal") or "-")
+    latest_position = _runtime_position_label((runtime_db_state or {}).get("position_side") or "flat")
+    latest_signal = _runtime_signal_label((runtime_db_state or {}).get("last_signal") or "-")
     db_status = str((runtime_db_state or {}).get("status") or "-")
 
     render_dashboard_strip(
         "O botão aciona um comando persistido. O daemon multiusuário do `evo-bot` reconciliará esse estado em poucos segundos.",
         badges=[
-            _build_status_pill("Runtime", runtime_health.get("status_label", "OFF"), runtime_health.get("tone", "default")),
+            _build_status_pill("Motor", remote_status_label, runtime_health.get("tone", "default")),
             _build_status_pill("Desejado", desired_state_label, "accent" if desired_state == "running" else "default"),
             _build_status_pill("Modo", "Conta Real", "danger"),
             _build_status_pill("Mercado", f"{runtime_symbol} · {runtime_timeframe}", "default"),
         ],
     )
 
+    render_runtime_liveness_panel(
+        runtime_key=runtime_key,
+        runtime_health=runtime_health,
+        runtime_db_state=runtime_db_state,
+        runtime_control=runtime_control,
+        section_key=f"workspace_runtime_life_{selected_account_id}",
+    )
+
     runtime_col1, runtime_col2, runtime_col3, runtime_col4, runtime_col5 = st.columns(5)
     with runtime_col1:
-        st.metric("Status Remoto", runtime_health.get("status_label", "OFF"))
+        st.metric("Status Remoto", remote_status_label)
     with runtime_col2:
         st.metric("Desejado", desired_state_label)
     with runtime_col3:
-        st.metric("Heartbeat", _format_age_label(runtime_health.get("heartbeat_age_seconds")))
+        st.metric("Pulso", _format_age_label(runtime_health.get("heartbeat_age_seconds")))
     with runtime_col4:
-        st.metric("DB Status", db_status)
+        st.metric("Status no Banco", db_status)
     with runtime_col5:
         st.metric("Posição", latest_position)
 
@@ -5208,12 +5347,12 @@ def render_workspace_account_runtime_panel(
     with runtime_meta_col2:
         st.metric("Revisão", int((runtime_control or {}).get("command_revision", 0) or 0))
     with runtime_meta_col3:
-        st.metric("Live da Conta", "ON" if bool(selected_account.get("live_enabled")) else "OFF")
+        st.metric("Conta Liberada", "Sim" if bool(selected_account.get("live_enabled")) else "Não")
     with runtime_meta_col4:
         st.metric("Credencial", "OK" if execution_context.get("api_key_ref") else "PENDENTE")
 
     st.caption(
-        f"Runtime key: `{runtime_key}` | "
+        f"Chave do runtime: `{runtime_key}` | "
         f"Último comando: {(runtime_control or {}).get('last_command_at') or '-'} | "
         f"Último start: {(runtime_control or {}).get('last_started_at') or '-'} | "
         f"Último stop: {(runtime_control or {}).get('last_stopped_at') or '-'}"
