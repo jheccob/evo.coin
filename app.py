@@ -1487,6 +1487,8 @@ def initialize_dashboard_session_state() -> None:
         "dashboard_user_login": "",
         "dashboard_user_password": "",
         "dashboard_user_auth_error": "",
+        "admin_session_token": "",
+        "admin_pass": "",
         "multi_symbol_data": dict,
         "futures_trading": None,
     }
@@ -6064,7 +6066,8 @@ def main():
                         st.session_state.dashboard_user_login = ""
                         st.session_state.dashboard_user_password = ""
                         st.session_state.dashboard_user_auth_error = ""
-                        st.rerun()
+                        dashboard_user = authenticated_user
+                        st.sidebar.success("Login realizado. A sessão ficará salva neste navegador.")
                 else:
                     st.session_state.dashboard_user_auth_error = "❌ Login ou senha inválidos."
         if st.session_state.get("dashboard_user_auth_error"):
@@ -10958,7 +10961,6 @@ def main():
                             _create_persistent_admin_session()
                         except Exception:
                             logger.warning("Falha ao criar sessao persistente do admin.", exc_info=True)
-                        st.rerun()
                     else:
                         st.session_state.admin_auth_error = "❌ Senha incorreta"
 
