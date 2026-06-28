@@ -1665,7 +1665,8 @@ def clear_admin_dashboard_session(*, revoke_persistent: bool = True) -> None:
     _clear_persistent_admin_session_token()
     st.session_state.admin_authenticated = False
     st.session_state.admin_auth_error = ""
-    st.session_state.admin_pass = ""
+    if "admin_pass" not in st.session_state:
+        st.session_state.admin_pass = ""
 
 
 def ensure_trading_runtime(selected_exchange: str):
@@ -3351,13 +3352,26 @@ def render_trader_bot_runtime_controls(
             _build_status_pill("Credencial", "env do evo-bot", "warm"),
         ],
     )
+    shared_database_ready = bool(str(os.getenv("DATABASE_URL", "")).strip())
+    running_on_railway = bool(str(os.getenv("RAILWAY_ENVIRONMENT", "")).strip())
+    if running_on_railway and not shared_database_ready:
+        st.error(
+            "Banco compartilhado ausente: `DATABASE_URL` está vazio na Railway. "
+            "A dashboard consegue renderizar, mas o serviço separado `evo-bot` não recebe o comando de ligar. "
+            "Configure um Postgres/Database compartilhado para habilitar start/stop pela dashboard."
+        )
 
     bot_control_col1, bot_control_col2, bot_control_col3 = st.columns([1, 1, 0.8])
     with bot_control_col1:
         if st.button(
             "▶️ Ligar Bot Trader",
             key=f"{section_key}_start",
-            disabled=bool(runtime_online) or not bool(allow_start) or (not selected_use_testnet and not real_preflight_ok),
+            disabled=(
+                bool(runtime_online)
+                or not bool(allow_start)
+                or (not selected_use_testnet and not real_preflight_ok)
+                or (running_on_railway and not shared_database_ready)
+            ),
         ):
             control_row = db.set_user_runtime_control(
                 user_id=runtime_user_id,
@@ -3380,7 +3394,7 @@ def render_trader_bot_runtime_controls(
         if st.button(
             "⏹️ Parar Bot Trader",
             key=f"{section_key}_stop",
-            disabled=desired_state != "running" and not runtime_online,
+            disabled=(desired_state != "running" and not runtime_online) or (running_on_railway and not shared_database_ready),
         ):
             control_row = db.set_user_runtime_control(
                 user_id=runtime_user_id,
@@ -10932,7 +10946,6 @@ def main():
                     if hmac.compare_digest(str(provided_password or ""), configured_admin_password):
                         st.session_state.admin_authenticated = True
                         st.session_state.admin_auth_error = ""
-                        st.session_state.admin_pass = ""
                         try:
                             _create_persistent_admin_session()
                         except Exception:
