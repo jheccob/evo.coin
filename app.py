@@ -8070,9 +8070,23 @@ def main():
                 runtime_user_id = int(dashboard_user["user_id"])
                 runtime_accounts = db.get_user_workspace_accounts(user_id=runtime_user_id, limit=100)
                 if not runtime_accounts:
+                    try:
+                        db.ensure_dashboard_user_bot_account(
+                            user_id=runtime_user_id,
+                            live_enabled=False,
+                            paper_enabled=True,
+                            notes="Conta reparada automaticamente pela aba Bot Trader; aguardando liberacao do admin.",
+                        )
+                        runtime_accounts = db.get_user_workspace_accounts(user_id=runtime_user_id, limit=100)
+                    except Exception as account_repair_exc:
+                        st.warning(
+                            "Não foi possível criar a conta padrão deste usuário automaticamente. "
+                            f"Erro: {account_repair_exc}"
+                        )
+                if not runtime_accounts:
                     st.warning(
-                        "Nenhuma conta foi criada para este usuário ainda. "
-                        "Crie uma conta no Workspace ou peça ao Admin para liberar sua conta antes de cadastrar API Key."
+                        "Nenhuma conta operacional disponível para este usuário. "
+                        "Peça ao Admin para liberar o bot pelo User ID."
                     )
                 else:
                     runtime_account_lookup = {
@@ -11517,10 +11531,83 @@ def main():
                                     "notes": dashboard_access_notes,
                                 }
                             )
+                            db.ensure_dashboard_user_bot_account(
+                                user_id=int(dashboard_access_user_id),
+                                live_enabled=False,
+                                paper_enabled=True,
+                                notes="Conta criada automaticamente pelo admin; bot aguardando liberacao por User ID.",
+                            )
                             st.success("Acesso da dashboard salvo com sucesso.")
                             st.rerun()
                         except Exception as access_error:
                             st.error(f"Falha ao salvar acesso da dashboard: {access_error}")
+
+                st.markdown("### 🤖 Liberação rápida do Bot por User ID")
+                st.caption(
+                    "Use este bloco como fluxo principal: o cliente cria login e cadastra as keys; "
+                    "você só informa o User ID e libera ou bloqueia o botão do bot."
+                )
+                with st.form("dashboard_bot_access_quick_form"):
+                    bot_access_col1, bot_access_col2, bot_access_col3 = st.columns(3)
+                    with bot_access_col1:
+                        bot_access_user_id = st.number_input(
+                            "User ID do Cliente",
+                            min_value=1,
+                            step=1,
+                            key="bot_access_user_id",
+                        )
+                    with bot_access_col2:
+                        bot_access_action = st.selectbox(
+                            "Ação no Bot",
+                            options=["Liberar Bot", "Bloquear Bot", "Criar/Reparar Conta"],
+                            key="bot_access_action",
+                        )
+                    with bot_access_col3:
+                        bot_access_notes = st.text_area(
+                            "Notas",
+                            value="Liberado após confirmação de pagamento.",
+                            key="bot_access_notes",
+                        )
+                    if st.form_submit_button("Aplicar no User ID"):
+                        try:
+                            if bot_access_action == "Liberar Bot":
+                                context = db.set_dashboard_user_bot_access(
+                                    user_id=int(bot_access_user_id),
+                                    enabled=True,
+                                    notes=bot_access_notes,
+                                )
+                                st.success(
+                                    f"Bot liberado para User ID {int(bot_access_user_id)} "
+                                    f"na conta {context.get('account_id')}."
+                                )
+                            elif bot_access_action == "Bloquear Bot":
+                                context = db.set_dashboard_user_bot_access(
+                                    user_id=int(bot_access_user_id),
+                                    enabled=False,
+                                    notes=bot_access_notes,
+                                )
+                                st.warning(
+                                    f"Bot bloqueado para User ID {int(bot_access_user_id)} "
+                                    f"na conta {context.get('account_id')}."
+                                )
+                            else:
+                                if not db.dashboard_user_access_exists(int(bot_access_user_id)):
+                                    raise ValueError(
+                                        f"User ID {int(bot_access_user_id)} não existe nos acessos da dashboard."
+                                    )
+                                account = db.ensure_dashboard_user_bot_account(
+                                    user_id=int(bot_access_user_id),
+                                    live_enabled=False,
+                                    paper_enabled=True,
+                                    notes=bot_access_notes,
+                                )
+                                st.info(
+                                    f"Conta padrão pronta para User ID {int(bot_access_user_id)}: "
+                                    f"{account.get('account_id')}."
+                                )
+                            st.rerun()
+                        except Exception as bot_access_error:
+                            st.error(f"Falha ao aplicar liberação do bot: {bot_access_error}")
 
                 st.markdown("### 🛡️ Licenças de IP/Dispositivo")
                 license_rows = db.list_dashboard_device_licenses(limit=300)
@@ -11737,11 +11824,15 @@ def main():
                     )
                     mu_account_notes = st.text_area("Notas da Conta", key="mu_account_notes")
                     if st.form_submit_button("Salvar Conta Multiuser"):
+                        resolved_mu_account_id = (
+                            str(mu_account_id).strip()
+                            or db.get_default_user_account_id(int(mu_user_id))
+                        )
                         db.upsert_user_account(
                             {
                                 "user_id": int(mu_user_id),
-                                "account_id": str(mu_account_id).strip(),
-                                "account_alias": str(mu_account_alias or mu_account_id).strip(),
+                                "account_id": resolved_mu_account_id,
+                                "account_alias": str(mu_account_alias or resolved_mu_account_id).strip(),
                                 "exchange": mu_exchange,
                                 "status": mu_status,
                                 "live_enabled": bool(mu_live_enabled),
@@ -11787,10 +11878,14 @@ def main():
                     risk_live_enabled = st.checkbox("Live liberado no risco", value=True, key="risk_live_enabled")
                     risk_paper_enabled = st.checkbox("Paper liberado no risco", value=True, key="risk_paper_enabled")
                     if st.form_submit_button("Salvar Perfil de Risco"):
+                        resolved_risk_account_id = (
+                            str(risk_account_id).strip()
+                            or db.get_default_user_account_id(int(risk_user_id))
+                        )
                         db.upsert_user_risk_profile(
                             {
                                 "user_id": int(risk_user_id),
-                                "account_id": str(risk_account_id).strip(),
+                                "account_id": resolved_risk_account_id,
                                 "max_risk_per_trade": float(max_risk_per_trade),
                                 "max_daily_loss": float(max_daily_loss),
                                 "max_drawdown": float(max_drawdown),
@@ -11831,11 +11926,15 @@ def main():
                         api_secret = st.text_input("API Secret", type="password", key="cred_api_secret")
                         credential_notes = st.text_area("Notas da Credencial", key="credential_notes")
                         if st.form_submit_button("Salvar Credenciais com Vault"):
-                            if api_key and api_secret and cred_account_id:
+                            resolved_cred_account_id = (
+                                str(cred_account_id).strip()
+                                or db.get_default_user_account_id(int(cred_user_id))
+                            )
+                            if api_key and api_secret:
                                 vault.store_exchange_credentials(
                                     db,
                                     user_id=int(cred_user_id),
-                                    account_id=str(cred_account_id).strip(),
+                                    account_id=resolved_cred_account_id,
                                     exchange=str(cred_exchange).strip(),
                                     api_key=api_key,
                                     api_secret=api_secret,
@@ -11848,9 +11947,12 @@ def main():
                                     reconciliation_status=reconciliation_status,
                                     notes=credential_notes,
                                 )
-                                st.success("Credenciais armazenadas com criptografia.")
+                                st.success(
+                                    "Credenciais armazenadas com criptografia "
+                                    f"na conta {resolved_cred_account_id}."
+                                )
                             else:
-                                st.error("Informe account_id, api_key e api_secret para salvar as credenciais.")
+                                st.error("Informe api_key e api_secret para salvar as credenciais.")
                 else:
                     st.info("Configure o vault para liberar o cadastro seguro de credenciais.")
 

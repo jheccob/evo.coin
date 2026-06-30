@@ -2129,6 +2129,23 @@ class TradingDatabase:
         finally:
             conn.close()
 
+    def dashboard_user_access_exists(self, user_id: int) -> bool:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT 1
+                FROM dashboard_user_access
+                WHERE user_id = ?
+                LIMIT 1
+                ''',
+                (int(user_id),),
+            )
+            return bool(cursor.fetchone())
+        finally:
+            conn.close()
+
     def _build_dashboard_auth_response(self, payload: Dict[str, Any], *, expires_at_override: Optional[Any] = None) -> Dict[str, Any]:
         subscription_snapshot = self._build_subscription_snapshot(
             plan_code=payload.get("subscription_plan_code"),
@@ -2739,6 +2756,12 @@ class TradingDatabase:
                 )
 
             conn.commit()
+            self.ensure_dashboard_user_bot_account(
+                user_id=int(user_id),
+                live_enabled=False,
+                paper_enabled=True,
+                notes="Conta criada automaticamente no cadastro; bot aguardando liberacao do admin.",
+            )
             return {
                 "access_id": access_id,
                 "user_id": int(user_id),
@@ -2960,6 +2983,11 @@ class TradingDatabase:
         finally:
             conn.close()
 
+        self.set_dashboard_user_bot_access(
+            user_id=int(user_id),
+            enabled=True,
+            notes=merged_notes if merged_notes else f"Bot liberado por {reviewer}.",
+        )
         return self.get_dashboard_user_subscription(int(user_id))
 
     def set_dashboard_user_subscription_status(
@@ -3005,6 +3033,11 @@ class TradingDatabase:
             conn.close()
 
         if normalized_status in {"inactive", "expired", "blocked"}:
+            self.set_dashboard_user_bot_access(
+                user_id=int(user_id),
+                enabled=False,
+                notes=str(notes or f"Bot bloqueado por assinatura {normalized_status}.").strip(),
+            )
             return self.get_dashboard_user_subscription(int(user_id))
         return {
             **current,
@@ -3156,6 +3189,129 @@ class TradingDatabase:
         row = cursor.fetchone()
         max_user_id = int((row or {"max_user_id": 0})["max_user_id"] or 0)
         return max(max_user_id + 1, 1000)
+
+    def get_default_user_account_id(self, user_id: int) -> str:
+        return f"user-{int(user_id)}-real"
+
+    def ensure_dashboard_user_bot_account(
+        self,
+        *,
+        user_id: int,
+        live_enabled: bool = False,
+        paper_enabled: bool = True,
+        account_alias: Optional[str] = None,
+        exchange: str = "binanceusdm",
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        account_id = self.get_default_user_account_id(int(user_id))
+        resolved_exchange = str(exchange or "binanceusdm").strip() or "binanceusdm"
+        resolved_alias = str(account_alias or f"Conta Real User {int(user_id)}").strip()
+        resolved_notes = str(notes or "Conta padrao criada automaticamente para o bot multiuser.").strip()
+        existing_accounts = self.get_user_accounts(user_id=int(user_id), account_id=account_id, status=None)
+        existing_account = existing_accounts[0] if existing_accounts else {}
+
+        self.upsert_user_account(
+            {
+                "user_id": int(user_id),
+                "account_id": account_id,
+                "account_alias": existing_account.get("account_alias") or resolved_alias,
+                "exchange": existing_account.get("exchange") or resolved_exchange,
+                "status": "active",
+                "live_enabled": bool(live_enabled),
+                "paper_enabled": bool(paper_enabled),
+                "capital_base": float(existing_account.get("capital_base", 0.0) or 0.0),
+                "risk_mode": existing_account.get("risk_mode") or "normal",
+                "allowed_symbols": existing_account.get("allowed_symbols") or ["BTC/USDT"],
+                "allowed_timeframes": existing_account.get("allowed_timeframes") or ["15m"],
+                "notes": existing_account.get("notes") or resolved_notes,
+            }
+        )
+        existing_risk = self.get_user_risk_profile(int(user_id), account_id) or {}
+        self.upsert_user_risk_profile(
+            {
+                "user_id": int(user_id),
+                "account_id": account_id,
+                "max_risk_per_trade": float(existing_risk.get("max_risk_per_trade", 2.0) or 2.0),
+                "max_daily_loss": float(existing_risk.get("max_daily_loss", 15.0) or 15.0),
+                "max_drawdown": float(existing_risk.get("max_drawdown", 40.0) or 40.0),
+                "max_portfolio_open_risk_pct": float(
+                    existing_risk.get("max_portfolio_open_risk_pct", 100.0) or 100.0
+                ),
+                "allowed_position_count": int(existing_risk.get("allowed_position_count", 1) or 1),
+                "preferred_symbols": existing_risk.get("preferred_symbols") or ["BTC/USDT"],
+                "leverage_cap": float(existing_risk.get("leverage_cap", 10.0) or 10.0),
+                "risk_mode": existing_risk.get("risk_mode") or "normal",
+                "live_enabled": bool(live_enabled),
+                "paper_enabled": bool(paper_enabled),
+                "is_valid": bool(existing_risk.get("is_valid", True)),
+                "notes": resolved_notes,
+            }
+        )
+        accounts = self.get_user_accounts(user_id=int(user_id), account_id=account_id, status=None)
+        return accounts[0] if accounts else {
+            "user_id": int(user_id),
+            "account_id": account_id,
+            "exchange": resolved_exchange,
+            "live_enabled": bool(live_enabled),
+            "paper_enabled": bool(paper_enabled),
+        }
+
+    def set_dashboard_user_bot_access(
+        self,
+        *,
+        user_id: int,
+        enabled: bool,
+        notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self.dashboard_user_access_exists(int(user_id)):
+            raise ValueError(f"User ID {int(user_id)} nao encontrado em dashboard_user_access.")
+
+        account = self.ensure_dashboard_user_bot_account(
+            user_id=int(user_id),
+            live_enabled=bool(enabled),
+            paper_enabled=not bool(enabled),
+            notes=notes or (
+                "Bot liberado pelo admin/pagamento."
+                if bool(enabled)
+                else "Bot bloqueado por status administrativo."
+            ),
+        )
+        account_id = str(account.get("account_id") or self.get_default_user_account_id(int(user_id)))
+        self.set_user_account_operational_state(
+            user_id=int(user_id),
+            account_id=account_id,
+            live_enabled=bool(enabled),
+            paper_enabled=not bool(enabled),
+            status="active",
+            notes=notes,
+        )
+        risk_profile = self.get_user_risk_profile(int(user_id), account_id) or {}
+        self.upsert_user_risk_profile(
+            {
+                **risk_profile,
+                "user_id": int(user_id),
+                "account_id": account_id,
+                "max_risk_per_trade": float(risk_profile.get("max_risk_per_trade", 2.0) or 2.0),
+                "max_daily_loss": float(risk_profile.get("max_daily_loss", 15.0) or 15.0),
+                "max_drawdown": float(risk_profile.get("max_drawdown", 40.0) or 40.0),
+                "max_portfolio_open_risk_pct": float(
+                    risk_profile.get("max_portfolio_open_risk_pct", 100.0) or 100.0
+                ),
+                "allowed_position_count": int(risk_profile.get("allowed_position_count", 1) or 1),
+                "preferred_symbols": risk_profile.get("preferred_symbols") or ["BTC/USDT"],
+                "leverage_cap": float(risk_profile.get("leverage_cap", 10.0) or 10.0),
+                "risk_mode": risk_profile.get("risk_mode") or "normal",
+                "live_enabled": bool(enabled),
+                "paper_enabled": not bool(enabled),
+                "is_valid": bool(risk_profile.get("is_valid", True)),
+                "notes": notes,
+            }
+        )
+        return self.build_account_execution_context(
+            user_id=int(user_id),
+            account_id=account_id,
+            exchange=str(account.get("exchange") or "binanceusdm"),
+        )
 
     def review_dashboard_signup_request(
         self,
@@ -3311,6 +3467,12 @@ class TradingDatabase:
             )
 
             conn.commit()
+            self.ensure_dashboard_user_bot_account(
+                user_id=int(target_user_id),
+                live_enabled=False,
+                paper_enabled=True,
+                notes="Conta criada automaticamente na aprovacao do cadastro; bot aguardando assinatura ativa.",
+            )
             return {
                 "request_id": int(request_id),
                 "status": "approved",

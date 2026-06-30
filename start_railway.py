@@ -68,6 +68,10 @@ def _run_dashboard(repo_root: Path) -> int:
         port,
         "--server.headless",
         "true",
+        "--server.enableCORS",
+        "false",
+        "--server.enableXsrfProtection",
+        "false",
         "--browser.gatherUsageStats",
         "false",
     ]
