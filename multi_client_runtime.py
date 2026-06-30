@@ -110,8 +110,36 @@ def _get_managed_process(runtime_key: str) -> tuple[subprocess.Popen, dict[str, 
     return process, metadata
 
 
+def _is_fatal_exchange_start_error(error_text: str) -> bool:
+    normalized = str(error_text or "").lower()
+    fatal_markers = (
+        "invalid api-key",
+        '"code":-2015',
+        "ip banned",
+        "too many requests",
+        '"code":-1003',
+        "418 i'm a teapot",
+        "falha ao validar credenciais live",
+        "falha ao validar balance",
+    )
+    return any(marker in normalized for marker in fatal_markers)
+
+
 def _record_runtime_exit_error(metadata: dict[str, Any], error_text: str) -> None:
     try:
+        if _is_fatal_exchange_start_error(error_text):
+            db.set_user_runtime_control(
+                user_id=int(metadata["user_id"]),
+                account_id=str(metadata["account_id"]),
+                exchange=str(metadata.get("exchange") or "binanceusdm"),
+                symbol=str(metadata.get("symbol") or config.SYMBOL),
+                timeframe=str(metadata.get("timeframe") or config.TIMEFRAME),
+                desired_state="stopped",
+                requested_mode="testnet" if bool(metadata.get("testnet")) else "real",
+                requested_by_user_id=int(metadata.get("user_id") or 0),
+                requested_by_scope="multi_runtime_guard",
+                requested_reason="fatal_exchange_start_error",
+            )
         db.update_user_runtime_control_tracking(
             user_id=int(metadata["user_id"]),
             account_id=str(metadata["account_id"]),
