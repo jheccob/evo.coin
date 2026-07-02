@@ -756,12 +756,15 @@ def _refresh_live_managed_protective_stop(
         or 0.0
     )
     previous_quantity = float(position_before.get("quantity", 0.0) or 0.0)
+    price_tolerance = max(abs(previous_stop_price), abs(target_stop), 1.0) * 1e-6
     needs_refresh = (
         not previous_stop_order_id
-        or abs(previous_stop_price - target_stop) > 1e-9
+        or abs(previous_stop_price - target_stop) > price_tolerance
         or abs(previous_quantity - target_quantity) > 1e-12
     )
     if not needs_refresh:
+        refreshed_position["protective_stop_order_id"] = previous_stop_order_id
+        refreshed_position["protective_stop_price"] = previous_stop_price
         return refreshed_position
 
     replacement = execution_service.replace_stop_market_order(

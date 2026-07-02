@@ -988,6 +988,11 @@ class LiveExecutionService:
         return "unknown order" in message or "-2011" in message
 
     @staticmethod
+    def _is_unknown_order_text(message: str) -> bool:
+        normalized = str(message or "").lower()
+        return "unknown order" in normalized or "-2011" in normalized
+
+    @staticmethod
     def _order_matches_stop_market(order: Dict[str, Any], *, side: Optional[str] = None) -> bool:
         info = order.get("info") or {}
         raw_type = str(order.get("type") or info.get("type") or "").replace("_", "").lower()
@@ -1108,6 +1113,11 @@ class LiveExecutionService:
             side=side,
             testnet=testnet,
         )
+        if resolved_previous_order_id and cancel_error and self._is_unknown_order_text(cancel_error):
+            raise RuntimeError(
+                "Substituicao de stop bloqueada: a exchange nao confirmou cancelamento "
+                f"do stop anterior {resolved_previous_order_id}. Nenhum novo stop foi enviado."
+            )
         new_order = self.submit_stop_market_order(
             context=context,
             symbol=symbol,

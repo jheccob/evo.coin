@@ -155,7 +155,7 @@ class LiveExecutionServiceTests(unittest.TestCase):
         sweep_orders.assert_not_called()
         submit_stop.assert_not_called()
 
-    def test_replace_stop_market_order_sweeps_when_previous_order_is_unknown(self):
+    def test_replace_stop_market_order_blocks_when_previous_order_is_unknown(self):
         call_order = []
 
         with (
@@ -175,19 +175,19 @@ class LiveExecutionServiceTests(unittest.TestCase):
                 side_effect=lambda **kwargs: call_order.append("submit_new") or {"ok": True, "exchange_order_id": "stop-2"},
             ),
         ):
-            result = self.service.replace_stop_market_order(
-                context=self.context,
-                symbol="BTC/USDT",
-                side="sell",
-                stop_price=61000.0,
-                quantity=0.001,
-                previous_order_id="missing-stop",
-                testnet=True,
-            )
+            with self.assertRaises(RuntimeError) as ctx:
+                self.service.replace_stop_market_order(
+                    context=self.context,
+                    symbol="BTC/USDT",
+                    side="sell",
+                    stop_price=61000.0,
+                    quantity=0.001,
+                    previous_order_id="missing-stop",
+                    testnet=True,
+                )
 
-        self.assertEqual(result["exchange_order_id"], "stop-2")
-        self.assertEqual(result["stale_stops_cancelled"], 3)
-        self.assertEqual(call_order, ["sweep_stale", "submit_new"])
+        self.assertIn("Nenhum novo stop foi enviado", str(ctx.exception))
+        self.assertEqual(call_order, ["sweep_stale"])
 
     def test_exchange_request_params_are_exchange_specific(self):
         binance_params = self.service._exchange_request_params(
