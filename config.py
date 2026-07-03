@@ -181,6 +181,7 @@ LONG_TRAILING_STOP_PCT = _get_float("LONG_TRAILING_STOP_PCT", 0.8)
 SHORT_TRAILING_STOP_PCT = _get_float("SHORT_TRAILING_STOP_PCT", 0.7)
 TRAILING_TRIGGER_PCT = _get_float("TRAILING_TRIGGER_PCT", 1.5)
 PARTIAL_TARGET_PCT = _get_float("PARTIAL_TARGET_PCT", 1.0)
+ENABLE_PARTIAL_TAKE_PROFIT = _get_bool("ENABLE_PARTIAL_TAKE_PROFIT", True)
 ENFORCE_MIN_RISK_REWARD_RATIO = _get_bool("ENFORCE_MIN_RISK_REWARD_RATIO", False)
 MIN_RISK_REWARD_RATIO = _get_float("MIN_RISK_REWARD_RATIO", 2.0)
 TREND_RESUME_LONG_STOP_LOSS_PCT = _get_float("TREND_RESUME_LONG_STOP_LOSS_PCT", 0.9)
@@ -467,6 +468,7 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
         "short_rsi_max_relief_rally": float(SHORT_RSI_MAX_RELIEF_RALLY),
         "trailing_trigger_pct": float(TRAILING_TRIGGER_PCT),
         "partial_target_pct": float(PARTIAL_TARGET_PCT),
+        "enable_partial_take_profit": bool(ENABLE_PARTIAL_TAKE_PROFIT),
         "enforce_min_risk_reward_ratio": bool(ENFORCE_MIN_RISK_REWARD_RATIO),
         "min_risk_reward_ratio": float(MIN_RISK_REWARD_RATIO),
         "execution_profile": str(EXECUTION_PROFILE),
@@ -1609,6 +1611,7 @@ __all__ = [
     "BLOCKED_SHORT_ENTRY_HOURS_UTC",
     "TRAILING_TRIGGER_PCT",
     "PARTIAL_TARGET_PCT",
+    "ENABLE_PARTIAL_TAKE_PROFIT",
     "MIN_TARGET_DISTANCE_PCT",
     "MIN_TREND_STRENGTH_PCT",
     "MIN_TREND_STRENGTH_PCT_SHORT",

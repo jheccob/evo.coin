@@ -546,6 +546,10 @@ def _defer_profit_protection_to_candle_close(position: Dict) -> bool:
     return False
 
 
+def _partial_take_profit_enabled() -> bool:
+    return bool(getattr(config, "ENABLE_PARTIAL_TAKE_PROFIT", True))
+
+
 def _apply_long_profit_protection(position: Dict) -> Dict:
     pos = position.copy()
     fee_buffer = float(pos["entry_price"]) * (config.FEE_PCT * 2.5 / 100)
@@ -583,9 +587,10 @@ def evaluate_open_position(
     if side == "long":
         pos["best_price"] = max(float(pos["best_price"]), price)
         if (not pos["partial_taken"]) and price >= float(pos["partial_target"]):
-            pos["partial_taken"] = True
             pos = _apply_long_profit_protection(pos)
-            return {"action": "partial", "position": pos, "reason": "partial_target_hit"}
+            if _partial_take_profit_enabled():
+                pos["partial_taken"] = True
+                return {"action": "partial", "position": pos, "reason": "partial_target_hit"}
         
         # Registra métricas para análise
         pos["mfe_pct"] = max(pos.get("mfe_pct", 0.0), (pos["best_price"] - pos["entry_price"]) / pos["entry_price"] * 100)
@@ -615,9 +620,10 @@ def evaluate_open_position(
     else:
         pos["best_price"] = min(float(pos["best_price"]), price)
         if (not pos["partial_taken"]) and price <= float(pos["partial_target"]):
-            pos["partial_taken"] = True
             pos = _apply_short_profit_protection(pos)
-            return {"action": "partial", "position": pos, "reason": "partial_target_hit"}
+            if _partial_take_profit_enabled():
+                pos["partial_taken"] = True
+                return {"action": "partial", "position": pos, "reason": "partial_target_hit"}
 
         # Registra métricas para análise
         pos["mfe_pct"] = max(pos.get("mfe_pct", 0.0), (pos["entry_price"] - pos["best_price"]) / pos["entry_price"] * 100)
@@ -625,7 +631,7 @@ def evaluate_open_position(
 
         # Ativa trailing se atingir o gatilho de lucro, mesmo sem parcial
         if price <= float(pos["trailing_trigger_price"]):
-            if not defer_profit_protection or bool(pos["partial_taken"]):
+            if not defer_profit_protection or bool(pos["partial_taken"]) or not _partial_take_profit_enabled():
                 pos = _apply_short_profit_protection(pos)
         if price >= float(pos["current_stop"]):
             exit_price = float(pos["current_stop"]) if exit_at_stop_price else price

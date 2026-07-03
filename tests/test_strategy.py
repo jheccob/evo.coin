@@ -1505,6 +1505,26 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(close_result["action"], "close")
         self.assertEqual(close_result["closed_position"]["reason"], "stop_or_trailing")
 
+    def test_long_position_without_partial_activates_protection_and_keeps_full_size(self):
+        position = create_position("buy", 100.0, 1, atr=1.0)
+        with mock.patch.object(config, "ENABLE_PARTIAL_TAKE_PROFIT", False, create=True):
+            result = evaluate_open_position(position, 101.0, 2)
+
+        self.assertEqual(result["action"], "hold")
+        self.assertFalse(result["position"]["partial_taken"])
+        self.assertTrue(result["position"]["break_even_active"])
+        self.assertGreater(result["position"]["current_stop"], position["entry_price"])
+
+    def test_short_position_without_partial_activates_protection_and_keeps_full_size(self):
+        position = create_position("sell", 100.0, 1, atr=1.0)
+        with mock.patch.object(config, "ENABLE_PARTIAL_TAKE_PROFIT", False, create=True):
+            result = evaluate_open_position(position, 98.0, 2)
+
+        self.assertEqual(result["action"], "hold")
+        self.assertFalse(result["position"]["partial_taken"])
+        self.assertTrue(result["position"]["break_even_active"])
+        self.assertLess(result["position"]["current_stop"], position["entry_price"])
+
     def test_trend_resume_short_ignores_intrabar_wick_for_profit_protection(self):
         with (
             mock.patch.object(config, "ENFORCE_MIN_RISK_REWARD_RATIO", False),

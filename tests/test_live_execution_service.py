@@ -155,7 +155,7 @@ class LiveExecutionServiceTests(unittest.TestCase):
         sweep_orders.assert_not_called()
         submit_stop.assert_not_called()
 
-    def test_replace_stop_market_order_blocks_when_previous_order_is_unknown(self):
+    def test_replace_stop_market_order_replaces_when_previous_order_is_stale(self):
         call_order = []
 
         with (
@@ -167,7 +167,43 @@ class LiveExecutionServiceTests(unittest.TestCase):
             mock.patch.object(
                 self.service,
                 "cancel_open_stop_market_orders",
-                side_effect=lambda **kwargs: call_order.append("sweep_stale") or {"ok": True, "cancelled": 3},
+                side_effect=lambda **kwargs: call_order.append("sweep_stale") or {"ok": True, "cancelled": 0},
+            ),
+            mock.patch.object(
+                self.service,
+                "submit_stop_market_order",
+                side_effect=lambda **kwargs: call_order.append("submit_new") or {"ok": True, "exchange_order_id": "stop-2"},
+            ),
+        ):
+            result = self.service.replace_stop_market_order(
+                context=self.context,
+                symbol="BTC/USDT",
+                side="sell",
+                stop_price=61000.0,
+                quantity=0.001,
+                previous_order_id="missing-stop",
+                testnet=True,
+            )
+
+        self.assertEqual(result["exchange_order_id"], "stop-2")
+        self.assertEqual(result["previous_order_id"], "missing-stop")
+        self.assertIn("Unknown order", result["previous_cancel_error"])
+        self.assertEqual(call_order, ["sweep_stale", "submit_new"])
+
+    def test_replace_stop_market_order_blocks_unknown_previous_when_sweep_unavailable(self):
+        call_order = []
+
+        with (
+            mock.patch.object(
+                self.service,
+                "cancel_order",
+                side_effect=RuntimeError('binanceusdm {"code":-2011,"msg":"Unknown order sent."}'),
+            ),
+            mock.patch.object(
+                self.service,
+                "cancel_open_stop_market_orders",
+                side_effect=lambda **kwargs: call_order.append("sweep_stale")
+                or {"ok": True, "cancelled": 0, "skipped": "fetch_open_orders_unavailable"},
             ),
             mock.patch.object(
                 self.service,

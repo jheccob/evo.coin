@@ -1113,7 +1113,13 @@ class LiveExecutionService:
             side=side,
             testnet=testnet,
         )
-        if resolved_previous_order_id and cancel_error and self._is_unknown_order_text(cancel_error):
+        sweep_unavailable = bool(sweep_result.get("skipped"))
+        if (
+            resolved_previous_order_id
+            and cancel_error
+            and self._is_unknown_order_text(cancel_error)
+            and sweep_unavailable
+        ):
             raise RuntimeError(
                 "Substituicao de stop bloqueada: a exchange nao confirmou cancelamento "
                 f"do stop anterior {resolved_previous_order_id}. Nenhum novo stop foi enviado."
