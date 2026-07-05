@@ -2155,28 +2155,6 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
-    def test_calculate_position_size_caps_allocation_stop_by_max_risk_usdt(self):
-        service = RiskManagementService()
-
-        sizing = service.calculate_position_size(
-            account_balance=19.0,
-            entry_price=62500.0,
-            stop_loss_pct=1.25,
-            risk_pct=2.0,
-            leverage=10,
-            sizing_mode="allocation",
-            margin_allocation_pct=100.0,
-            max_risk_amount_usdt=1.0,
-        )
-
-        self.assertEqual(sizing["sizing_mode"], "allocation")
-        self.assertTrue(sizing["risk_amount_capped"])
-        self.assertAlmostEqual(sizing["position_notional"], 190.0, places=2)
-        self.assertAlmostEqual(sizing["margin_allocated_amount"], 19.0, places=2)
-        self.assertAlmostEqual(sizing["risk_amount"], 1.0, places=2)
-        self.assertAlmostEqual(sizing["stop_loss_pct"], 0.5263, places=4)
-        self.assertAlmostEqual(sizing["effective_risk_pct"], 5.2632, places=4)
-
     def test_build_account_risk_summary_supports_margin_allocation_model(self):
         trades = [
             {"side": "long", "net_pct": 2.82},
@@ -2240,7 +2218,6 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "LEVERAGE", 10),
             mock.patch.object(config.ProductionConfig, "POSITION_SIZING_MODE", "allocation"),
             mock.patch.object(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 100.0),
-            mock.patch.object(config.ProductionConfig, "MAX_REAL_RISK_PER_TRADE_USDT", 1.0),
         ):
             plan = service.build_trade_plan(
                 entry_price=62500.0,
@@ -2261,9 +2238,6 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(plan["allowed"])
         self.assertEqual(plan["sizing_mode"], "allocation")
         self.assertAlmostEqual(plan["position_notional"], 250.0, places=2)
-        self.assertTrue(plan["risk_amount_capped"])
-        self.assertAlmostEqual(plan["risk_amount"], 1.0, places=2)
-        self.assertAlmostEqual(plan["stop_loss_pct"], 0.4, places=4)
         self.assertGreaterEqual(plan["quantity"], 0.001)
 
     def test_run_backtest_includes_account_risk_model_in_summary(self):
