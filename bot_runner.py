@@ -454,6 +454,24 @@ def _resolve_runtime_position_stop_pct(position: dict | None) -> float:
     return abs(entry_price - stop_price) / entry_price * 100
 
 
+def _apply_runtime_position_stop_pct(position: dict, stop_loss_pct: float) -> dict:
+    adjusted = dict(position or {})
+    entry_price = float(adjusted.get("entry_price") or 0.0)
+    resolved_stop_loss_pct = max(float(stop_loss_pct or 0.0), 0.0)
+    if entry_price <= 0 or resolved_stop_loss_pct <= 0:
+        return adjusted
+    stop_distance = entry_price * (resolved_stop_loss_pct / 100.0)
+    side = str(adjusted.get("side") or "").strip().lower()
+    if side == "short":
+        stop_price = entry_price + stop_distance
+    else:
+        stop_price = entry_price - stop_distance
+    adjusted["initial_stop"] = float(stop_price)
+    adjusted["current_stop"] = float(stop_price)
+    adjusted["stop_loss_pct"] = float(resolved_stop_loss_pct)
+    return adjusted
+
+
 def _finalize_runtime_managed_trade(position_before_close: dict, closed_trade: dict, realized_partial_pct: float) -> dict:
     trade = dict(closed_trade)
     cumulative_realized_partial = float(realized_partial_pct or 0.0)
@@ -870,6 +888,12 @@ def _build_live_entry_plan(
             "balance_snapshot": balance_snapshot,
             "risk_data": risk_data,
         }
+
+    capped_sl_pct = float(risk_data.get("stop_loss_pct") or sl_pct or 0.0)
+    if capped_sl_pct > 0 and abs(capped_sl_pct - sl_pct) > 1e-9:
+        preview_position = _apply_runtime_position_stop_pct(preview_position, capped_sl_pct)
+        stop_loss_price = float(preview_position.get("current_stop") or stop_loss_price or 0.0)
+        sl_pct = capped_sl_pct
 
     quantity = float(risk_data.get("quantity", 0.0) or 0.0)
     if quantity <= 0:
@@ -2881,6 +2905,9 @@ def _process_closed_candle(
                     execution_profile=position_execution_profile,
                     signal_result=resultado,
                 )
+                live_stop_loss_pct = float(live_plan.get("stop_loss_pct") or 0.0)
+                if live_stop_loss_pct > 0:
+                    posicao_atual = _apply_runtime_position_stop_pct(posicao_atual, live_stop_loss_pct)
                 posicao_atual.update(
                     {
                         "quantity": float(
@@ -2889,6 +2916,9 @@ def _process_closed_candle(
                         "account_reference_balance": float(live_plan.get("account_balance", 0.0) or 0.0),
                         "planned_position_notional": float(live_plan.get("position_notional", 0.0) or 0.0),
                         "risk_amount": float(live_plan.get("risk_amount", 0.0) or 0.0),
+                        "original_stop_loss_pct": live_plan.get("original_stop_loss_pct"),
+                        "max_risk_amount_usdt": live_plan.get("max_risk_amount_usdt"),
+                        "risk_amount_capped": bool(live_plan.get("risk_amount_capped", False)),
                         "execution_mode": "live",
                         "execution_profile": position_execution_profile,
                         "strategy_version": runtime_snapshot.get("strategy_version"),

@@ -36,14 +36,17 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        max_risk_amount_usdt: Optional[float] = None,
     ) -> Dict[str, float]:
         normalized_stop_loss_pct = self._normalize_pct(stop_loss_pct)
+        original_stop_loss_pct = normalized_stop_loss_pct
         resolved_balance = float(account_balance or 0.0)
         resolved_entry = float(entry_price or 0.0)
         resolved_risk_pct = max(float(risk_pct or 0.0), 0.0)
         resolved_leverage = max(float(leverage or 1.0), 1.0)
         resolved_sizing_mode = self._normalize_sizing_mode(sizing_mode)
         requested_margin_allocation_pct = max(float(margin_allocation_pct or 0.0), 0.0)
+        resolved_max_risk_amount_usdt = max(float(max_risk_amount_usdt or 0.0), 0.0)
 
         mode_requires_risk_pct = resolved_sizing_mode == "risk"
         if (
@@ -68,16 +71,26 @@ class RiskManagementService:
                 "margin_allocated_amount_raw": 0.0,
                 "effective_risk_pct": 0.0,
                 "requested_risk_pct": round(resolved_risk_pct, 4),
+                "max_risk_amount_usdt": round(resolved_max_risk_amount_usdt, 2),
+                "risk_amount_capped": False,
             }
 
+        risk_amount_capped = False
         if resolved_sizing_mode == "allocation":
             margin_allocated_amount = resolved_balance * (requested_margin_allocation_pct / 100.0)
             position_notional = margin_allocated_amount * resolved_leverage
             risk_amount = position_notional * normalized_stop_loss_pct
+            if resolved_max_risk_amount_usdt > 0 and position_notional > 0 and risk_amount > resolved_max_risk_amount_usdt:
+                normalized_stop_loss_pct = resolved_max_risk_amount_usdt / position_notional
+                risk_amount = position_notional * normalized_stop_loss_pct
+                risk_amount_capped = True
             effective_risk_pct = (risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             resolved_margin_allocation_pct = requested_margin_allocation_pct
         elif resolved_sizing_mode == "hybrid":
             risk_amount_target = resolved_balance * (resolved_risk_pct / 100.0)
+            if resolved_max_risk_amount_usdt > 0 and risk_amount_target > resolved_max_risk_amount_usdt:
+                risk_amount_target = resolved_max_risk_amount_usdt
+                risk_amount_capped = True
             risk_based_notional = risk_amount_target / normalized_stop_loss_pct
             allocation_capped_margin = resolved_balance * (requested_margin_allocation_pct / 100.0)
             allocation_capped_notional = allocation_capped_margin * resolved_leverage
@@ -90,9 +103,12 @@ class RiskManagementService:
             )
         else:
             risk_amount = resolved_balance * (resolved_risk_pct / 100.0)
+            if resolved_max_risk_amount_usdt > 0 and risk_amount > resolved_max_risk_amount_usdt:
+                risk_amount = resolved_max_risk_amount_usdt
+                risk_amount_capped = True
             position_notional = risk_amount / normalized_stop_loss_pct
             margin_allocated_amount = position_notional / resolved_leverage if resolved_leverage > 0 else position_notional
-            effective_risk_pct = resolved_risk_pct
+            effective_risk_pct = (risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             resolved_margin_allocation_pct = (
                 (margin_allocated_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             )
@@ -115,6 +131,9 @@ class RiskManagementService:
             "margin_allocated_amount_raw": float(margin_allocated_amount),
             "effective_risk_pct": round(effective_risk_pct, 4),
             "requested_risk_pct": round(resolved_risk_pct, 4),
+            "max_risk_amount_usdt": round(resolved_max_risk_amount_usdt, 2),
+            "risk_amount_capped": bool(risk_amount_capped),
+            "original_stop_loss_pct": round(original_stop_loss_pct * 100, 4),
         }
 
     def evaluate_symbol_operability(
@@ -158,7 +177,6 @@ class RiskManagementService:
             ),
             0.0,
         )
-
         rounded_quantity = resolved_quantity
         if qty_step > 0:
             rounded_quantity = math.floor((resolved_quantity + 1e-12) / qty_step) * qty_step
@@ -291,6 +309,11 @@ class RiskManagementService:
                 or 0.0
             ),
             0.0,
+        )
+        resolved_max_risk_amount_usdt = (
+            max(float(getattr(ProductionConfig, "MAX_REAL_RISK_PER_TRADE_USDT", 0.0) or 0.0), 0.0)
+            if resolved_execution_scope == "live"
+            else 0.0
         )
 
         normalized_stop_loss_pct = self._normalize_pct(stop_loss_pct)
@@ -582,6 +605,7 @@ class RiskManagementService:
             leverage=resolved_leverage,
             sizing_mode=resolved_position_sizing_mode,
             margin_allocation_pct=resolved_margin_allocation_pct,
+            max_risk_amount_usdt=resolved_max_risk_amount_usdt,
         )
 
         if sizing["quantity"] <= 0 or sizing["position_notional"] <= 0:
@@ -597,6 +621,13 @@ class RiskManagementService:
             )
 
         risk_reason = notes[0] if notes else ""
+        if bool(sizing.get("risk_amount_capped")):
+            size_reduced = True
+            if not risk_reason:
+                risk_reason = "Risco maximo por trade em USDT aplicado."
+            notes.append(
+                "Stop/risk ajustado para respeitar o limite maximo de perda por trade em USDT."
+            )
         return {
             "risk_permission": True,
             "risk_status": risk_status,
@@ -614,10 +645,13 @@ class RiskManagementService:
             "risk_amount": sizing["risk_amount"],
             "stop_loss_pct": sizing["stop_loss_pct"],
             "stop_loss_price": sizing["stop_loss_price"],
+            "original_stop_loss_pct": sizing.get("original_stop_loss_pct"),
             "sizing_mode": sizing["sizing_mode"],
             "leverage": sizing["leverage"],
             "margin_allocation_pct": sizing["margin_allocation_pct"],
             "margin_allocated_amount": sizing["margin_allocated_amount"],
+            "max_risk_amount_usdt": sizing.get("max_risk_amount_usdt"),
+            "risk_amount_capped": bool(sizing.get("risk_amount_capped")),
             "effective_risk_pct": sizing["effective_risk_pct"],
             "position_notional": sizing["position_notional"],
             "quantity": sizing["quantity"],
