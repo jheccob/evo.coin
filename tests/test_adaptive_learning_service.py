@@ -10,6 +10,7 @@ class FakeLearningDatabase:
         self.payload = initial
         self.fail_save = fail_save
         self.saved = []
+        self.reset_keys = []
 
     def get_ai_learning_memory(self, memory_key):
         return self.payload
@@ -20,6 +21,11 @@ class FakeLearningDatabase:
         self.saved.append((memory_key, payload))
         self.payload = payload
         return True
+
+    def reset_ai_learning_memory(self, memory_key=None):
+        self.reset_keys.append(memory_key)
+        self.payload = None
+        return 1
 
 
 class AdaptiveLearningServiceTests(unittest.TestCase):
@@ -98,6 +104,20 @@ class AdaptiveLearningServiceTests(unittest.TestCase):
 
             self.assertTrue(path.exists())
             self.assertIn("trend_resume_long", path.read_text(encoding="utf-8"))
+
+    def test_reset_clears_database_memory(self):
+        database = FakeLearningDatabase({"updated_at_utc": "old", "stats": {"x": {"trades": 1}}})
+        service = AdaptiveLearningService(
+            "unused.json",
+            database=database,
+            memory_key="BTC/USDT|15m",
+            min_trades=1,
+        )
+
+        service.reset()
+
+        self.assertEqual(database.reset_keys, ["BTC/USDT|15m"])
+        self.assertEqual(service.state, {"updated_at_utc": None, "stats": {}})
 
 
 if __name__ == "__main__":

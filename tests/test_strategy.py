@@ -186,11 +186,187 @@ class StrategyTests(unittest.TestCase):
             df.loc[idx, "volume"] = volume
         return df
 
+    @staticmethod
+    def _build_reversal_rebound_df(final_volume: float = 2500.0, final_adx: float = 38.0) -> pd.DataFrame:
+        rows = []
+        for i in range(260):
+            close_price = 103.0 - (i * 0.012)
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp("2026-07-06 00:00:00+00:00") + pd.Timedelta(minutes=15 * i),
+                    "open": close_price + 0.05,
+                    "high": close_price + 0.35,
+                    "low": close_price - 0.35,
+                    "close": close_price,
+                    "volume": 1000.0,
+                    "ema_fast": 100.5,
+                    "ema_slow": 101.0,
+                    "ema_trend": 102.0,
+                    "rsi": 38.0,
+                    "adx": 34.0,
+                    "vol_ma": 1000.0,
+                    "atr": 0.6,
+                    "atr_pct": 0.6,
+                    "macd": -0.8,
+                    "macd_signal": -0.4,
+                    "macd_hist": -0.4,
+                    "is_closed": True,
+                }
+            )
+        tail_rows = {
+            252: (99.6, 100.4, 98.8, 99.0, 1300.0, 34.0, -0.52),
+            253: (99.0, 99.4, 97.4, 97.8, 1600.0, 30.0, -0.62),
+            254: (97.8, 98.0, 96.0, 96.4, 2100.0, 26.0, -0.78),
+            255: (96.4, 97.1, 96.1, 96.8, 1800.0, 33.0, -0.70),
+            256: (96.8, 97.9, 96.6, 97.5, 1900.0, 40.0, -0.58),
+            257: (97.5, 98.8, 97.2, 98.4, 2100.0, 48.0, -0.44),
+            258: (98.4, 99.2, 98.0, 98.8, 2200.0, 54.0, -0.34),
+            259: (98.8, 100.0, 98.8, 99.6, final_volume, 62.0, -0.18),
+        }
+        for idx, (open_price, high_price, low_price, close_price, volume, rsi, macd_hist) in tail_rows.items():
+            rows[idx].update(
+                {
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                    "rsi": rsi,
+                    "adx": final_adx if idx == 259 else rows[idx]["adx"],
+                    "macd_hist": macd_hist,
+                }
+            )
+        return pd.DataFrame(rows).set_index("timestamp")
+
+    @staticmethod
+    def _build_short_reversal_rejection_df(final_volume: float = 2500.0, final_rsi: float = 48.0, final_adx: float = 38.0) -> pd.DataFrame:
+        rows = []
+        for i in range(260):
+            close_price = 97.0 + (i * 0.012)
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp("2026-07-06 00:00:00+00:00") + pd.Timedelta(minutes=15 * i),
+                    "open": close_price - 0.05,
+                    "high": close_price + 0.35,
+                    "low": close_price - 0.35,
+                    "close": close_price,
+                    "volume": 1000.0,
+                    "ema_fast": 99.5,
+                    "ema_slow": 99.0,
+                    "ema_trend": 98.0,
+                    "rsi": 62.0,
+                    "adx": 34.0,
+                    "vol_ma": 1000.0,
+                    "atr": 0.6,
+                    "atr_pct": 0.6,
+                    "macd": 0.8,
+                    "macd_signal": 0.4,
+                    "macd_hist": 0.4,
+                    "is_closed": True,
+                }
+            )
+        tail_rows = {
+            252: (100.4, 101.2, 100.0, 101.0, 1300.0, 66.0, 0.52),
+            253: (101.0, 102.6, 100.8, 102.2, 1600.0, 70.0, 0.62),
+            254: (102.2, 104.0, 102.0, 103.6, 2100.0, 72.0, 0.78),
+            255: (103.6, 103.9, 102.9, 103.2, 1800.0, 65.0, 0.70),
+            256: (103.2, 103.4, 102.1, 102.5, 1900.0, 58.0, 0.58),
+            257: (102.5, 102.8, 101.2, 101.6, 2100.0, 52.0, 0.44),
+            258: (101.6, 102.0, 100.8, 101.2, 2200.0, 50.0, 0.34),
+            259: (101.2, 101.2, 100.0, 100.4, final_volume, final_rsi, 0.18),
+        }
+        for idx, (open_price, high_price, low_price, close_price, volume, rsi, macd_hist) in tail_rows.items():
+            rows[idx].update(
+                {
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                    "rsi": rsi,
+                    "adx": final_adx if idx == 259 else rows[idx]["adx"],
+                    "macd_hist": macd_hist,
+                }
+            )
+        return pd.DataFrame(rows).set_index("timestamp")
+
     def test_prepare_candle_features_adds_expected_columns(self):
         df = self._build_trend_df(start_price=100.0, step=1.0, length=80)
         features = prepare_candle_features(df)
         expected = {"ema_fast", "ema_slow", "ema_trend", "rsi", "atr", "atr_pct", "is_closed"}
         self.assertTrue(expected.issubset(set(features.columns)))
+
+    def test_generate_entry_signal_catches_strong_long_reversal_rebound(self):
+        df = self._build_reversal_rebound_df(final_volume=2500.0)
+
+        with (
+            mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "reversal_rebound_long")
+        self.assertIn("reversal_rebound_long_score", result["reason"])
+
+    def test_long_reversal_rebound_requires_volume_confirmation(self):
+        df = self._build_reversal_rebound_df(final_volume=900.0)
+
+        with mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "reversal_rebound_long")
+
+    def test_long_reversal_rebound_blocks_high_rsi_without_adx_confirmation(self):
+        df = self._build_reversal_rebound_df(final_volume=2500.0, final_adx=24.0)
+
+        with mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "reversal_rebound_long")
+
+    def test_generate_entry_signal_catches_strong_short_reversal_rejection(self):
+        df = self._build_short_reversal_rejection_df(final_volume=2500.0)
+
+        with (
+            mock.patch.object(config, "ENABLE_SHORT_REVERSAL_REJECTION", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "sell")
+        self.assertEqual(result["setup"]["setup"], "reversal_rejection_short")
+        self.assertIn("reversal_rejection_short_score", result["reason"])
+
+    def test_short_reversal_rejection_requires_volume_confirmation(self):
+        df = self._build_short_reversal_rejection_df(final_volume=900.0)
+
+        with mock.patch.object(config, "ENABLE_SHORT_REVERSAL_REJECTION", True):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "reversal_rejection_short")
+
+    def test_short_reversal_rejection_blocks_low_rsi_without_adx_confirmation(self):
+        df = self._build_short_reversal_rejection_df(final_volume=2500.0, final_rsi=38.0, final_adx=24.0)
+
+        with mock.patch.object(config, "ENABLE_SHORT_REVERSAL_REJECTION", True):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "reversal_rejection_short")
+
+    def test_short_reversal_rejection_blocks_configured_bad_hour(self):
+        df = self._build_short_reversal_rejection_df(final_volume=2500.0)
+        df = df.copy()
+        shifted_index = list(df.index[:-1]) + [pd.Timestamp("2026-07-06 14:45:00+00:00")]
+        df.index = pd.DatetimeIndex(shifted_index)
+
+        with (
+            mock.patch.object(config, "ENABLE_SHORT_REVERSAL_REJECTION", True),
+            mock.patch.object(config, "SHORT_REVERSAL_BLOCKED_ENTRY_HOURS_UTC", [14], create=True),
+        ):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "reversal_rejection_short")
 
     def test_analyze_prepared_candle_hold_when_data_is_insufficient(self):
         df = pd.DataFrame(
@@ -3085,12 +3261,14 @@ class StrategyTests(unittest.TestCase):
             with mock.patch.object(config, "SINGLE_USER_RUNTIME_ACCOUNT_ID", "env-main"):
                 with mock.patch.object(config, "SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "Conta Runner"):
                     with mock.patch.object(config, "SINGLE_USER_RUNTIME_EXCHANGE", "binanceusdm"):
-                        context = bot_runner._build_single_user_execution_context()
+                        with mock.patch.object(config, "TESTNET", True):
+                            context = bot_runner._build_single_user_execution_context()
 
         self.assertEqual(context["user_id"], 9)
-        self.assertEqual(context["account_id"], "env-main")
+        self.assertEqual(context["account_id"], "env-main-testnet")
         self.assertEqual(context["account_alias"], "Conta Runner")
         self.assertEqual(context["exchange_name"], "binanceusdm")
+        self.assertTrue(context["paper_enabled"])
         self.assertTrue(context["use_env_credentials"])
 
     def test_prepare_live_execution_runtime_clears_stale_local_position_when_exchange_has_none(self):

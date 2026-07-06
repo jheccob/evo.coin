@@ -4046,6 +4046,177 @@ def build_strategy_evaluation_display_df(evaluations):
     return pd.DataFrame(rows)
 
 
+def _parse_ai_learning_stat_key(stat_key: str) -> dict:
+    parts = str(stat_key or "").split("|")
+    return {
+        "symbol": parts[0] if len(parts) > 0 else "",
+        "timeframe": parts[1] if len(parts) > 1 else "",
+        "side": parts[2] if len(parts) > 2 else "",
+        "setup": parts[3] if len(parts) > 3 else "",
+    }
+
+
+def build_ai_learning_memory_display_df(memories):
+    rows = []
+    for memory in memories or []:
+        memory_key = str(memory.get("memory_key") or "")
+        payload = memory.get("payload") or {}
+        memory_updated_at = payload.get("updated_at_utc") or memory.get("updated_at") or ""
+        stats = payload.get("stats") or {}
+        if not isinstance(stats, dict):
+            continue
+        for stat_key, stat_payload in stats.items():
+            stat = stat_payload if isinstance(stat_payload, dict) else {}
+            parsed = _parse_ai_learning_stat_key(stat_key)
+            trades = int(stat.get("trades", 0) or 0)
+            wins = int(stat.get("wins", 0) or 0)
+            losses = int(stat.get("losses", 0) or 0)
+            net_sum_pct = float(stat.get("net_sum_pct", 0.0) or 0.0)
+            avg_net_pct = float(stat.get("avg_net_pct", 0.0) or 0.0)
+            win_rate_pct = float(stat.get("win_rate_pct", 0.0) or 0.0)
+            cooldown_remaining = int(stat.get("cooldown_remaining", 0) or 0)
+            consecutive_losses = int(stat.get("consecutive_losses", 0) or 0)
+            recent_profit_factor = float(stat.get("recent_profit_factor", 0.0) or 0.0)
+            recent_avg_net_pct = float(stat.get("recent_avg_net_pct", 0.0) or 0.0)
+            rows.append(
+                {
+                    "Memória": memory_key,
+                    "Símbolo": parsed["symbol"],
+                    "Timeframe": parsed["timeframe"],
+                    "Lado": parsed["side"],
+                    "Setup": parsed["setup"],
+                    "Trades": trades,
+                    "Wins": wins,
+                    "Losses": losses,
+                    "Win rate %": round(win_rate_pct, 2),
+                    "Net soma %": round(net_sum_pct, 4),
+                    "Média %": round(avg_net_pct, 4),
+                    "PF recente": round(recent_profit_factor, 4),
+                    "Média recente %": round(recent_avg_net_pct, 4),
+                    "Loss seq.": consecutive_losses,
+                    "Cooldown": cooldown_remaining,
+                    "Atualizado": stat.get("updated_at_utc") or memory_updated_at,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_ai_learning_memory_admin_panel(database):
+    st.markdown("---")
+    st.subheader("🧠 Memória da IA")
+    st.caption(
+        "Memória operacional salva no banco do Railway. Ela registra desempenho por símbolo, timeframe, lado e setup "
+        "para ajustar viés e guardrails sem depender do navegador ou do PC."
+    )
+
+    if not hasattr(database, "list_ai_learning_memories"):
+        st.warning("Banco atual não expõe list_ai_learning_memories.")
+        return
+
+    try:
+        memories = database.list_ai_learning_memories()
+    except Exception as exc:
+        st.error(f"Falha ao carregar memória da IA: {exc}")
+        return
+
+    display_df = build_ai_learning_memory_display_df(memories)
+    total_memories = len(memories or [])
+    total_rows = len(display_df)
+    total_trades = int(display_df["Trades"].sum()) if total_rows and "Trades" in display_df else 0
+    weighted_win_rate = 0.0
+    if total_trades > 0 and "Wins" in display_df:
+        weighted_win_rate = float(display_df["Wins"].sum()) / total_trades * 100.0
+    net_sum_pct = float(display_df["Net soma %"].sum()) if total_rows and "Net soma %" in display_df else 0.0
+    blocked_rows = int((display_df["Cooldown"] > 0).sum()) if total_rows and "Cooldown" in display_df else 0
+
+    ai_col1, ai_col2, ai_col3, ai_col4, ai_col5 = st.columns(5)
+    with ai_col1:
+        st.metric("Memórias", total_memories)
+    with ai_col2:
+        st.metric("Linhas Setup", total_rows)
+    with ai_col3:
+        st.metric("Trades Aprendidos", total_trades)
+    with ai_col4:
+        st.metric("Win rate memória", f"{weighted_win_rate:.2f}%")
+    with ai_col5:
+        st.metric("Cooldowns", blocked_rows)
+
+    st.metric("Resultado técnico memorizado", f"{net_sum_pct:.4f}%")
+
+    if display_df.empty:
+        st.info("Ainda não há memória aprendida no banco. Ela aparece após operações fechadas pelo runtime.")
+    else:
+        side_filter = st.multiselect(
+            "Filtrar lado",
+            options=sorted([value for value in display_df["Lado"].dropna().unique().tolist() if value]),
+            default=[],
+            key="ai_memory_side_filter",
+        )
+        setup_filter = st.multiselect(
+            "Filtrar setup",
+            options=sorted([value for value in display_df["Setup"].dropna().unique().tolist() if value]),
+            default=[],
+            key="ai_memory_setup_filter",
+        )
+        filtered_df = display_df.copy()
+        if side_filter:
+            filtered_df = filtered_df[filtered_df["Lado"].isin(side_filter)]
+        if setup_filter:
+            filtered_df = filtered_df[filtered_df["Setup"].isin(setup_filter)]
+        st.dataframe(
+            filtered_df.sort_values(["Memória", "Trades", "Net soma %"], ascending=[True, False, False]),
+            width="stretch",
+            hide_index=True,
+        )
+
+        strong_df = display_df[(display_df["Trades"] > 0) & (display_df["Net soma %"] > 0)].copy()
+        weak_df = display_df[(display_df["Trades"] > 0) & (display_df["Net soma %"] <= 0)].copy()
+        strong_col, weak_col = st.columns(2)
+        with strong_col:
+            st.caption("Setups fortes")
+            if strong_df.empty:
+                st.info("Nenhum setup positivo ainda.")
+            else:
+                st.dataframe(
+                    strong_df.sort_values("Net soma %", ascending=False).head(10),
+                    width="stretch",
+                    hide_index=True,
+                )
+        with weak_col:
+            st.caption("Setups fracos / atenção")
+            if weak_df.empty:
+                st.success("Nenhum setup negativo na memória atual.")
+            else:
+                st.dataframe(
+                    weak_df.sort_values("Net soma %", ascending=True).head(10),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    memory_options = [str(item.get("memory_key") or "") for item in memories or [] if item.get("memory_key")]
+    with st.expander("Reset administrativo da memória", expanded=False):
+        st.warning(
+            "Resetar apaga o aprendizado operacional salvo no banco. Use apenas se a IA aprender um padrão errado."
+        )
+        selected_memory = st.selectbox(
+            "Memória para resetar",
+            options=[""] + memory_options,
+            format_func=lambda value: "Todas as memórias" if not value else value,
+            key="ai_memory_reset_key",
+        )
+        reset_col1, reset_col2 = st.columns(2)
+        with reset_col1:
+            if st.button("Resetar memória selecionada", key="reset_selected_ai_memory"):
+                try:
+                    deleted = database.reset_ai_learning_memory(selected_memory or None)
+                    st.success(f"Memória resetada. Registros removidos: {deleted}")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Falha ao resetar memória: {exc}")
+        with reset_col2:
+            st.caption("Para reset total, deixe a seleção em 'Todas as memórias'.")
+
+
 def build_backtest_robustness_matrix_display_df(rows):
     if not rows:
         return pd.DataFrame()
@@ -11191,7 +11362,7 @@ def main():
 
             admin_view_mode = st.radio(
                 "Visão Admin",
-                options=["Resumo", "Acessos", "Contas", "Usuários", "Bots"],
+                options=["Resumo", "Acessos", "Contas", "Usuários", "Bots", "IA"],
                 horizontal=True,
                 key="admin_view_mode",
                 help="Renderização otimizada: o painel administrativo monta apenas o grupo selecionado.",
@@ -11201,6 +11372,7 @@ def main():
             admin_show_accounts = admin_view_mode == "Contas"
             admin_show_users = admin_view_mode == "Usuários"
             admin_show_bots = admin_view_mode == "Bots"
+            admin_show_ai = admin_view_mode == "IA"
             st.caption("Modo leve do admin: carregue apenas a área que você quer operar nesta sessão.")
 
             vault = None
@@ -12013,6 +12185,9 @@ def main():
                     )
                 else:
                     st.info("Nenhum snapshot encontrado em strategy_evaluations.")
+
+            if admin_show_ai:
+                render_ai_learning_memory_admin_panel(db)
 
             if admin_show_users:
                 st.markdown("---")

@@ -168,6 +168,24 @@ def _resolve_managed_position_profile(
         )
         default_use_fixed_stop = bool(getattr(config, "MARKET_READING_LONG_USE_FIXED_STOP", False))
         resolved_management_profile = str(management_profile or "market_reading_long")
+    elif side == "long" and resolved_setup == "reversal_rebound_long":
+        default_stop_loss_pct = float(
+            getattr(config, "LONG_REVERSAL_STOP_LOSS_PCT", default_stop_loss_pct) or default_stop_loss_pct
+        )
+        default_partial_target_pct = float(
+            getattr(config, "LONG_REVERSAL_PARTIAL_TARGET_PCT", default_partial_target_pct)
+            or default_partial_target_pct
+        )
+        default_trailing_trigger_pct = float(
+            getattr(config, "LONG_REVERSAL_TRAILING_TRIGGER_PCT", default_trailing_trigger_pct)
+            or default_trailing_trigger_pct
+        )
+        default_trailing_stop_pct = float(
+            getattr(config, "LONG_REVERSAL_TRAILING_STOP_PCT", default_trailing_stop_pct)
+            or default_trailing_stop_pct
+        )
+        default_use_fixed_stop = bool(getattr(config, "LONG_REVERSAL_USE_FIXED_STOP", False))
+        resolved_management_profile = str(management_profile or "reversal_rebound_long")
     elif side == "short" and resolved_setup == "trend_resume_short":
         default_stop_loss_pct = float(
             getattr(config, "TREND_RESUME_SHORT_STOP_LOSS_PCT", default_stop_loss_pct) or default_stop_loss_pct
@@ -222,6 +240,24 @@ def _resolve_managed_position_profile(
         )
         default_use_fixed_stop = bool(getattr(config, "RELIEF_RALLY_SHORT_USE_FIXED_STOP", False))
         resolved_management_profile = str(management_profile or "relief_rally_short")
+    elif side == "short" and resolved_setup == "reversal_rejection_short":
+        default_stop_loss_pct = float(
+            getattr(config, "SHORT_REVERSAL_STOP_LOSS_PCT", default_stop_loss_pct) or default_stop_loss_pct
+        )
+        default_partial_target_pct = float(
+            getattr(config, "SHORT_REVERSAL_PARTIAL_TARGET_PCT", default_partial_target_pct)
+            or default_partial_target_pct
+        )
+        default_trailing_trigger_pct = float(
+            getattr(config, "SHORT_REVERSAL_TRAILING_TRIGGER_PCT", default_trailing_trigger_pct)
+            or default_trailing_trigger_pct
+        )
+        default_trailing_stop_pct = float(
+            getattr(config, "SHORT_REVERSAL_TRAILING_STOP_PCT", default_trailing_stop_pct)
+            or default_trailing_stop_pct
+        )
+        default_use_fixed_stop = bool(getattr(config, "SHORT_REVERSAL_USE_FIXED_STOP", False))
+        resolved_management_profile = str(management_profile or "reversal_rejection_short")
     elif side == "short" and resolved_setup == "market_reading_short":
         default_stop_loss_pct = float(
             getattr(config, "MARKET_READING_SHORT_STOP_LOSS_PCT", default_stop_loss_pct) or default_stop_loss_pct

@@ -104,6 +104,11 @@ class AdaptiveLearningService:
 
     def reset(self) -> None:
         self.state = {"updated_at_utc": None, "stats": {}}
+        if self.database is not None and hasattr(self.database, "reset_ai_learning_memory"):
+            try:
+                self.database.reset_ai_learning_memory(self.memory_key)
+            except Exception:
+                pass
         if self.path.exists():
             try:
                 self.path.unlink()

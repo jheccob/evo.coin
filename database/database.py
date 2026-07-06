@@ -6532,6 +6532,59 @@ class TradingDatabase:
             return None
         return payload if isinstance(payload, dict) else None
 
+    def list_ai_learning_memories(self) -> List[Dict[str, Any]]:
+        """Return all adaptive AI learning memories stored in settings."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                SELECT key, value, updated_at
+                FROM settings
+                WHERE key LIKE ?
+                ORDER BY updated_at DESC
+                ''',
+                ("ai_learning_memory:%",),
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+
+        memories: List[Dict[str, Any]] = []
+        for row in rows or []:
+            row_dict = dict(row)
+            raw_key = str(row_dict.get("key") or "")
+            memory_key = raw_key.replace("ai_learning_memory:", "", 1)
+            try:
+                payload = json.loads(row_dict.get("value") or "{}")
+            except Exception:
+                payload = {}
+            memories.append(
+                {
+                    "memory_key": memory_key,
+                    "storage_key": raw_key,
+                    "updated_at": row_dict.get("updated_at"),
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+            )
+        return memories
+
+    def reset_ai_learning_memory(self, memory_key: Optional[str] = None) -> int:
+        """Delete one AI learning memory or every adaptive memory when no key is provided."""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            if memory_key:
+                resolved_key = f"ai_learning_memory:{str(memory_key or 'default').strip() or 'default'}"
+                cursor.execute("DELETE FROM settings WHERE key = ?", (resolved_key,))
+            else:
+                cursor.execute("DELETE FROM settings WHERE key LIKE ?", ("ai_learning_memory:%",))
+            deleted_count = int(cursor.rowcount or 0)
+            conn.commit()
+            return deleted_count
+        finally:
+            conn.close()
+
     def save_analysis(self, symbol: str, timeframe: str, analysis_data: Dict):
         """Salvar dados de análise"""
         conn = self.get_connection()

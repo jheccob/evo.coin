@@ -185,6 +185,183 @@ def detect_market_regime(df: pd.DataFrame, params: StrategyParams, index: int = 
     }
 
 
+def _detect_long_reversal_rebound(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Optional[Dict[str, object]]:
+    if not bool(getattr(config, "ENABLE_LONG_REVERSAL_REBOUND", True)):
+        return None
+
+    effective_index = len(df) + index if index < 0 else index
+    if effective_index <= 0:
+        return None
+
+    lookback = max(int(getattr(config, "LONG_REVERSAL_LOOKBACK_CANDLES", 12) or 12), 3)
+    start_index = max(effective_index - lookback, 0)
+    window = df.iloc[start_index : effective_index + 1]
+    if len(window) < 3:
+        return None
+
+    row = df.iloc[effective_index]
+    prev = df.iloc[effective_index - 1]
+    recent_high = float(window["high"].max())
+    recent_low = float(window["low"].min())
+    current_close = float(row["close"])
+    if recent_high <= 0 or recent_low <= 0 or current_close <= 0:
+        return None
+
+    drop_pct = (recent_high - recent_low) / recent_high * 100
+    bounce_from_low_pct = (current_close - recent_low) / recent_low * 100
+    candle_state = _resolve_candle_state(row, prev)
+    volume_ma = row.get("vol_ma")
+    if pd.isna(volume_ma) or float(volume_ma or 0.0) <= 0:
+        volume_ratio = 0.0
+    else:
+        volume_ratio = float(row.get("volume", 0.0) or 0.0) / float(volume_ma)
+
+    rsi_value = float(row.get("rsi", 0.0) or 0.0)
+    prev_rsi = float(prev.get("rsi", rsi_value) or rsi_value)
+    adx_value = float(row.get("adx", 0.0) or 0.0)
+    macd_hist = float(row.get("macd_hist", 0.0) or 0.0)
+    prev_macd_hist = float(prev.get("macd_hist", macd_hist) or macd_hist)
+    macd_improving = bool(macd_hist > prev_macd_hist)
+    reclaim_fast = bool(current_close >= float(row["ema_fast"]))
+    breakout_reclaim = bool(current_close > float(prev["high"]) * 1.001)
+    bullish_reaction = bool(candle_state["bullish_close"] and candle_state["close_position"] >= 0.5)
+
+    min_drop_pct = float(getattr(config, "LONG_REVERSAL_MIN_DROP_PCT", 2.2) or 2.2)
+    min_bounce_pct = float(getattr(config, "LONG_REVERSAL_MIN_BOUNCE_FROM_LOW_PCT", 1.2) or 1.2)
+    max_bounce_pct = float(getattr(config, "LONG_REVERSAL_MAX_BOUNCE_FROM_LOW_PCT", 5.8) or 5.8)
+    min_close_position = float(getattr(config, "LONG_REVERSAL_MIN_CLOSE_POSITION", 0.55) or 0.55)
+    min_volume_ratio = float(getattr(config, "LONG_REVERSAL_MIN_VOLUME_RATIO", 1.15) or 1.15)
+    min_rsi = float(getattr(config, "LONG_REVERSAL_MIN_RSI", 42.0) or 42.0)
+    max_rsi = float(getattr(config, "LONG_REVERSAL_MAX_RSI", 68.0) or 68.0)
+    high_rsi_threshold = float(getattr(config, "LONG_REVERSAL_HIGH_RSI_THRESHOLD", 58.0) or 58.0)
+    high_rsi_min_adx = float(getattr(config, "LONG_REVERSAL_HIGH_RSI_MIN_ADX", 35.0) or 35.0)
+    require_macd_improving = bool(getattr(config, "LONG_REVERSAL_REQUIRE_MACD_IMPROVING", True))
+
+    if drop_pct < min_drop_pct:
+        return None
+    if bounce_from_low_pct < min_bounce_pct or bounce_from_low_pct > max_bounce_pct:
+        return None
+    if float(candle_state["close_position"]) < min_close_position:
+        return None
+    if volume_ratio < min_volume_ratio:
+        return None
+    if rsi_value < min_rsi or rsi_value > max_rsi:
+        return None
+    if rsi_value > high_rsi_threshold and adx_value < high_rsi_min_adx:
+        return None
+    if require_macd_improving and not macd_improving:
+        return None
+    if not bullish_reaction:
+        return None
+    if not (reclaim_fast or breakout_reclaim):
+        return None
+
+    return {
+        "drop_pct": round(drop_pct, 4),
+        "bounce_from_low_pct": round(bounce_from_low_pct, 4),
+        "close_position": round(float(candle_state["close_position"]), 4),
+        "volume_ratio": round(volume_ratio, 4),
+        "rsi": round(rsi_value, 4),
+        "rsi_delta": round(rsi_value - prev_rsi, 4),
+        "adx": round(adx_value, 4),
+        "macd_hist": round(macd_hist, 8),
+        "macd_hist_delta": round(macd_hist - prev_macd_hist, 8),
+        "reclaim_fast": reclaim_fast,
+        "breakout_reclaim": breakout_reclaim,
+    }
+
+
+def _detect_short_reversal_rejection(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Optional[Dict[str, object]]:
+    if not bool(getattr(config, "ENABLE_SHORT_REVERSAL_REJECTION", True)):
+        return None
+
+    effective_index = len(df) + index if index < 0 else index
+    if effective_index <= 0:
+        return None
+
+    lookback = max(int(getattr(config, "SHORT_REVERSAL_LOOKBACK_CANDLES", 12) or 12), 3)
+    start_index = max(effective_index - lookback, 0)
+    window = df.iloc[start_index : effective_index + 1]
+    if len(window) < 3:
+        return None
+
+    row = df.iloc[effective_index]
+    prev = df.iloc[effective_index - 1]
+    signal_timestamp = resolve_signal_timestamp(df, index=effective_index)
+    blocked_hours = set(getattr(config, "SHORT_REVERSAL_BLOCKED_ENTRY_HOURS_UTC", []) or [])
+    if signal_timestamp is not None and signal_timestamp.hour in blocked_hours:
+        return None
+
+    recent_high = float(window["high"].max())
+    recent_low = float(window["low"].min())
+    current_close = float(row["close"])
+    if recent_high <= 0 or recent_low <= 0 or current_close <= 0:
+        return None
+
+    rise_pct = (recent_high - recent_low) / recent_low * 100
+    pullback_from_high_pct = (recent_high - current_close) / recent_high * 100
+    candle_state = _resolve_candle_state(row, prev)
+    volume_ma = row.get("vol_ma")
+    if pd.isna(volume_ma) or float(volume_ma or 0.0) <= 0:
+        volume_ratio = 0.0
+    else:
+        volume_ratio = float(row.get("volume", 0.0) or 0.0) / float(volume_ma)
+
+    rsi_value = float(row.get("rsi", 0.0) or 0.0)
+    prev_rsi = float(prev.get("rsi", rsi_value) or rsi_value)
+    adx_value = float(row.get("adx", 0.0) or 0.0)
+    macd_hist = float(row.get("macd_hist", 0.0) or 0.0)
+    prev_macd_hist = float(prev.get("macd_hist", macd_hist) or macd_hist)
+    macd_worsening = bool(macd_hist < prev_macd_hist)
+    lose_fast = bool(current_close <= float(row["ema_fast"]))
+    breakdown_reclaim = bool(current_close < float(prev["low"]) * 0.999)
+    bearish_reaction = bool(candle_state["bearish_close"] and candle_state["close_position"] <= 0.5)
+
+    min_rise_pct = float(getattr(config, "SHORT_REVERSAL_MIN_RISE_PCT", 2.2) or 2.2)
+    min_pullback_pct = float(getattr(config, "SHORT_REVERSAL_MIN_PULLBACK_FROM_HIGH_PCT", 1.1) or 1.1)
+    max_pullback_pct = float(getattr(config, "SHORT_REVERSAL_MAX_PULLBACK_FROM_HIGH_PCT", 5.8) or 5.8)
+    max_close_position = float(getattr(config, "SHORT_REVERSAL_MAX_CLOSE_POSITION", 0.45) or 0.45)
+    min_volume_ratio = float(getattr(config, "SHORT_REVERSAL_MIN_VOLUME_RATIO", 1.15) or 1.15)
+    min_rsi = float(getattr(config, "SHORT_REVERSAL_MIN_RSI", 32.0) or 32.0)
+    max_rsi = float(getattr(config, "SHORT_REVERSAL_MAX_RSI", 62.0) or 62.0)
+    low_rsi_threshold = float(getattr(config, "SHORT_REVERSAL_LOW_RSI_THRESHOLD", 42.0) or 42.0)
+    low_rsi_min_adx = float(getattr(config, "SHORT_REVERSAL_LOW_RSI_MIN_ADX", 35.0) or 35.0)
+    require_macd_worsening = bool(getattr(config, "SHORT_REVERSAL_REQUIRE_MACD_WORSENING", True))
+
+    if rise_pct < min_rise_pct:
+        return None
+    if pullback_from_high_pct < min_pullback_pct or pullback_from_high_pct > max_pullback_pct:
+        return None
+    if float(candle_state["close_position"]) > max_close_position:
+        return None
+    if volume_ratio < min_volume_ratio:
+        return None
+    if rsi_value < min_rsi or rsi_value > max_rsi:
+        return None
+    if rsi_value < low_rsi_threshold and adx_value < low_rsi_min_adx:
+        return None
+    if require_macd_worsening and not macd_worsening:
+        return None
+    if not bearish_reaction:
+        return None
+    if not (lose_fast or breakdown_reclaim):
+        return None
+
+    return {
+        "rise_pct": round(rise_pct, 4),
+        "pullback_from_high_pct": round(pullback_from_high_pct, 4),
+        "close_position": round(float(candle_state["close_position"]), 4),
+        "volume_ratio": round(volume_ratio, 4),
+        "rsi": round(rsi_value, 4),
+        "rsi_delta": round(rsi_value - prev_rsi, 4),
+        "adx": round(adx_value, 4),
+        "macd_hist": round(macd_hist, 8),
+        "macd_hist_delta": round(macd_hist - prev_macd_hist, 8),
+        "lose_fast": lose_fast,
+        "breakdown_reclaim": breakdown_reclaim,
+    }
+
+
 def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Dict[str, object]:
     row = df.iloc[index]
     prev = df.iloc[index - 1]
@@ -198,6 +375,28 @@ def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> D
         return {"setup": "pullback_long", "direction": "long", "regime": regime}
     if regime_name == "trend_bear" and pullback_short:
         return {"setup": "pullback_short", "direction": "short", "regime": regime}
+
+    reversal_rebound = _detect_long_reversal_rebound(df, params, index=index)
+    if reversal_rebound:
+        return {
+            "setup": "reversal_rebound_long",
+            "direction": "long",
+            "regime": {
+                **regime,
+                "reversal_rebound": reversal_rebound,
+            },
+        }
+
+    reversal_rejection = _detect_short_reversal_rejection(df, params, index=index)
+    if reversal_rejection:
+        return {
+            "setup": "reversal_rejection_short",
+            "direction": "short",
+            "regime": {
+                **regime,
+                "reversal_rejection": reversal_rejection,
+            },
+        }
 
     if regime_name in {"trend_bull", "weak_bull"}:
         if row["close"] > row["ema_fast"] * (1 + params.long_max_distance_pct / 100):
@@ -351,6 +550,8 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     regime_payload = setup.get("regime") or {}
     regime_name = str(regime_payload.get("regime") or "").strip().lower()
     regime_label = str(regime_payload.get("regime_detail") or regime_name).strip().lower()
+    is_reversal_rebound_long = bool(setup.get("setup") == "reversal_rebound_long")
+    is_reversal_rejection_short = bool(setup.get("setup") == "reversal_rejection_short")
 
     if bool(getattr(config, "BLOCK_UNKNOWN_REGIME", True)) and regime_name in {"", "unknown", "none", "null"}:
         return {
@@ -364,7 +565,7 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     if row["atr_pct"] < config.GLOBAL_MIN_ATR_PCT:
         return {"signal": "hold", "reason": f"volatilidade insuficiente ({row['atr_pct']:.2f}%)", "setup": setup}
 
-    if trend_strength_pct < config.MIN_TREND_STRENGTH_PCT:
+    if trend_strength_pct < config.MIN_TREND_STRENGTH_PCT and not is_reversal_rebound_long:
         return {"signal": "hold", "reason": f"tendência abaixo do piso ({trend_strength_pct:.2f}%)", "setup": setup}
 
     trend_context_pct = abs(row["ema_slow"] - row["ema_trend"]) / row["close"] * 100
@@ -411,9 +612,60 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
         if (
             regime_name != "trend_bull"
             and not allow_weak_bull_atr
+            and not is_reversal_rebound_long
             and not bool(getattr(config, "BYPASS_WEAK_REGIME_GATE", False))
         ):
             return {"signal": "hold", "reason": f"regime fraco ({regime_label})", "setup": setup}
+
+        if is_reversal_rebound_long:
+            reversal_payload = dict(regime_payload.get("reversal_rebound") or {})
+            score = 0
+            reasons = []
+            if float(reversal_payload.get("drop_pct", 0.0) or 0.0) >= float(
+                getattr(config, "LONG_REVERSAL_MIN_DROP_PCT", 2.2) or 2.2
+            ):
+                score += 1
+                reasons.append(f"queda={float(reversal_payload.get('drop_pct', 0.0) or 0.0):.2f}%")
+            if float(reversal_payload.get("bounce_from_low_pct", 0.0) or 0.0) >= float(
+                getattr(config, "LONG_REVERSAL_MIN_BOUNCE_FROM_LOW_PCT", 1.2) or 1.2
+            ):
+                score += 1
+                reasons.append(f"reacao={float(reversal_payload.get('bounce_from_low_pct', 0.0) or 0.0):.2f}%")
+            if float(reversal_payload.get("close_position", 0.0) or 0.0) >= float(
+                getattr(config, "LONG_REVERSAL_MIN_CLOSE_POSITION", 0.55) or 0.55
+            ):
+                score += 1
+                reasons.append("fechamento_forte")
+            if float(reversal_payload.get("volume_ratio", 0.0) or 0.0) >= float(
+                getattr(config, "LONG_REVERSAL_MIN_VOLUME_RATIO", 1.15) or 1.15
+            ):
+                score += 1
+                reasons.append(f"volume={float(reversal_payload.get('volume_ratio', 0.0) or 0.0):.2f}x")
+            if float(reversal_payload.get("rsi_delta", 0.0) or 0.0) > 0:
+                score += 1
+                reasons.append("rsi_retoma")
+            if float(reversal_payload.get("macd_hist_delta", 0.0) or 0.0) > 0:
+                score += 1
+                reasons.append("macd_melhora")
+            if bool(reversal_payload.get("reclaim_fast")) or bool(reversal_payload.get("breakout_reclaim")):
+                score += 1
+                reasons.append("reclaim")
+
+            min_reversal_score = int(getattr(config, "LONG_REVERSAL_MIN_SCORE", 5) or 5)
+            if score >= min_reversal_score:
+                return {
+                    "signal": "buy",
+                    "reason": f"reversal_rebound_long_score={score}|" + ",".join(reasons),
+                    "setup": setup,
+                    "entry_price": float(row["close"]),
+                    "atr": float(row["atr"]),
+                }
+
+            return {
+                "signal": "hold",
+                "reason": f"reversal_rebound_long_score_baixo={score}",
+                "setup": setup,
+            }
 
         if setup.get("setup") == "pullback_long":
             pullback_min_adx = float(getattr(config, "PULLBACK_LONG_MIN_ADX", 0.0) or 0.0)
@@ -643,6 +895,58 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             return {
                 "signal": "hold",
                 "reason": f"hora bloqueada para short ({signal_timestamp.hour:02d} UTC)",
+                "setup": setup,
+            }
+
+        if is_reversal_rejection_short:
+            rejection_payload = dict(regime_payload.get("reversal_rejection") or {})
+            score = 0
+            reasons = []
+            if float(rejection_payload.get("rise_pct", 0.0) or 0.0) >= float(
+                getattr(config, "SHORT_REVERSAL_MIN_RISE_PCT", 2.2) or 2.2
+            ):
+                score += 1
+                reasons.append(f"alta={float(rejection_payload.get('rise_pct', 0.0) or 0.0):.2f}%")
+            if float(rejection_payload.get("pullback_from_high_pct", 0.0) or 0.0) >= float(
+                getattr(config, "SHORT_REVERSAL_MIN_PULLBACK_FROM_HIGH_PCT", 1.1) or 1.1
+            ):
+                score += 1
+                reasons.append(
+                    f"rejeicao={float(rejection_payload.get('pullback_from_high_pct', 0.0) or 0.0):.2f}%"
+                )
+            if float(rejection_payload.get("close_position", 1.0) or 1.0) <= float(
+                getattr(config, "SHORT_REVERSAL_MAX_CLOSE_POSITION", 0.45) or 0.45
+            ):
+                score += 1
+                reasons.append("fechamento_fraco")
+            if float(rejection_payload.get("volume_ratio", 0.0) or 0.0) >= float(
+                getattr(config, "SHORT_REVERSAL_MIN_VOLUME_RATIO", 1.15) or 1.15
+            ):
+                score += 1
+                reasons.append(f"volume={float(rejection_payload.get('volume_ratio', 0.0) or 0.0):.2f}x")
+            if float(rejection_payload.get("rsi_delta", 0.0) or 0.0) < 0:
+                score += 1
+                reasons.append("rsi_perde_forca")
+            if float(rejection_payload.get("macd_hist_delta", 0.0) or 0.0) < 0:
+                score += 1
+                reasons.append("macd_piora")
+            if bool(rejection_payload.get("lose_fast")) or bool(rejection_payload.get("breakdown_reclaim")):
+                score += 1
+                reasons.append("perde_media")
+
+            min_rejection_score = int(getattr(config, "SHORT_REVERSAL_MIN_SCORE", 5) or 5)
+            if score >= min_rejection_score:
+                return {
+                    "signal": "sell",
+                    "reason": f"reversal_rejection_short_score={score}|" + ",".join(reasons),
+                    "setup": setup,
+                    "entry_price": float(row["close"]),
+                    "atr": float(row["atr"]),
+                }
+
+            return {
+                "signal": "hold",
+                "reason": f"reversal_rejection_short_score_baixo={score}",
                 "setup": setup,
             }
 
