@@ -6484,7 +6484,54 @@ class TradingDatabase:
             except:
                 return value
         return default
-    
+
+    def save_ai_learning_memory(self, memory_key: str, payload: Dict[str, Any]) -> bool:
+        """Persist adaptive AI learning memory in the shared database."""
+        resolved_key = f"ai_learning_memory:{str(memory_key or 'default').strip() or 'default'}"
+        serialized = json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=True)
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                UPDATE settings
+                SET value = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE key = ?
+                ''',
+                (serialized, resolved_key),
+            )
+            if int(cursor.rowcount or 0) <= 0:
+                cursor.execute(
+                    '''
+                    INSERT INTO settings (key, value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ''',
+                    (resolved_key, serialized),
+                )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def get_ai_learning_memory(self, memory_key: str) -> Optional[Dict[str, Any]]:
+        """Load adaptive AI learning memory from the shared database."""
+        resolved_key = f"ai_learning_memory:{str(memory_key or 'default').strip() or 'default'}"
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (resolved_key,))
+            row = cursor.fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        raw_value = dict(row).get("value") if not isinstance(row, dict) else row.get("value")
+        try:
+            payload = json.loads(raw_value or "{}")
+        except Exception:
+            return None
+        return payload if isinstance(payload, dict) else None
+
     def save_analysis(self, symbol: str, timeframe: str, analysis_data: Dict):
         """Salvar dados de análise"""
         conn = self.get_connection()

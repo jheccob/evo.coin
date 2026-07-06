@@ -253,6 +253,9 @@ class RiskManagementService:
         drawdown_summary: Optional[Dict] = None,
         execution_scope: str = "paper",
         live_context: Optional[Dict[str, Any]] = None,
+        leverage: Optional[float] = None,
+        position_sizing_mode: Optional[str] = None,
+        margin_allocation_pct: Optional[float] = None,
     ) -> Dict:
         resolved_execution_scope = self._normalize_execution_scope(execution_scope)
         live_context = live_context or {}
@@ -276,14 +279,30 @@ class RiskManagementService:
             max_portfolio_open_risk_pct or ProductionConfig.MAX_PORTFOLIO_OPEN_RISK_PCT
         )
         reduced_multiplier = min(max(float(ProductionConfig.RISK_REDUCED_MODE_MULTIPLIER or 0.5), 0.0), 1.0)
-        resolved_leverage = max(float(getattr(config, "LEVERAGE", 1) or 1), 1.0)
+        resolved_leverage = max(
+            float(
+                leverage
+                if leverage is not None
+                else getattr(config, "LEVERAGE", 1) or 1
+            ),
+            1.0,
+        )
         resolved_position_sizing_mode = str(
-            getattr(ProductionConfig, "POSITION_SIZING_MODE", getattr(config, "POSITION_SIZING_MODE", "risk"))
+            position_sizing_mode
+            or getattr(ProductionConfig, "POSITION_SIZING_MODE", getattr(config, "POSITION_SIZING_MODE", "risk"))
             or "risk"
         ).strip().lower()
+        if (
+            resolved_execution_scope == "live"
+            and resolved_position_sizing_mode == "allocation"
+            and bool(getattr(ProductionConfig, "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True))
+        ):
+            resolved_position_sizing_mode = "hybrid"
         resolved_margin_allocation_pct = max(
             float(
-                getattr(
+                margin_allocation_pct
+                if margin_allocation_pct is not None
+                else getattr(
                     ProductionConfig,
                     "POSITION_MARGIN_ALLOCATION_PCT",
                     getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
@@ -406,6 +425,23 @@ class RiskManagementService:
             "regime_allowed": bool(regime_allowed),
             "system_health_ok": bool(system_health_ok),
         }
+
+        min_live_balance = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
+        if resolved_execution_scope == "live" and resolved_account_balance < min_live_balance:
+            system_health_guard.update({"status": "blocked", "triggered": True})
+            return self._blocked_plan(
+                (
+                    f"Banca minima para operar live e {min_live_balance:.2f} USDT "
+                    f"(saldo/capital atual: {resolved_account_balance:.2f} USDT)."
+                ),
+                portfolio_summary=portfolio_summary,
+                circuit_breaker=circuit_breaker,
+                drawdown_summary=drawdown_summary,
+                symbol_open_trades=symbol_open_trades,
+                risk_mode="blocked",
+                risk_status="blocked",
+                system_health_guard=system_health_guard,
+            )
 
         if entry_price <= 0:
             return self._blocked_plan(
@@ -661,6 +697,9 @@ class RiskManagementService:
         system_health_reason: Optional[str] = None,
         execution_scope: str = "paper",
         live_context: Optional[Dict[str, Any]] = None,
+        leverage: Optional[float] = None,
+        position_sizing_mode: Optional[str] = None,
+        margin_allocation_pct: Optional[float] = None,
     ) -> Dict:
         # Compatibility alias kept for older callers and tests.
         return self.evaluate_risk_engine(
@@ -681,6 +720,9 @@ class RiskManagementService:
             system_health_reason=system_health_reason,
             execution_scope=execution_scope,
             live_context=live_context,
+            leverage=leverage,
+            position_sizing_mode=position_sizing_mode,
+            margin_allocation_pct=margin_allocation_pct,
         )
 
     def get_portfolio_risk_summary(self) -> Dict:

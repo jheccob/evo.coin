@@ -18,6 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import config
 # Importar funções de fuso horário brasileiro
 from utils.timezone_utils import now_brazil, format_brazil_time, get_brazil_datetime_naive, BRAZIL_TZ
 
@@ -5047,6 +5048,7 @@ def render_workspace_capital_risk_panel(
 ) -> None:
     selected_account_id = str(selected_account["account_id"])
     risk_profile = execution_context.get("risk_profile") or {}
+    min_live_capital = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
 
     st.markdown("### 💰 Capital e Limites do Bot")
     st.caption(
@@ -5055,9 +5057,19 @@ def render_workspace_capital_risk_panel(
     )
 
     current_capital = float(selected_account.get("capital_base", 0.0) or 0.0)
-    current_risk_per_trade = float(risk_profile.get("max_risk_per_trade", 0.5) or 0.5)
-    current_daily_loss = float(risk_profile.get("max_daily_loss", 2.0) or 2.0)
-    current_open_risk = float(risk_profile.get("max_portfolio_open_risk_pct", 2.0) or 2.0)
+    current_capital_input = max(current_capital, min_live_capital)
+    current_risk_per_trade = float(
+        risk_profile.get("max_risk_per_trade", ProductionConfig.RISK_PER_TRADE_PCT)
+        or ProductionConfig.RISK_PER_TRADE_PCT
+    )
+    current_daily_loss = float(risk_profile.get("max_daily_loss", 6.0) or 6.0)
+    current_open_risk = float(
+        risk_profile.get(
+            "max_portfolio_open_risk_pct",
+            ProductionConfig.POSITION_MARGIN_ALLOCATION_PCT,
+        )
+        or ProductionConfig.POSITION_MARGIN_ALLOCATION_PCT
+    )
 
     with st.form(f"{form_key_prefix}_capital_risk_form_{selected_account_id}"):
         allocation_mode = st.radio(
@@ -5072,8 +5084,8 @@ def render_workspace_capital_risk_panel(
             with capital_col1:
                 informed_total_balance = st.number_input(
                     "Banca total informada (USDT)",
-                    min_value=0.0,
-                    value=current_capital if current_capital > 0 else 1000.0,
+                    min_value=min_live_capital,
+                    value=current_capital_input,
                     step=50.0,
                     key=f"{form_key_prefix}_total_balance_{selected_account_id}",
                     help="Informe o tamanho aproximado da banca para calcular o capital liberado.",
@@ -5095,8 +5107,8 @@ def render_workspace_capital_risk_panel(
             with capital_col1:
                 capital_base = st.number_input(
                     "Capital liberado para o bot (USDT)",
-                    min_value=0.0,
-                    value=current_capital,
+                    min_value=min_live_capital,
+                    value=current_capital_input,
                     step=50.0,
                     key=f"{form_key_prefix}_capital_base_{selected_account_id}",
                     help="Valor máximo da banca que o bot pode considerar para calcular posições.",
@@ -5109,12 +5121,12 @@ def render_workspace_capital_risk_panel(
             st.metric("Capital final salvo", f"{float(capital_base):.2f} USDT")
         with exposure_col2:
             max_portfolio_open_risk_pct = st.number_input(
-                "Exposição operacional máxima da banca (%)",
+                "Risco aberto máximo da banca (%)",
                 min_value=0.0,
                 value=current_open_risk,
                 step=0.1,
                 key=f"{form_key_prefix}_open_risk_{selected_account_id}",
-                help="Quanto do capital liberado pode ficar exposto em operações abertas ao mesmo tempo.",
+                help="Perda planejada máxima que pode ficar aberta ao mesmo tempo, somando operações ativas.",
             )
 
         loss_col1, loss_col2, loss_col3 = st.columns(3)
@@ -5140,7 +5152,7 @@ def render_workspace_capital_risk_panel(
             max_drawdown = st.number_input(
                 "Drawdown máximo (%)",
                 min_value=0.0,
-                value=float(risk_profile.get("max_drawdown", 10.0) or 10.0),
+                value=float(risk_profile.get("max_drawdown", 40.0) or 40.0),
                 step=0.5,
                 key=f"{form_key_prefix}_drawdown_{selected_account_id}",
             )
@@ -5150,7 +5162,7 @@ def render_workspace_capital_risk_panel(
             allowed_position_count = st.number_input(
                 "Máx. posições simultâneas",
                 min_value=0,
-                value=int(risk_profile.get("allowed_position_count", 3) or 3),
+                value=int(risk_profile.get("allowed_position_count", 1) or 1),
                 step=1,
                 key=f"{form_key_prefix}_positions_{selected_account_id}",
             )
@@ -5158,7 +5170,7 @@ def render_workspace_capital_risk_panel(
             leverage_cap = st.number_input(
                 "Alavancagem máxima",
                 min_value=0.0,
-                value=float(risk_profile.get("leverage_cap", 5.0) or 5.0),
+                value=float(risk_profile.get("leverage_cap", config.LEVERAGE) or config.LEVERAGE),
                 step=0.5,
                 key=f"{form_key_prefix}_leverage_{selected_account_id}",
             )
@@ -5201,7 +5213,7 @@ def render_workspace_capital_risk_panel(
         st.caption(
             f"Com esses limites: risco por operação ≈ {estimated_trade_loss:.2f} USDT | "
             f"perda diária máxima ≈ {estimated_daily_loss:.2f} USDT | "
-            f"exposição operacional ≈ {estimated_open_risk:.2f} USDT."
+            f"risco aberto máximo ≈ {estimated_open_risk:.2f} USDT."
         )
 
         if st.form_submit_button("Salvar Capital e Limites"):
@@ -5760,11 +5772,18 @@ def render_multiuser_workspace_tab():
                         key=f"workspace_paper_{selected_account_id}",
                     )
                 with acc_col3:
+                    min_live_capital = float(
+                        getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0
+                    )
+                    selected_capital_base = max(
+                        float(selected_account.get("capital_base", 0.0) or 0.0),
+                        min_live_capital,
+                    )
                     capital_base = st.number_input(
                         "Capital Base",
-                        min_value=0.0,
-                        value=float(selected_account.get("capital_base", 0.0) or 0.0),
-                        step=100.0,
+                        min_value=min_live_capital,
+                        value=selected_capital_base,
+                        step=5.0,
                         key=f"workspace_capital_{selected_account_id}",
                     )
                     risk_mode = st.selectbox(
@@ -5835,9 +5854,9 @@ def render_multiuser_workspace_tab():
                     with new_col3:
                         new_capital_base = st.number_input(
                             "Capital Base Inicial",
-                            min_value=0.0,
-                            value=10000.0,
-                            step=100.0,
+                            min_value=float(ProductionConfig.MIN_LIVE_ACCOUNT_BALANCE_USDT),
+                            value=float(ProductionConfig.MIN_LIVE_ACCOUNT_BALANCE_USDT),
+                            step=5.0,
                             key=f"workspace_new_capital_{user_id}",
                         )
                         new_live_enabled = st.checkbox("Live Enabled", value=False, key=f"workspace_new_live_{user_id}")
@@ -11804,7 +11823,13 @@ def main():
                             key="mu_exchange",
                         )
                         mu_status = st.selectbox("Status", options=["active", "disabled"], key="mu_status")
-                        mu_capital_base = st.number_input("Capital Base", min_value=0.0, value=10000.0, step=100.0, key="mu_capital_base")
+                        mu_capital_base = st.number_input(
+                            "Capital Base",
+                            min_value=float(ProductionConfig.MIN_LIVE_ACCOUNT_BALANCE_USDT),
+                            value=float(ProductionConfig.MIN_LIVE_ACCOUNT_BALANCE_USDT),
+                            step=5.0,
+                            key="mu_capital_base",
+                        )
                     with acc_col3:
                         mu_live_enabled = st.checkbox("Live Enabled", value=True, key="mu_live_enabled")
                         mu_paper_enabled = st.checkbox("Paper Enabled", value=True, key="mu_paper_enabled")
@@ -11854,19 +11879,25 @@ def main():
                         risk_account_id = st.text_input("Account ID (Risco)", key="risk_account_id")
                         risk_mode_profile = st.selectbox("Modo", options=["normal", "reduced", "blocked"], key="risk_mode_profile")
                     with risk_col2:
-                        max_risk_per_trade = st.number_input("Risco por Trade %", min_value=0.0, value=0.5, step=0.1, key="max_risk_per_trade")
-                        max_daily_loss = st.number_input("Loss Diário %", min_value=0.0, value=2.0, step=0.1, key="max_daily_loss")
-                        max_drawdown = st.number_input("Drawdown Máx %", min_value=0.0, value=10.0, step=0.5, key="max_drawdown")
+                        max_risk_per_trade = st.number_input(
+                            "Risco por Trade %",
+                            min_value=0.0,
+                            value=float(ProductionConfig.RISK_PER_TRADE_PCT),
+                            step=0.1,
+                            key="max_risk_per_trade",
+                        )
+                        max_daily_loss = st.number_input("Loss Diário %", min_value=0.0, value=6.0, step=0.1, key="max_daily_loss")
+                        max_drawdown = st.number_input("Drawdown Máx %", min_value=0.0, value=40.0, step=0.5, key="max_drawdown")
                     with risk_col3:
                         max_portfolio_open_risk_pct = st.number_input(
                             "Risco Aberto Máx %",
                             min_value=0.0,
-                            value=2.0,
+                            value=float(ProductionConfig.POSITION_MARGIN_ALLOCATION_PCT),
                             step=0.1,
                             key="max_portfolio_open_risk_pct",
                         )
-                        allowed_position_count = st.number_input("Máx Posições", min_value=0, value=3, step=1, key="allowed_position_count")
-                        leverage_cap = st.number_input("Leverage Cap", min_value=0.0, value=5.0, step=0.5, key="leverage_cap")
+                        allowed_position_count = st.number_input("Máx Posições", min_value=0, value=1, step=1, key="allowed_position_count")
+                        leverage_cap = st.number_input("Leverage Cap", min_value=0.0, value=float(config.LEVERAGE), step=0.5, key="leverage_cap")
 
                     preferred_symbols = st.text_input(
                         "Símbolos Preferidos",

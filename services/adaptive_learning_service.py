@@ -44,11 +44,15 @@ class AdaptiveLearningService:
         enabled: bool = True,
         min_trades: int = 6,
         max_bias: float = 0.12,
+        database=None,
+        memory_key: str = "default",
     ):
         self.path = Path(path)
         self.enabled = bool(enabled)
         self.min_trades = max(int(min_trades), 1)
         self.max_bias = max(float(max_bias), 0.0)
+        self.database = database
+        self.memory_key = str(memory_key or "default")
         self.state = {
             "updated_at_utc": None,
             "stats": {},
@@ -56,7 +60,20 @@ class AdaptiveLearningService:
         self._load()
 
     def _load(self) -> None:
-        if not self.enabled or not self.path.exists():
+        if not self.enabled:
+            return
+        if self.database is not None and hasattr(self.database, "get_ai_learning_memory"):
+            try:
+                payload = self.database.get_ai_learning_memory(self.memory_key)
+                if isinstance(payload, dict):
+                    self.state = {
+                        "updated_at_utc": payload.get("updated_at_utc"),
+                        "stats": payload.get("stats") or {},
+                    }
+                    return
+            except Exception:
+                pass
+        if not self.path.exists():
             return
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -74,9 +91,16 @@ class AdaptiveLearningService:
     def save(self) -> None:
         if not self.enabled:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.state["updated_at_utc"] = _utc_now()
-        self.path.write_text(json.dumps(self.state, ensure_ascii=True, indent=2), encoding="utf-8")
+        saved_to_database = False
+        if self.database is not None and hasattr(self.database, "save_ai_learning_memory"):
+            try:
+                saved_to_database = bool(self.database.save_ai_learning_memory(self.memory_key, self.state))
+            except Exception:
+                saved_to_database = False
+        if not saved_to_database:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.state, ensure_ascii=True, indent=2), encoding="utf-8")
 
     def reset(self) -> None:
         self.state = {"updated_at_utc": None, "stats": {}}

@@ -29,7 +29,7 @@ class MultiUserRuntimeService:
         timeframe: str,
         strategy_version: Optional[str] = None,
         entry_price: Optional[float] = None,
-        stop_loss_pct: float = ProductionConfig.DEFAULT_LIVE_STOP_LOSS_PCT,
+        stop_loss_pct: Optional[float] = None,
         signal_side: Optional[str] = None,
     ) -> List[Dict]:
         if not ProductionConfig.ENABLE_MULTIUSER_RUNTIME:
@@ -63,7 +63,7 @@ class MultiUserRuntimeService:
         timeframe: str,
         strategy_version: Optional[str],
         entry_price: Optional[float],
-        stop_loss_pct: float,
+        stop_loss_pct: Optional[float],
         signal_side: Optional[str],
     ) -> Dict:
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -124,13 +124,18 @@ class MultiUserRuntimeService:
             }
 
         risk_profile = context.get("risk_profile") or {}
+        resolved_stop_loss_pct = self._resolve_stop_loss_pct(
+            signal_side=signal_side,
+            stop_loss_pct=stop_loss_pct,
+        )
+        resolved_leverage = float(risk_profile.get("leverage_cap") or config.LEVERAGE or 1)
         risk_plan = self.risk_management_service.evaluate_risk_engine(
             entry_price=resolved_entry,
-            stop_loss_pct=stop_loss_pct,
+            stop_loss_pct=resolved_stop_loss_pct,
             symbol=symbol,
             timeframe=timeframe,
             strategy_version=strategy_version,
-            account_balance=float(context.get("capital_base") or ProductionConfig.PAPER_ACCOUNT_BALANCE),
+            account_balance=float(context.get("capital_base") or 0.0),
             risk_per_trade_pct=float(risk_profile.get("max_risk_per_trade") or ProductionConfig.RISK_PER_TRADE_PCT),
             max_open_trades=int(risk_profile.get("allowed_position_count") or ProductionConfig.MAX_OPEN_REAL_TRADES),
             max_open_trades_per_symbol=int(
@@ -140,6 +145,9 @@ class MultiUserRuntimeService:
             runtime_allowed=True,
             execution_scope="live",
             live_context=context,
+            leverage=resolved_leverage,
+            position_sizing_mode=ProductionConfig.POSITION_SIZING_MODE,
+            margin_allocation_pct=ProductionConfig.POSITION_MARGIN_ALLOCATION_PCT,
         )
 
         if not risk_plan.get("allowed", False):
@@ -239,7 +247,7 @@ class MultiUserRuntimeService:
                 reduce_only=False,
                 source="multiuser_runtime",
                 testnet=bool(config.TESTNET),
-                leverage=int((risk_profile.get("leverage_cap") or config.LEVERAGE) or config.LEVERAGE),
+                leverage=int(resolved_leverage),
                 metadata={
                     "risk_mode": risk_plan.get("risk_mode"),
                     "risk_amount": risk_plan.get("risk_amount"),
@@ -318,3 +326,12 @@ class MultiUserRuntimeService:
             return f"Timeframe {timeframe} nao permitido para esta conta."
 
         return None
+
+    @staticmethod
+    def _resolve_stop_loss_pct(*, signal_side: Optional[str], stop_loss_pct: Optional[float]) -> float:
+        if stop_loss_pct not in (None, ""):
+            return float(stop_loss_pct)
+        normalized_side = str(signal_side or "").strip().lower()
+        if normalized_side in {"sell", "short", "venda"}:
+            return float(config.SHORT_STOP_LOSS_PCT)
+        return float(config.LONG_STOP_LOSS_PCT)

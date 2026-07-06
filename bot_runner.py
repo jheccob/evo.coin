@@ -837,6 +837,17 @@ def _build_live_entry_plan(
             "reason": "Saldo indisponivel para calcular a ordem live.",
             "balance_snapshot": balance_snapshot,
         }
+    min_live_balance = float(getattr(config.ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
+    if account_balance < min_live_balance:
+        return {
+            "allowed": False,
+            "reason": (
+                f"Banca minima para operar live e {min_live_balance:.2f} USDT "
+                f"(saldo atual: {account_balance:.2f} USDT)."
+            ),
+            "balance_snapshot": balance_snapshot,
+            "trading_rules": trading_rules,
+        }
 
     preview_position = _build_runtime_position(
         signal=signal_side,
@@ -846,6 +857,18 @@ def _build_live_entry_plan(
         execution_profile=execution_profile,
         signal_result=signal_result,
     )
+    if bool(getattr(config.ProductionConfig, "REQUIRE_LIVE_TRAILING_STOP", True)):
+        trailing_trigger_price = float(preview_position.get("trailing_trigger_price") or 0.0)
+        trailing_trigger_pct = float(preview_position.get("trailing_trigger_pct") or 0.0)
+        trailing_stop_pct = float(preview_position.get("trailing_stop_pct") or 0.0)
+        if trailing_trigger_price <= 0 or trailing_trigger_pct <= 0 or trailing_stop_pct <= 0:
+            return {
+                "allowed": False,
+                "reason": "Setup live sem trailing stop valido. Entrada bloqueada.",
+                "balance_snapshot": balance_snapshot,
+                "trading_rules": trading_rules,
+                "preview_position": preview_position,
+            }
     stop_loss_price = float(preview_position.get("current_stop") or 0.0)
     take_profit_price = float(preview_position.get("partial_target") or 0.0)
     sl_pct = _resolve_runtime_position_stop_pct(preview_position)
@@ -3115,7 +3138,7 @@ def main() -> None:
         and bool(getattr(config, "BOT_WAIT_NEXT_CLOSED_CANDLE_ON_REAL_STARTUP", True))
         and posicao_atual is None
     )
-    unified_decision_engine = UnifiedDecisionEngine(symbol=config.SYMBOL, timeframe=config.TIMEFRAME)
+    unified_decision_engine = UnifiedDecisionEngine(symbol=config.SYMBOL, timeframe=config.TIMEFRAME, database=db)
     ai_runtime_status = unified_decision_engine.ai_model.get_runtime_status()
     log_info(
         "Motor unificado | "

@@ -73,6 +73,55 @@ python ia\tflite_inference.py `
   --timeframe 15m
 ```
 
+## Retreino autonomo com gate de seguranca
+
+O script `auto_retrain.py` executa o ciclo completo localmente:
+
+- gera dataset supervisionado dos simbolos aprovados
+- treina um candidato `.tflite`
+- compara o candidato contra o modelo runtime atual
+- salva um relatorio JSON para auditoria/dashboard
+- so promove o candidato se passar no gate de qualidade
+
+Exemplo de teste local sem promover:
+
+```powershell
+.venv\Scripts\python.exe ia\auto_retrain.py `
+  --symbols BTC/USDT `
+  --timeframe 15m `
+  --total-limit 1500 `
+  --label-mode trade_outcome `
+  --epochs 2 `
+  --output-root ia\artifacts\auto_retrain_test
+```
+
+O gate nao olha apenas a acuracia geral. Ele tambem valida:
+
+- `val_loss` maximo
+- diferenca minima contra o modelo runtime atual
+- quantidade minima de sinais reais na validacao
+- precisao minima quando o candidato prevê `short` ou `long`
+
+Esse ultimo ponto evita promover um modelo que acerta muitos candles `hold`, mas gera falsos sinais demais para operar dinheiro real.
+
+Exemplo de promocao local, somente se o gate aprovar:
+
+```powershell
+.venv\Scripts\python.exe ia\auto_retrain.py `
+  --symbols BTC/USDT,XLM/USDT `
+  --timeframe 15m `
+  --total-limit 30000 `
+  --label-mode trade_outcome `
+  --epochs 24 `
+  --promote
+```
+
+Arquivos principais:
+
+- `latest_auto_retrain_report.json`: ultimo relatorio para dashboard/auditoria
+- `candidate_model/model.tflite`: modelo candidato
+- `candidate_model/metadata.json`: metricas e matriz de confusao do candidato
+
 ## Proximo passo natural
 
 Depois desta base pronta, o ideal e:

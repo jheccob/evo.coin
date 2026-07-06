@@ -1411,6 +1411,15 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result["signal"], "hold")
         self.assertIn("hora bloqueada para long", result["reason"])
 
+    def test_runtime_defaults_keep_both_sides_with_short_hour_filter_enabled(self):
+        self.assertTrue(config.ALLOW_LONG)
+        self.assertTrue(config.ALLOW_SHORT)
+        self.assertTrue(config.USE_ENTRY_HOUR_BLOCKS)
+        self.assertEqual(
+            config.BLOCKED_SHORT_ENTRY_HOURS_UTC,
+            [0, 3, 6, 9, 12, 13, 15, 16, 17],
+        )
+
     def test_analyze_prepared_candle_sell_signal(self):
         df = self._build_sell_signal_df()
         with mock.patch.object(config, "ALLOW_SHORT", True), mock.patch.object(config, "MIN_SHORT_SCORE", 4), mock.patch.object(config, "ENABLE_SHORT_RESUME", True), mock.patch.object(config, "SHORT_MAX_DISTANCE_EMA_PCT", 20.0), mock.patch.object(config, "SHORT_BREAKDOWN_BUFFER_PCT", 0.0), mock.patch.object(config, "BLOCKED_SHORT_ENTRY_HOURS_UTC", []):
@@ -2197,7 +2206,7 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
-    def test_live_trade_plan_uses_configured_allocation_and_leverage_for_small_btc_account(self):
+    def test_live_trade_plan_caps_configured_allocation_by_risk_for_small_btc_account(self):
         database = mock.Mock()
         database.get_user_live_portfolio_risk_summary.return_value = {
             "open_trades": 0,
@@ -2218,6 +2227,7 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "LEVERAGE", 10),
             mock.patch.object(config.ProductionConfig, "POSITION_SIZING_MODE", "allocation"),
             mock.patch.object(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+            mock.patch.object(config.ProductionConfig, "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True, create=True),
         ):
             plan = service.build_trade_plan(
                 entry_price=62500.0,
@@ -2236,9 +2246,47 @@ class StrategyTests(unittest.TestCase):
             )
 
         self.assertTrue(plan["allowed"])
-        self.assertEqual(plan["sizing_mode"], "allocation")
-        self.assertAlmostEqual(plan["position_notional"], 250.0, places=2)
-        self.assertGreaterEqual(plan["quantity"], 0.001)
+        self.assertEqual(plan["sizing_mode"], "hybrid")
+        self.assertAlmostEqual(plan["position_notional"], 33.33, places=2)
+        self.assertAlmostEqual(plan["risk_amount"], 0.5, places=2)
+        self.assertAlmostEqual(plan["effective_risk_pct"], 2.0, places=4)
+
+    def test_live_trade_plan_blocks_balance_below_minimum_bankroll(self):
+        database = mock.Mock()
+        database.get_user_live_portfolio_risk_summary.return_value = {
+            "open_trades": 0,
+            "total_open_risk_pct": 0.0,
+        }
+        database.get_daily_live_guardrail_summary.return_value = {
+            "closed_trades": 0,
+            "realized_pnl_pct": 0.0,
+            "consecutive_losses": 0,
+        }
+        database.get_live_drawdown_summary.return_value = {
+            "current_drawdown_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+        }
+        service = RiskManagementService(database=database)
+
+        with mock.patch.object(config.ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0, create=True):
+            plan = service.build_trade_plan(
+                entry_price=62500.0,
+                stop_loss_pct=1.5,
+                account_balance=19.99,
+                risk_per_trade_pct=2.0,
+                max_open_trades=1,
+                symbol="BTC/USDT",
+                timeframe="15m",
+                execution_scope="live",
+                live_context={
+                    "user_id": 0,
+                    "account_id": "env-primary",
+                    "exchange_name": "binanceusdm",
+                },
+            )
+
+        self.assertFalse(plan["allowed"])
+        self.assertIn("Banca minima", plan["reason"])
 
     def test_run_backtest_includes_account_risk_model_in_summary(self):
         df = pd.DataFrame(
@@ -3358,7 +3406,7 @@ class SymbolGovernanceTests(unittest.TestCase):
 
     def test_build_live_execution_plan_blocks_non_operable_micro_size(self):
         execution_service = mock.Mock()
-        execution_service.fetch_account_balance_snapshot.return_value = {"total": 10.0, "free": 10.0}
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 20.0, "free": 20.0}
         execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.05, "min_notional": 5.0}
         risk_service = mock.Mock()
         risk_service.build_trade_plan.return_value = {
@@ -3384,6 +3432,58 @@ class SymbolGovernanceTests(unittest.TestCase):
 
         self.assertFalse(result["allowed"])
         self.assertIn("Operabilidade negada", result["reason"])
+
+    def test_build_live_execution_plan_blocks_balance_below_minimum_bankroll(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 19.99, "free": 19.99}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config.ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0, create=True),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=100.0,
+            )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("Banca minima", result["reason"])
+        risk_service.build_trade_plan.assert_not_called()
+
+    def test_build_live_execution_plan_requires_trailing_stop(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 20.0, "free": 20.0}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        invalid_trailing_position = {
+            "current_stop": 98.5,
+            "partial_target": 101.0,
+            "trailing_trigger_price": 0.0,
+            "trailing_trigger_pct": 0.0,
+            "trailing_stop_pct": 0.0,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(bot_runner, "_build_runtime_position", return_value=invalid_trailing_position),
+            mock.patch.object(config.ProductionConfig, "REQUIRE_LIVE_TRAILING_STOP", True, create=True),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=100.0,
+            )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("sem trailing stop valido", result["reason"])
+        risk_service.build_trade_plan.assert_not_called()
 
 
 if __name__ == "__main__":

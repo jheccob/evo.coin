@@ -70,10 +70,12 @@ class UnifiedDecisionEngine:
         ai_model: AIModel | None = None,
         market_context_service: MarketContextService | None = None,
         learning_service: AdaptiveLearningService | None = None,
+        database=None,
         use_live_context: bool = True,
     ):
         self.symbol = symbol
         self.timeframe = timeframe
+        self.database = database
         self.use_live_context = bool(use_live_context)
         should_load_ai = ai_model is not None or bool(getattr(config.ProductionConfig, "ENABLE_AI_ASSISTANT", True)) or _resolve_assist_mode() == "market_reading"
         self.ai_model = ai_model or (AIModel() if should_load_ai else None)
@@ -83,6 +85,8 @@ class UnifiedDecisionEngine:
             enabled=bool(getattr(config.ProductionConfig, "AI_ONLINE_LEARNING_ENABLED", True)),
             min_trades=int(getattr(config.ProductionConfig, "AI_MEMORY_MIN_TRADES", 6) or 6),
             max_bias=float(getattr(config.ProductionConfig, "AI_MEMORY_MAX_BIAS", 0.12) or 0.12),
+            database=database,
+            memory_key=f"{self.symbol}|{self.timeframe}",
         )
 
     def _build_market_reading_result(

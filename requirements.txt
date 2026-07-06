@@ -8,3 +8,4 @@ python-telegram-bot>=21,<23
 psycopg[binary]>=3.2,<4
 websockets>=12,<16
 cryptography>=42,<46
+tensorflow>=2.16,<3 ; python_version >= "3.9" and python_version < "3.13"
