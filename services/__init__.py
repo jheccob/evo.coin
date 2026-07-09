@@ -37,3 +37,9 @@ try:
     __all__.append("RiskManagementService")
 except Exception:
     RiskManagementService = None
+
+try:
+    from .market_structure_service import calculate_market_structure
+    __all__.append("calculate_market_structure")
+except Exception:
+    calculate_market_structure = None

@@ -20,6 +20,8 @@ class RiskManagementService:
             return "hybrid"
         if token in {"allocation", "margin_allocation", "capital_allocation"}:
             return "allocation"
+        if token in {"order_value", "order_notional", "notional"}:
+            return "order_value"
         return "risk"
 
     @staticmethod
@@ -51,7 +53,7 @@ class RiskManagementService:
             or resolved_entry <= 0
             or normalized_stop_loss_pct <= 0
             or (mode_requires_risk_pct and resolved_risk_pct <= 0)
-            or (resolved_sizing_mode in {"allocation", "hybrid"} and requested_margin_allocation_pct <= 0)
+            or (resolved_sizing_mode in {"allocation", "hybrid", "order_value"} and requested_margin_allocation_pct <= 0)
         ):
             return {
                 "risk_amount": 0.0,
@@ -88,6 +90,12 @@ class RiskManagementService:
             resolved_margin_allocation_pct = (
                 (margin_allocated_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             )
+        elif resolved_sizing_mode == "order_value":
+            position_notional = resolved_balance * (requested_margin_allocation_pct / 100.0)
+            margin_allocated_amount = position_notional / resolved_leverage if resolved_leverage > 0 else position_notional
+            risk_amount = position_notional * normalized_stop_loss_pct
+            effective_risk_pct = (risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
+            resolved_margin_allocation_pct = requested_margin_allocation_pct
         else:
             risk_amount = resolved_balance * (resolved_risk_pct / 100.0)
             position_notional = risk_amount / normalized_stop_loss_pct
@@ -151,8 +159,16 @@ class RiskManagementService:
                 if margin_allocation_pct is not None
                 else getattr(
                     ProductionConfig,
-                    "POSITION_MARGIN_ALLOCATION_PCT",
-                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
+                    "ORDER_BALANCE_USAGE_PCT"
+                    if resolved_sizing_mode == "order_value"
+                    else "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(
+                        config,
+                        "ORDER_BALANCE_USAGE_PCT"
+                        if resolved_sizing_mode == "order_value"
+                        else "POSITION_MARGIN_ALLOCATION_PCT",
+                        0.0,
+                    ),
                 )
                 or 0.0
             ),
@@ -304,8 +320,16 @@ class RiskManagementService:
                 if margin_allocation_pct is not None
                 else getattr(
                     ProductionConfig,
-                    "POSITION_MARGIN_ALLOCATION_PCT",
-                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
+                    "ORDER_BALANCE_USAGE_PCT"
+                    if resolved_position_sizing_mode == "order_value"
+                    else "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(
+                        config,
+                        "ORDER_BALANCE_USAGE_PCT"
+                        if resolved_position_sizing_mode == "order_value"
+                        else "POSITION_MARGIN_ALLOCATION_PCT",
+                        0.0,
+                    ),
                 )
                 or 0.0
             ),
@@ -427,7 +451,11 @@ class RiskManagementService:
         }
 
         min_live_balance = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
-        if resolved_execution_scope == "live" and resolved_account_balance < min_live_balance:
+        if (
+            resolved_execution_scope == "live"
+            and resolved_position_sizing_mode != "order_value"
+            and resolved_account_balance < min_live_balance
+        ):
             system_health_guard.update({"status": "blocked", "triggered": True})
             return self._blocked_plan(
                 (

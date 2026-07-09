@@ -444,6 +444,15 @@ class LiveExecutionService:
 
         info = balance.get("info") if isinstance(balance, dict) else None
         if isinstance(info, dict):
+            if total <= 0:
+                total = self._safe_float(
+                    info.get("totalMarginBalance")
+                    or info.get("marginBalance")
+                    or info.get("totalWalletBalance")
+                    or info.get("walletBalance")
+                )
+            if free <= 0:
+                free = self._safe_float(info.get("availableBalance") or info.get("maxWithdrawAmount"))
             for item in info.get("assets") or []:
                 if str(item.get("asset") or "").upper() != asset:
                     continue

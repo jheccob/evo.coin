@@ -1,0 +1,10 @@
+variant,setup,status,trades,win_rate_pct,pnl_usdt,profit_factor,max_drawdown_pct,max_loss_streak,avg_pnl_per_trade_usdt,best_trade_usdt,worst_trade_usdt,recommendation,reason
+main_current,pullback_long,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,trend_resume_long,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,reversal_rebound_long,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,liquidity_sweep_reversal_long,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; setup not present on main baseline."
+main_current,pullback_short,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,trend_resume_short,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,reversal_rejection_short,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."
+main_current,liquidity_sweep_reversal_short,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; setup not present on main baseline."
+main_current,relief_rally_short,not_run,,,,,,,,,,,insufficient_data,"Backtest blocked by environment/data limitations; do not infer edge."

@@ -1,0 +1,6 @@
+variant,status,initial_balance_usdt,final_balance_usdt,total_pnl_usdt,max_drawdown_pct,total_trades,trades_per_day,win_rate_pct,compared_to_main,block_reason
+main_current,not_run,21.45,,,,,,,baseline,"pandas missing; no BTC/USDT 15m historical data found in repo/SQLite; network proxy blocks dependency install and Binance API"
+order_value_sizing,not_run,21.45,,,,,,,not_evaluated,"pandas missing; no BTC/USDT 15m historical data found in repo/SQLite; network proxy blocks dependency install and Binance API"
+structural_stop,not_run,21.45,,,,,,,not_evaluated,"pandas missing; no BTC/USDT 15m historical data found in repo/SQLite; network proxy blocks dependency install and Binance API"
+market_structure_guard,not_run,21.45,,,,,,,not_evaluated,"pandas missing; no BTC/USDT 15m historical data found in repo/SQLite; network proxy blocks dependency install and Binance API"
+liquidity_sweep_reversal,not_run,21.45,,,,,,,not_evaluated,"pandas missing; no BTC/USDT 15m historical data found in repo/SQLite; network proxy blocks dependency install and Binance API"
