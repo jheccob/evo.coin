@@ -101,6 +101,7 @@ POLL_SECONDS = _get_int("POLL_SECONDS", 30)
 LEVERAGE = _get_int("LEVERAGE", 10)
 POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", "hybrid").strip().lower() or "hybrid"
 ORDER_BALANCE_USAGE_PCT = _get_float("ORDER_BALANCE_USAGE_PCT", 100.0)
+ORDER_VALUE_RISK_CAP = _get_bool("ORDER_VALUE_RISK_CAP", True)
 POSITION_MARGIN_ALLOCATION_PCT = _get_float("POSITION_MARGIN_ALLOCATION_PCT", 100.0)
 ENFORCE_LIVE_RISK_CAPPED_ALLOCATION = _get_bool("ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True)
 MIN_LIVE_ACCOUNT_BALANCE_USDT = _get_float("MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0)
@@ -380,7 +381,11 @@ ALLOW_SHORT = _get_bool("ALLOW_SHORT", True)
 BLOCK_UNKNOWN_REGIME = _get_bool("BLOCK_UNKNOWN_REGIME", True)
 MIN_LONG_SCORE = _get_int("MIN_LONG_SCORE", 7)
 MIN_SHORT_SCORE = _get_int("MIN_SHORT_SCORE", 7)
-DISABLE_SHORT_SCORE_GATE = _get_bool("DISABLE_SHORT_SCORE_GATE", True)
+DISABLE_SHORT_SCORE_GATE = _get_bool("DISABLE_SHORT_SCORE_GATE", False)
+USE_STRUCTURAL_STOP = _get_bool("USE_STRUCTURAL_STOP", True)
+STRUCTURAL_STOP_LOOKBACK = _get_int("STRUCTURAL_STOP_LOOKBACK", 10)
+STRUCTURAL_STOP_ATR_BUFFER_MULT = _get_float("STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25)
+STRUCTURAL_STOP_MIN_BUFFER_PCT = _get_float("STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10)
 
 USE_NEXT_CANDLE_OPEN_FOR_BACKTEST = _get_bool("USE_NEXT_CANDLE_OPEN_FOR_BACKTEST", True)
 EXECUTION_PROFILE = str(os.getenv("EXECUTION_PROFILE", "managed")).strip().lower() or "managed"
@@ -423,6 +428,7 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
           "timeframe": TIMEFRAME,
           "position_sizing_mode": str(POSITION_SIZING_MODE),
           "order_balance_usage_pct": float(ORDER_BALANCE_USAGE_PCT),
+          "order_value_risk_cap": bool(ORDER_VALUE_RISK_CAP),
           "position_margin_allocation_pct": float(POSITION_MARGIN_ALLOCATION_PCT),
           "leverage": int(LEVERAGE),
           "context_timeframe": resolved_context,
@@ -440,6 +446,10 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
         "allow_triggerless_entries": bool(ALLOW_TRIGGERLESS_ENTRIES),
         "bypass_weak_regime_gate": bool(BYPASS_WEAK_REGIME_GATE),
         "disable_short_score_gate": bool(DISABLE_SHORT_SCORE_GATE),
+        "use_structural_stop": bool(USE_STRUCTURAL_STOP),
+        "structural_stop_lookback": int(STRUCTURAL_STOP_LOOKBACK),
+        "structural_stop_atr_buffer_mult": float(STRUCTURAL_STOP_ATR_BUFFER_MULT),
+        "structural_stop_min_buffer_pct": float(STRUCTURAL_STOP_MIN_BUFFER_PCT),
         "short_rsi_min": float(SHORT_RSI_MIN),
         "long_slope_lookback": int(LONG_SLOPE_LOOKBACK),
         "long_trend_ema_lookback": int(LONG_TREND_EMA_LOOKBACK),
@@ -1508,6 +1518,7 @@ class ProductionConfig:
     RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", RISK_PER_TRADE_PCT)
     POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", POSITION_SIZING_MODE).strip().lower() or "hybrid"
     ORDER_BALANCE_USAGE_PCT = _get_float("ORDER_BALANCE_USAGE_PCT", ORDER_BALANCE_USAGE_PCT)
+    ORDER_VALUE_RISK_CAP = _get_bool("ORDER_VALUE_RISK_CAP", ORDER_VALUE_RISK_CAP)
     POSITION_MARGIN_ALLOCATION_PCT = _get_float(
         "POSITION_MARGIN_ALLOCATION_PCT",
         POSITION_MARGIN_ALLOCATION_PCT,
@@ -1633,6 +1644,7 @@ __all__ = [
     "LEVERAGE",
     "POSITION_SIZING_MODE",
     "ORDER_BALANCE_USAGE_PCT",
+    "ORDER_VALUE_RISK_CAP",
     "POSITION_MARGIN_ALLOCATION_PCT",
     "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION",
     "MIN_LIVE_ACCOUNT_BALANCE_USDT",
@@ -1675,6 +1687,10 @@ __all__ = [
     "BYPASS_WEAK_REGIME_GATE",
     "ALLOW_WEAK_BULL_ATR_LONG_ENTRIES",
     "DISABLE_SHORT_SCORE_GATE",
+    "USE_STRUCTURAL_STOP",
+    "STRUCTURAL_STOP_LOOKBACK",
+    "STRUCTURAL_STOP_ATR_BUFFER_MULT",
+    "STRUCTURAL_STOP_MIN_BUFFER_PCT",
     "BUY_RSI_SIGNAL",
     "SELL_RSI_SIGNAL",
     "LONG_PULLBACK_MIN_TREND_STRENGTH_PCT",

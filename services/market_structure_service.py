@@ -98,6 +98,8 @@ def calculate_market_structure(df: pd.DataFrame, index: int = -1) -> Dict[str, f
         "recent_low_32": float(recent_low_32),
         "prior_recent_high": float(prior_high),
         "prior_recent_low": float(prior_low),
+        "sweep_high": float(high),
+        "sweep_low": float(low),
         "distance_to_recent_high_pct": ((recent_high_32 - close) / close * 100) if close > 0 else 0.0,
         "distance_to_recent_low_pct": ((close - recent_low_32) / close * 100) if close > 0 else 0.0,
         "close_position": float(close_position),

@@ -70,7 +70,21 @@ class RiskManagementService:
                 "margin_allocated_amount_raw": 0.0,
                 "effective_risk_pct": 0.0,
                 "requested_risk_pct": round(resolved_risk_pct, 4),
+                "requested_order_notional": 0.0,
+                "requested_order_notional_raw": 0.0,
+                "final_order_notional": 0.0,
+                "final_order_notional_raw": 0.0,
+                "required_margin": 0.0,
+                "required_margin_raw": 0.0,
+                "risk_cap_applied": False,
+                "order_balance_usage_pct": round(requested_margin_allocation_pct, 4),
+                "blocked": True,
+                "risk_reason": "Parametros invalidos para calcular tamanho da posicao.",
             }
+
+        requested_order_notional = 0.0
+        risk_cap_applied = False
+        risk_reason = ""
 
         if resolved_sizing_mode == "allocation":
             margin_allocated_amount = resolved_balance * (requested_margin_allocation_pct / 100.0)
@@ -91,7 +105,22 @@ class RiskManagementService:
                 (margin_allocated_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             )
         elif resolved_sizing_mode == "order_value":
-            position_notional = resolved_balance * (requested_margin_allocation_pct / 100.0)
+            requested_order_notional = resolved_balance * (requested_margin_allocation_pct / 100.0)
+            max_risk_amount = resolved_balance * (resolved_risk_pct / 100.0)
+            requested_risk_amount = requested_order_notional * normalized_stop_loss_pct
+            risk_cap_enabled = bool(getattr(config, "ORDER_VALUE_RISK_CAP", True))
+
+            if resolved_risk_pct > 0 and requested_risk_amount > max_risk_amount:
+                if risk_cap_enabled:
+                    position_notional = max_risk_amount / normalized_stop_loss_pct
+                    risk_cap_applied = True
+                    risk_reason = "order_value_risk_cap_applied"
+                else:
+                    position_notional = 0.0
+                    risk_reason = "order_value_risco_acima_do_limite"
+            else:
+                position_notional = requested_order_notional
+
             margin_allocated_amount = position_notional / resolved_leverage if resolved_leverage > 0 else position_notional
             risk_amount = position_notional * normalized_stop_loss_pct
             effective_risk_pct = (risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
@@ -123,6 +152,18 @@ class RiskManagementService:
             "margin_allocated_amount_raw": float(margin_allocated_amount),
             "effective_risk_pct": round(effective_risk_pct, 4),
             "requested_risk_pct": round(resolved_risk_pct, 4),
+            "requested_order_notional": round(requested_order_notional, 2),
+            "requested_order_notional_raw": float(requested_order_notional),
+            "final_order_notional": round(position_notional, 2),
+            "final_order_notional_raw": float(position_notional),
+            "required_margin": round(margin_allocated_amount, 2),
+            "required_margin_raw": float(margin_allocated_amount),
+            "risk_cap_applied": bool(risk_cap_applied),
+            "order_balance_usage_pct": round(
+                requested_margin_allocation_pct if resolved_sizing_mode == "order_value" else 0.0, 4
+            ),
+            "blocked": bool(risk_reason == "order_value_risco_acima_do_limite"),
+            "risk_reason": risk_reason,
         }
 
     def evaluate_symbol_operability(
@@ -650,7 +691,7 @@ class RiskManagementService:
 
         if sizing["quantity"] <= 0 or sizing["position_notional"] <= 0:
             return self._blocked_plan(
-                "Nao foi possivel calcular um tamanho de posicao valido.",
+                str(sizing.get("risk_reason") or "Nao foi possivel calcular um tamanho de posicao valido."),
                 portfolio_summary=portfolio_summary,
                 circuit_breaker=circuit_breaker,
                 drawdown_summary=drawdown_summary,
@@ -685,6 +726,11 @@ class RiskManagementService:
             "effective_risk_pct": sizing["effective_risk_pct"],
             "position_notional": sizing["position_notional"],
             "quantity": sizing["quantity"],
+            "requested_order_notional": sizing.get("requested_order_notional", 0.0),
+            "final_order_notional": sizing.get("final_order_notional", sizing.get("position_notional", 0.0)),
+            "required_margin": sizing.get("required_margin", sizing.get("margin_allocated_amount", 0.0)),
+            "risk_cap_applied": bool(sizing.get("risk_cap_applied", False)),
+            "order_balance_usage_pct": sizing.get("order_balance_usage_pct", 0.0),
             "portfolio_open_trades": open_trades,
             "symbol_open_trades": symbol_open_trades,
             "portfolio_open_risk_pct": round(total_open_risk_pct, 4),

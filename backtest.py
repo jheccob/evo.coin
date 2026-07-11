@@ -184,6 +184,7 @@ def build_account_risk_summary(
     leverage: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
 ):
     resolved_initial_balance = float(initial_balance or 0.0)
     resolved_risk_pct = max(float(risk_per_trade_pct or 0.0), 0.0)
@@ -193,9 +194,17 @@ def build_account_risk_summary(
     ).strip().lower()
     resolved_position_margin_allocation_pct = max(
         float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            (
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)
+            )
+            if resolved_position_sizing_mode == "order_value"
+            else (
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            )
         ),
         0.0,
     )
@@ -204,6 +213,8 @@ def build_account_risk_summary(
         model_name = "fixed_margin_allocation"
     elif resolved_position_sizing_mode == "hybrid":
         model_name = "risk_capped_by_margin_allocation"
+    elif resolved_position_sizing_mode == "order_value":
+        model_name = "order_value_notional"
     else:
         model_name = "fixed_risk_per_trade"
 
@@ -344,10 +355,13 @@ def save_detailed_report(
     leverage: float,
     position_sizing_mode: str,
     position_margin_allocation_pct: float,
+    order_balance_usage_pct: float | None = None,
+    output_dir: str | None = None,
 ):
-    os.makedirs("reports/backtests", exist_ok=True)
+    output_path = Path(output_dir or "reports/backtests")
+    output_path.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"reports/backtests/backtest_{symbol.replace('/', '_')}_{timeframe}_{days}d_{timestamp}.json"
+    filename = output_path / f"backtest_{symbol.replace('/', '_')}_{timeframe}_{days}d_{timestamp}.json"
     strategy_snapshot = config.build_runtime_strategy_snapshot()
     report = {
         "metadata": {
@@ -362,6 +376,9 @@ def save_detailed_report(
                 "risk_per_trade_pct": round(float(risk_per_trade_pct), 4),
                 "position_sizing_mode": str(position_sizing_mode),
                 "position_margin_allocation_pct": round(float(position_margin_allocation_pct), 4),
+                "order_balance_usage_pct": (
+                    round(float(order_balance_usage_pct), 4) if order_balance_usage_pct is not None else None
+                ),
                 "leverage": round(float(leverage), 4),
                 "model": (
                     "fixed_margin_allocation"
@@ -401,6 +418,7 @@ def _create_backtest_position(
     atr: float,
     execution_profile: str,
     signal_result: dict | None = None,
+    candle_window=None,
 ):
     setup_payload = (signal_result or {}).get("setup") or {}
     entry_setup = str(setup_payload.get("setup") or "")
@@ -419,6 +437,8 @@ def _create_backtest_position(
         atr=atr,
         entry_setup=entry_setup,
         entry_source_setup=entry_source_setup,
+        candle_window=candle_window,
+        signal_result=signal_result,
     )
 
 
@@ -692,6 +712,8 @@ def run_backtest(
     risk_per_trade_pct: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
+    output_dir: str | None = None,
     leverage: float | None = None,
     strategy_params: StrategyParams | None = None,
 ):
@@ -713,18 +735,32 @@ def run_backtest(
         if position_sizing_mode is not None
         else getattr(config.ProductionConfig, "POSITION_SIZING_MODE", getattr(config, "POSITION_SIZING_MODE", "risk"))
     ).strip().lower()
-    resolved_position_margin_allocation_pct = max(
-        float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(
-                config.ProductionConfig,
-                "POSITION_MARGIN_ALLOCATION_PCT",
-                getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
-            )
-        ),
-        0.0,
-    )
+    if resolved_position_sizing_mode == "order_value":
+        resolved_position_margin_allocation_pct = max(
+            float(
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "ORDER_BALANCE_USAGE_PCT",
+                    getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0),
+                )
+            ),
+            0.0,
+        )
+    else:
+        resolved_position_margin_allocation_pct = max(
+            float(
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+                )
+            ),
+            0.0,
+        )
     resolved_leverage = max(
         float(leverage if leverage is not None else getattr(config, "LEVERAGE", 1) or 1),
         1.0,
@@ -842,6 +878,7 @@ def run_backtest(
                 atr=float(pending_signal["atr"]),
                 execution_profile=resolved_execution_profile,
                 signal_result=pending_signal,
+                candle_window=candle_slice,
             )
             position = _attach_backtest_entry_context(
                 position=position,
@@ -925,6 +962,9 @@ def run_backtest(
         leverage=resolved_leverage,
         position_sizing_mode=resolved_position_sizing_mode,
         position_margin_allocation_pct=resolved_position_margin_allocation_pct,
+        order_balance_usage_pct=(
+            resolved_position_margin_allocation_pct if resolved_position_sizing_mode == "order_value" else None
+        ),
     )
     if verbose:
         applied = symbol_override_report.get("applied") or {}
@@ -953,12 +993,16 @@ def run_backtest(
             leverage=resolved_leverage,
             position_sizing_mode=resolved_position_sizing_mode,
             position_margin_allocation_pct=resolved_position_margin_allocation_pct,
+            order_balance_usage_pct=(
+                resolved_position_margin_allocation_pct if resolved_position_sizing_mode == "order_value" else None
+            ),
+            output_dir=output_dir,
         )
 
     return trades, summary
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default=config.SYMBOL)
     parser.add_argument("--timeframe", default=config.TIMEFRAME)
@@ -969,7 +1013,7 @@ if __name__ == "__main__":
     parser.add_argument("--risk-per-trade-pct", type=float, default=config.ProductionConfig.RISK_PER_TRADE_PCT)
     parser.add_argument(
         "--position-sizing-mode",
-        choices=["risk", "allocation", "hybrid"],
+        choices=["risk", "allocation", "hybrid", "order_value"],
         default=getattr(config.ProductionConfig, "POSITION_SIZING_MODE", "risk"),
     )
     parser.add_argument(
@@ -977,6 +1021,12 @@ if __name__ == "__main__":
         type=float,
         default=getattr(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
     )
+    parser.add_argument(
+        "--order-balance-usage-pct",
+        type=float,
+        default=getattr(config.ProductionConfig, "ORDER_BALANCE_USAGE_PCT", getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)),
+    )
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--leverage", type=float, default=float(getattr(config, "LEVERAGE", 1) or 1))
     parser.add_argument("--testnet", action="store_true")
     parser.add_argument(
@@ -991,6 +1041,11 @@ if __name__ == "__main__":
         action="store_false",
         help="Usar API em vez do CSV local.",
     )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     print(f"Iniciando bateria de testes para {args.symbol}...")
@@ -1012,6 +1067,8 @@ if __name__ == "__main__":
                 risk_per_trade_pct=args.risk_per_trade_pct,
                 position_sizing_mode=args.position_sizing_mode,
                 position_margin_allocation_pct=args.position_margin_allocation_pct,
+                order_balance_usage_pct=args.order_balance_usage_pct,
+                output_dir=args.output_dir,
                 leverage=args.leverage,
             )
             ready = check_governance_readiness(summary, days)

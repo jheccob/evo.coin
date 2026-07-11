@@ -3515,6 +3515,136 @@ class StrategyTests(unittest.TestCase):
                         recovered_position=None,
                     )
 
+    def test_order_value_balance_22_uses_notional_and_margin_not_balance_as_margin(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=10000.0,
+                stop_loss_pct=1.1,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertEqual(sizing["sizing_mode"], "order_value")
+        self.assertAlmostEqual(sizing["requested_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["final_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["position_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 2.2, places=2)
+        self.assertFalse(sizing["risk_cap_applied"])
+
+    def test_order_value_risk_cap_reduces_notional_when_stop_exceeds_risk_limit(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=10000.0,
+                stop_loss_pct=10.0,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertAlmostEqual(sizing["requested_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["final_order_notional"], 8.8, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 0.88, places=2)
+        self.assertTrue(sizing["risk_cap_applied"])
+        self.assertEqual(sizing["risk_reason"], "order_value_risk_cap_applied")
+
+    def test_backtest_parser_accepts_order_value_sizing_options(self):
+        parser = backtest.build_arg_parser()
+
+        args = parser.parse_args([
+            "--position-sizing-mode",
+            "order_value",
+            "--order-balance-usage-pct",
+            "100",
+            "--output-dir",
+            "reports/backtests/test",
+        ])
+
+        self.assertEqual(args.position_sizing_mode, "order_value")
+        self.assertEqual(args.order_balance_usage_pct, 100.0)
+        self.assertEqual(args.output_dir, "reports/backtests/test")
+
+    def test_structural_stop_long_stays_below_structural_low(self):
+        candles = pd.DataFrame(
+            {
+                "open": [101.0, 100.5, 100.0],
+                "high": [102.0, 101.0, 100.5],
+                "low": [99.0, 98.0, 97.5],
+                "close": [100.5, 100.0, 100.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="buy",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+                entry_setup="trend_resume_long",
+            )
+
+        self.assertLess(position["initial_stop"], candles["low"].min())
+
+    def test_structural_stop_short_stays_above_structural_high(self):
+        candles = pd.DataFrame(
+            {
+                "open": [99.0, 99.5, 100.0],
+                "high": [101.0, 102.0, 102.5],
+                "low": [98.0, 99.0, 99.5],
+                "close": [99.5, 100.0, 100.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="sell",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+                entry_setup="trend_resume_short",
+            )
+
+        self.assertGreater(position["initial_stop"], candles["high"].max())
+
+    def test_short_below_min_score_does_not_sell_when_score_gate_enabled(self):
+        df = self._build_liquidity_sweep_df("short", recover=True)
+        setup = {"setup": "trend_resume_short", "direction": "short", "regime": {"regime": "trend_bear"}}
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=setup),
+            mock.patch.object(config, "DISABLE_SHORT_SCORE_GATE", False),
+            mock.patch.object(config, "MIN_SHORT_SCORE", 99),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", False),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertIn("short_score_baixo", result["reason"])
+
 
 class SymbolGovernanceTests(unittest.TestCase):
     def test_symbol_validation_record_reads_registry(self):
