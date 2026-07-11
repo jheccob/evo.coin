@@ -977,6 +977,8 @@ def _build_live_entry_plan(
         return {
             "allowed": False,
             "reason": block_reason,
+            "account_equity": account_equity,
+            "available_balance": available_balance,
             "balance_snapshot": balance_snapshot,
             "risk_data": risk_data,
             "trading_rules": trading_rules,
