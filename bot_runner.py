@@ -405,6 +405,7 @@ def _build_runtime_position(
     atr: float,
     execution_profile: str | None = None,
     signal_result: dict | None = None,
+    candle_window=None,
     entry_setup: str | None = None,
     entry_source_setup: str | None = None,
 ) -> dict:
@@ -429,6 +430,8 @@ def _build_runtime_position(
         atr=atr,
         entry_setup=setup_name,
         entry_source_setup=source_setup_name,
+        candle_window=candle_window,
+        signal_result=signal_result,
     )
     return _attach_runtime_entry_context(position, signal_result)
 
@@ -808,6 +811,7 @@ def _build_live_entry_plan(
     atr: float = 0.0,
     execution_profile: str | None = None,
     signal_result: dict | None = None,
+    candle_window=None,
     timestamp=None,
 ) -> dict:
     open_positions = _find_live_positions(context)
@@ -860,6 +864,7 @@ def _build_live_entry_plan(
         atr=float(atr or 0.0),
         execution_profile=execution_profile,
         signal_result=signal_result,
+        candle_window=candle_window,
     )
     if bool(getattr(config.ProductionConfig, "REQUIRE_LIVE_TRAILING_STOP", True)):
         trailing_trigger_price = float(preview_position.get("trailing_trigger_price") or 0.0)
@@ -2913,6 +2918,7 @@ def _process_closed_candle(
                 atr=float(resultado.get("atr", 0.0) or 0.0),
                 execution_profile=entry_execution_profile,
                 signal_result=resultado,
+                candle_window=candle_slice,
                 timestamp=timestamp_atual,
             )
             if not live_plan.get("allowed", False):
@@ -2957,6 +2963,7 @@ def _process_closed_candle(
                     atr=float(resultado.get("atr", 0.0) or 0.0),
                     execution_profile=position_execution_profile,
                     signal_result=resultado,
+                    candle_window=candle_slice,
                 )
                 posicao_atual.update(
                     {
@@ -3055,6 +3062,7 @@ def _process_closed_candle(
                 atr=float(resultado.get("atr", 0.0) or 0.0),
                 execution_profile=entry_execution_profile,
                 signal_result=resultado,
+                candle_window=candle_slice,
             )
             posicao_atual["execution_mode"] = "paper"
             posicao_atual["execution_profile"] = entry_execution_profile

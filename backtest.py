@@ -341,6 +341,73 @@ def build_trade_diagnostics(trades):
     }
 
 
+
+def _flatten_summary_for_csv(summary: dict) -> dict:
+    row = {}
+    for key, value in (summary or {}).items():
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                row[f"{key}.{nested_key}"] = nested_value
+        else:
+            row[key] = value
+    return row
+
+
+def _build_setup_report_rows(trades: list[dict]) -> list[dict]:
+    grouped = defaultdict(list)
+    for trade in trades:
+        setup = str(trade.get("entry_setup") or trade.get("entry_source_setup") or "unknown")
+        grouped[setup].append(trade)
+
+    rows = []
+    for setup, setup_trades in sorted(grouped.items()):
+        net_values = [float(trade.get("net_pct", 0.0) or 0.0) for trade in setup_trades]
+        wins = [value for value in net_values if value > 0]
+        losses = [value for value in net_values if value <= 0]
+        gross_wins = sum(wins)
+        gross_losses = abs(sum(losses))
+        profit_factor = gross_wins / gross_losses if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
+        rows.append(
+            {
+                "setup": setup,
+                "trades": len(setup_trades),
+                "win_rate_pct": round((len(wins) / len(setup_trades)) * 100, 4) if setup_trades else 0.0,
+                "net_pct": round(sum(net_values), 4),
+                "profit_factor": round(profit_factor, 4),
+                "avg_trade_pct": round(sum(net_values) / len(net_values), 4) if net_values else 0.0,
+                "best_trade_pct": round(max(net_values), 4) if net_values else 0.0,
+                "worst_trade_pct": round(min(net_values), 4) if net_values else 0.0,
+            }
+        )
+    return rows
+
+
+def _build_equity_curve_rows(trades: list[dict], initial_balance: float) -> list[dict]:
+    equity = float(initial_balance or 0.0)
+    peak = equity
+    rows = [
+        {
+            "trade_index": 0,
+            "timestamp": None,
+            "equity": round(equity, 8),
+            "drawdown_pct": 0.0,
+        }
+    ]
+    for index, trade in enumerate(trades, start=1):
+        net_pct = float(trade.get("net_pct", 0.0) or 0.0)
+        equity *= 1 + (net_pct / 100.0)
+        peak = max(peak, equity)
+        drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
+        rows.append(
+            {
+                "trade_index": index,
+                "timestamp": trade.get("exit_timestamp") or trade.get("entry_timestamp"),
+                "equity": round(equity, 8),
+                "drawdown_pct": round(drawdown_pct, 8),
+            }
+        )
+    return rows
+
 def save_detailed_report(
     trades,
     summary,
@@ -361,7 +428,7 @@ def save_detailed_report(
     output_path = Path(output_dir or "reports/backtests")
     output_path.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = output_path / f"backtest_{symbol.replace('/', '_')}_{timeframe}_{days}d_{timestamp}.json"
+    filename = output_path / "backtest_report.json"
     strategy_snapshot = config.build_runtime_strategy_snapshot()
     report = {
         "metadata": {
@@ -391,9 +458,37 @@ def save_detailed_report(
         "diagnostics": build_trade_diagnostics(trades),
         "trades": trades
     }
+    trade_columns = [
+        "side",
+        "entry_price",
+        "exit_price",
+        "entry_timestamp",
+        "exit_timestamp",
+        "gross_pct",
+        "net_pct",
+        "reason",
+        "entry_setup",
+        "entry_source_setup",
+    ]
+    trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(columns=trade_columns)
+    trades_df.to_csv(output_path / "trades.csv", index=False)
+    pd.DataFrame([_flatten_summary_for_csv(summary)]).to_csv(output_path / "summary.csv", index=False)
+    setup_columns = [
+        "setup",
+        "trades",
+        "win_rate_pct",
+        "net_pct",
+        "profit_factor",
+        "avg_trade_pct",
+        "best_trade_pct",
+        "worst_trade_pct",
+    ]
+    setup_rows = _build_setup_report_rows(trades)
+    pd.DataFrame(setup_rows, columns=setup_columns).to_csv(output_path / "setup_report.csv", index=False)
+    pd.DataFrame(_build_equity_curve_rows(trades, initial_balance)).to_csv(output_path / "equity_curve.csv", index=False)
     with open(filename, 'w') as f:
         json.dump(report, f, indent=4)
-    print(f"Relatorio detalhado salvo em: {filename}")
+    print(f"Relatorios salvos em: {output_path}")
 
 def format_timestamp(ts):
     if isinstance(ts, pd.Timestamp):
@@ -1027,6 +1122,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=getattr(config.ProductionConfig, "ORDER_BALANCE_USAGE_PCT", getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)),
     )
     parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--single-run", action="store_true", help="Executar somente a quantidade exata de candles informada.")
     parser.add_argument("--leverage", type=float, default=float(getattr(config, "LEVERAGE", 1) or 1))
     parser.add_argument("--testnet", action="store_true")
     parser.add_argument(
@@ -1049,7 +1145,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print(f"Iniciando bateria de testes para {args.symbol}...")
-    periods = {30: 2880, 90: 8640, 180: 17280, 365: 35040}
+    periods = {"single": int(args.candles)} if args.single_run else {30: 2880, 90: 8640, 180: 17280, 365: 35040}
 
     results_summary = []
     for days, candle_count in periods.items():
@@ -1071,7 +1167,8 @@ if __name__ == "__main__":
                 output_dir=args.output_dir,
                 leverage=args.leverage,
             )
-            ready = check_governance_readiness(summary, days)
+            readiness_days = 1 if args.single_run else int(days)
+            ready = check_governance_readiness(summary, readiness_days)
             results_summary.append({"days": days, "net": summary["net_pct"], "ready": ready})
         except Exception as exc:
             print(f"Erro no periodo {days}d: {exc}")

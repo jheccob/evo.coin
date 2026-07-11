@@ -34,9 +34,16 @@ jobs:
           python-version: '3.12'
       - name: Install backtest dependencies
         run: pip install -r requirements-backtest.txt
+      - name: Run unit tests
+        env:
+          ENABLE_AI_ASSISTANT: 'false'
+        run: pytest tests/test_strategy.py -q
       - name: Run order_value backtest
+        env:
+          ENABLE_AI_ASSISTANT: 'false'
         run: |
           python backtest.py \
+            --single-run \
             --symbol "${{ inputs.symbol }}" \
             --timeframe "${{ inputs.timeframe }}" \
             --candles "${{ inputs.candles }}" \
@@ -48,5 +55,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: backtest-reports
-          path: reports/backtests/**
+          path: reports/backtests/manual/**
           if-no-files-found: warn
