@@ -1,6 +1,8 @@
 name: Backtest
 
 on:
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       symbol:
@@ -25,7 +27,7 @@ on:
         required: true
 
 jobs:
-  backtest:
+  tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,6 +40,18 @@ jobs:
         env:
           ENABLE_AI_ASSISTANT: 'false'
         run: pytest tests/test_strategy.py -q
+
+  backtest:
+    if: github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backtest dependencies
+        run: pip install -r requirements-backtest.txt
       - name: Run order_value backtest
         env:
           ENABLE_AI_ASSISTANT: 'false'

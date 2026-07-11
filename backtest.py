@@ -169,6 +169,14 @@ def _build_reason_breakdown(trades):
 
 def _resolve_trade_stop_pct(trade: dict) -> float:
     side = str(trade.get("side") or "").strip().lower()
+    try:
+        entry_price = float(trade.get("entry_price") or 0.0)
+        initial_stop = float(trade.get("initial_stop") or 0.0)
+    except (TypeError, ValueError):
+        entry_price = 0.0
+        initial_stop = 0.0
+    if entry_price > 0 and initial_stop > 0:
+        return abs(entry_price - initial_stop) / entry_price * 100.0
     if side == "long":
         return float(getattr(config, "LONG_STOP_LOSS_PCT", 0.0) or 0.0)
     if side == "short":
@@ -382,20 +390,57 @@ def _build_setup_report_rows(trades: list[dict]) -> list[dict]:
     return rows
 
 
-def _build_equity_curve_rows(trades: list[dict], initial_balance: float) -> list[dict]:
+def _resolve_account_model_name(position_sizing_mode: str | None) -> str:
+    mode = str(position_sizing_mode or "risk").strip().lower()
+    if mode == "order_value":
+        return "order_value_notional"
+    if mode == "hybrid":
+        return "risk_capped_by_margin_allocation"
+    if mode == "allocation":
+        return "fixed_margin_allocation"
+    return "fixed_risk_per_trade"
+
+
+def _build_equity_curve_rows(
+    trades: list[dict],
+    initial_balance: float,
+    *,
+    risk_per_trade_pct: float,
+    leverage: float,
+    position_sizing_mode: str,
+    position_margin_allocation_pct: float,
+) -> list[dict]:
     equity = float(initial_balance or 0.0)
     peak = equity
+    sizing_service = RiskManagementService(database=db)
     rows = [
         {
             "trade_index": 0,
             "timestamp": None,
             "equity": round(equity, 8),
             "drawdown_pct": 0.0,
+            "position_notional": 0.0,
+            "pnl_usdt": 0.0,
+            "stop_loss_pct": 0.0,
         }
     ]
     for index, trade in enumerate(trades, start=1):
+        stop_pct = _resolve_trade_stop_pct(trade)
         net_pct = float(trade.get("net_pct", 0.0) or 0.0)
-        equity *= 1 + (net_pct / 100.0)
+        sizing = sizing_service.calculate_position_size(
+            account_balance=equity,
+            entry_price=1.0,
+            stop_loss_pct=stop_pct,
+            risk_pct=float(risk_per_trade_pct or 0.0),
+            leverage=leverage,
+            sizing_mode=position_sizing_mode,
+            margin_allocation_pct=position_margin_allocation_pct,
+        )
+        position_notional = float(
+            sizing.get("position_notional_raw", sizing.get("position_notional", 0.0)) or 0.0
+        )
+        pnl_usdt = position_notional * (net_pct / 100.0)
+        equity += pnl_usdt
         peak = max(peak, equity)
         drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
         rows.append(
@@ -404,6 +449,10 @@ def _build_equity_curve_rows(trades: list[dict], initial_balance: float) -> list
                 "timestamp": trade.get("exit_timestamp") or trade.get("entry_timestamp"),
                 "equity": round(equity, 8),
                 "drawdown_pct": round(drawdown_pct, 8),
+                "position_notional": round(position_notional, 8),
+                "pnl_usdt": round(pnl_usdt, 8),
+                "stop_loss_pct": round(stop_pct, 8),
+                "risk_cap_applied": bool(sizing.get("risk_cap_applied", False)),
             }
         )
     return rows
@@ -447,11 +496,7 @@ def save_detailed_report(
                     round(float(order_balance_usage_pct), 4) if order_balance_usage_pct is not None else None
                 ),
                 "leverage": round(float(leverage), 4),
-                "model": (
-                    "fixed_margin_allocation"
-                    if str(position_sizing_mode).strip().lower() == "allocation"
-                    else "fixed_risk_per_trade"
-                ),
+                "model": _resolve_account_model_name(position_sizing_mode),
             },
         },
         "summary": summary,
@@ -485,7 +530,16 @@ def save_detailed_report(
     ]
     setup_rows = _build_setup_report_rows(trades)
     pd.DataFrame(setup_rows, columns=setup_columns).to_csv(output_path / "setup_report.csv", index=False)
-    pd.DataFrame(_build_equity_curve_rows(trades, initial_balance)).to_csv(output_path / "equity_curve.csv", index=False)
+    pd.DataFrame(
+        _build_equity_curve_rows(
+            trades,
+            initial_balance,
+            risk_per_trade_pct=risk_per_trade_pct,
+            leverage=leverage,
+            position_sizing_mode=position_sizing_mode,
+            position_margin_allocation_pct=position_margin_allocation_pct,
+        )
+    ).to_csv(output_path / "equity_curve.csv", index=False)
     with open(filename, 'w') as f:
         json.dump(report, f, indent=4)
     print(f"Relatorios salvos em: {output_path}")

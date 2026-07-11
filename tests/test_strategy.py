@@ -3645,6 +3645,41 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result["signal"], "hold")
         self.assertIn("short_score_baixo", result["reason"])
 
+    def test_resolve_trade_stop_pct_prefers_real_initial_stop(self):
+        trade = {"side": "long", "entry_price": 100.0, "initial_stop": 97.5}
+
+        self.assertAlmostEqual(backtest._resolve_trade_stop_pct(trade), 2.5, places=4)
+
+    def test_equity_curve_uses_order_value_sizing_and_real_stop(self):
+        trades = [
+            {
+                "side": "long",
+                "entry_price": 100.0,
+                "initial_stop": 95.0,
+                "net_pct": 10.0,
+                "exit_timestamp": "2026-01-01T00:15:00Z",
+            }
+        ]
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            rows = backtest._build_equity_curve_rows(
+                trades,
+                22.0,
+                risk_per_trade_pct=4.0,
+                leverage=10.0,
+                position_sizing_mode="order_value",
+                position_margin_allocation_pct=100.0,
+            )
+
+        self.assertAlmostEqual(rows[1]["position_notional"], 17.6, places=2)
+        self.assertAlmostEqual(rows[1]["pnl_usdt"], 1.76, places=2)
+        self.assertAlmostEqual(rows[1]["equity"], 23.76, places=2)
+        self.assertTrue(rows[1]["risk_cap_applied"])
+
+    def test_account_model_name_maps_order_value_and_hybrid(self):
+        self.assertEqual(backtest._resolve_account_model_name("order_value"), "order_value_notional")
+        self.assertEqual(backtest._resolve_account_model_name("hybrid"), "risk_capped_by_margin_allocation")
+
 
 class SymbolGovernanceTests(unittest.TestCase):
     def test_symbol_validation_record_reads_registry(self):
@@ -4016,6 +4051,42 @@ class SymbolGovernanceTests(unittest.TestCase):
         self.assertIn("Saldo disponivel insuficiente", result["reason"])
         self.assertAlmostEqual(result["margin_check"]["required_margin"], 2.145, places=3)
         self.assertGreater(result["margin_check"]["required_margin_with_buffer"], 2.145)
+
+    def test_build_live_execution_plan_order_value_free_zero_blocks_instead_of_fallback_to_equity(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 21.45, "free": 0.0}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.000343,
+            "position_notional": 21.45,
+            "risk_per_trade_pct": 2.0,
+            "leverage": 10.0,
+            "sizing_mode": "order_value",
+        }
+        risk_service.evaluate_symbol_operability.return_value = {
+            "allowed": True,
+            "rounded_quantity": 0.000343,
+            "rounded_notional": 21.45,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+            mock.patch.object(config, "FEE_PCT", 0.08),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=62500.0,
+            )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["available_balance"], 0.0)
+        self.assertIn("Saldo disponivel insuficiente", result["reason"])
 
     def _build_mock_live_plan_services(self):
         execution_service = mock.Mock()

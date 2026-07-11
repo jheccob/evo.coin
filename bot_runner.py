@@ -833,11 +833,16 @@ def _build_live_entry_plan(
         testnet=bool(config.TESTNET),
     )
     account_equity = float(balance_snapshot.get("total") or 0.0)
-    available_balance = float(balance_snapshot.get("free") or 0.0)
+    raw_available_balance = balance_snapshot.get("free")
+    if raw_available_balance is None:
+        raw_available_balance = balance_snapshot.get("availableBalance")
+    available_balance = (
+        float(raw_available_balance)
+        if raw_available_balance is not None
+        else account_equity
+    )
     if account_equity <= 0:
         account_equity = available_balance
-    if available_balance <= 0:
-        available_balance = account_equity
     if account_equity <= 0:
         return {
             "allowed": False,
