@@ -332,6 +332,62 @@ def _resolve_reward_distances(
     }
 
 
+def _last_numeric_values(candle_window, column: str, lookback: int) -> list[float]:
+    if candle_window is None or lookback <= 0:
+        return []
+    try:
+        if hasattr(candle_window, "tail") and column in candle_window:
+            values = candle_window.tail(lookback)[column].tolist()
+        else:
+            rows = list(candle_window)[-lookback:]
+            values = [row.get(column) for row in rows if isinstance(row, dict)]
+    except Exception:
+        return []
+
+    resolved = []
+    for value in values:
+        try:
+            resolved.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return resolved
+
+
+def _resolve_structural_stop_price(
+    *,
+    side: str,
+    entry_price: float,
+    atr: float,
+    candle_window=None,
+) -> float | None:
+    if not bool(getattr(config, "USE_STRUCTURAL_STOP", True)):
+        return None
+
+    lookback = max(int(getattr(config, "STRUCTURAL_STOP_LOOKBACK", 10) or 10), 1)
+    lows = _last_numeric_values(candle_window, "low", lookback)
+    highs = _last_numeric_values(candle_window, "high", lookback)
+    if len(lows) < lookback or len(highs) < lookback:
+        return None
+
+    atr_buffer = max(float(atr or 0.0), 0.0) * max(
+        float(getattr(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25) or 0.25),
+        0.0,
+    )
+    min_buffer = (
+        float(entry_price)
+        * max(float(getattr(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10) or 0.10), 0.0)
+        / 100.0
+    )
+    buffer = max(atr_buffer, min_buffer)
+
+    if side == "long":
+        stop_price = min(lows) - buffer
+        return stop_price if stop_price < float(entry_price) else None
+
+    stop_price = max(highs) + buffer
+    return stop_price if stop_price > float(entry_price) else None
+
+
 def create_position(
     signal: str,
     entry_price: float,
@@ -345,6 +401,7 @@ def create_position(
     entry_setup: str | None = None,
     entry_source_setup: str | None = None,
     management_profile: str | None = None,
+    candle_window=None,
 ):
     side = "long" if signal == "buy" else "short"
     profile = _resolve_managed_position_profile(
@@ -363,6 +420,16 @@ def create_position(
         stop_loss_pct=float(profile["stop_loss_pct"]),
         use_fixed_stop=bool(profile["use_fixed_stop"]),
     )
+    structural_stop_price = _resolve_structural_stop_price(
+        side=side,
+        entry_price=entry_price,
+        atr=atr,
+        candle_window=candle_window,
+    )
+    if structural_stop_price is not None:
+        risk_distance = (entry_price - structural_stop_price) if side == "long" else (structural_stop_price - entry_price)
+        if entry_price > 0 and risk_distance > 0:
+            profile["stop_loss_pct"] = (risk_distance / entry_price) * 100.0
     reward_distances = _resolve_reward_distances(
         entry_price=entry_price,
         risk_distance=risk_distance,

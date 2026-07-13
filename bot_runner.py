@@ -407,6 +407,7 @@ def _build_runtime_position(
     signal_result: dict | None = None,
     entry_setup: str | None = None,
     entry_source_setup: str | None = None,
+    candle_window=None,
 ) -> dict:
     resolved_profile = _resolve_runtime_execution_profile(execution_profile)
     setup_name, source_setup_name = _resolve_signal_setup_names(
@@ -429,6 +430,7 @@ def _build_runtime_position(
         atr=atr,
         entry_setup=setup_name,
         entry_source_setup=source_setup_name,
+        candle_window=candle_window,
     )
     return _attach_runtime_entry_context(position, signal_result)
 
@@ -809,6 +811,7 @@ def _build_live_entry_plan(
     execution_profile: str | None = None,
     signal_result: dict | None = None,
     timestamp=None,
+    candle_window=None,
 ) -> dict:
     open_positions = _find_live_positions(context)
     max_open_real_trades = int(getattr(config, "MAX_OPEN_REAL_TRADES", 1) or 1)
@@ -828,17 +831,20 @@ def _build_live_entry_plan(
         symbol=config.SYMBOL,
         testnet=bool(config.TESTNET),
     )
+    available_balance = float(balance_snapshot.get("free") or 0.0)
     account_balance = float(balance_snapshot.get("total") or 0.0)
     if account_balance <= 0:
-        account_balance = float(balance_snapshot.get("free") or 0.0)
+        account_balance = available_balance
+    if available_balance <= 0:
+        available_balance = account_balance
     if account_balance <= 0:
         return {
             "allowed": False,
             "reason": "Saldo indisponivel para calcular a ordem live.",
             "balance_snapshot": balance_snapshot,
         }
-    min_live_balance = float(getattr(config.ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
-    if account_balance < min_live_balance:
+    min_live_balance = float(getattr(config.ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 0.0) or 0.0)
+    if min_live_balance > 0 and account_balance < min_live_balance:
         return {
             "allowed": False,
             "reason": (
@@ -856,6 +862,7 @@ def _build_live_entry_plan(
         atr=float(atr or 0.0),
         execution_profile=execution_profile,
         signal_result=signal_result,
+        candle_window=candle_window,
     )
     if bool(getattr(config.ProductionConfig, "REQUIRE_LIVE_TRAILING_STOP", True)):
         trailing_trigger_price = float(preview_position.get("trailing_trigger_price") or 0.0)
@@ -884,6 +891,7 @@ def _build_live_entry_plan(
         max_open_trades=max_open_real_trades,
         execution_scope="live",
         live_context=context,
+        position_side="long" if signal_side == "buy" else "short",
     )
 
     if not bool(risk_data.get("allowed", False)):
@@ -914,6 +922,7 @@ def _build_live_entry_plan(
         sizing_mode=str(risk_data.get("sizing_mode") or getattr(config, "POSITION_SIZING_MODE", "risk")),
         margin_allocation_pct=float(
             risk_data.get("margin_allocation_pct")
+            or risk_data.get("order_balance_usage_pct")
             or getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0)
             or 0.0
         ),
@@ -931,13 +940,44 @@ def _build_live_entry_plan(
     resolved_position_notional = float(
         operability.get("rounded_notional") or risk_data.get("position_notional", 0.0) or 0.0
     )
+    resolved_leverage = max(float(risk_data.get("leverage") or getattr(config, "LEVERAGE", 1) or 1), 1.0)
+    required_margin = resolved_position_notional / resolved_leverage if resolved_leverage > 0 else resolved_position_notional
+    fee_buffer_pct = max(float(getattr(config, "FEE_PCT", 0.0) or 0.0), 0.0)
+    required_margin_with_buffer = required_margin + (resolved_position_notional * (fee_buffer_pct / 100.0))
+    margin_check = {
+        "account_balance": round(account_balance, 8),
+        "available_balance": round(available_balance, 8),
+        "order_notional": round(resolved_position_notional, 8),
+        "leverage": round(resolved_leverage, 8),
+        "required_margin": round(required_margin, 8),
+        "required_margin_with_buffer": round(required_margin_with_buffer, 8),
+    }
+    if available_balance + 1e-12 < required_margin_with_buffer:
+        block_reason = (
+            "Saldo disponivel insuficiente para margem da ordem "
+            f"(available_balance={available_balance:.4f}, "
+            f"required_margin_with_buffer={required_margin_with_buffer:.4f})."
+        )
+        return {
+            "allowed": False,
+            "reason": block_reason,
+            "account_balance": account_balance,
+            "available_balance": available_balance,
+            "balance_snapshot": balance_snapshot,
+            "risk_data": risk_data,
+            "trading_rules": trading_rules,
+            "operability": operability,
+            "margin_check": {**margin_check, "reason": block_reason},
+        }
 
     return {
         "allowed": True,
         "reason": "",
         "account_balance": account_balance,
+        "available_balance": available_balance,
         "balance_snapshot": balance_snapshot,
         "trading_rules": trading_rules,
+        "margin_check": margin_check,
         "operability": operability,
         **risk_data,
         "quantity": resolved_quantity,
@@ -1364,6 +1404,19 @@ def _build_runtime_paper_position_metrics(position: dict, runtime_snapshot: dict
         entry_price=entry_price,
         stop_loss_pct=stop_loss_pct,
         risk_pct=risk_pct,
+        leverage=float(getattr(config, "LEVERAGE", 1) or 1),
+        sizing_mode=str(getattr(config, "POSITION_SIZING_MODE", "risk") or "risk"),
+        margin_allocation_pct=float(
+            getattr(
+                config,
+                "ORDER_BALANCE_USAGE_PCT"
+                if str(getattr(config, "POSITION_SIZING_MODE", "")).strip().lower() == "order_value"
+                else "POSITION_MARGIN_ALLOCATION_PCT",
+                0.0,
+            )
+            or 0.0
+        ),
+        position_side=str(position.get("side") or "long"),
     )
     quantity = float(sizing.get("quantity", 0.0) or 0.0)
     position_notional = float(sizing.get("position_notional", 0.0) or 0.0)
@@ -1377,7 +1430,11 @@ def _build_runtime_paper_position_metrics(position: dict, runtime_snapshot: dict
         "account_reference_balance": float(account_balance),
         "risk_mode": "normal",
         "size_reduced": False,
-        "risk_reason": "",
+        "risk_reason": str(sizing.get("risk_reason") or ""),
+        "sizing_mode": sizing.get("sizing_mode"),
+        "required_margin": float(sizing.get("required_margin", 0.0) or 0.0),
+        "order_balance_usage_pct": float(sizing.get("order_balance_usage_pct", 0.0) or 0.0),
+        "risk_cap_applied": bool(sizing.get("risk_cap_applied", False)),
     }
 
 
@@ -2860,6 +2917,7 @@ def _process_closed_candle(
                 execution_profile=entry_execution_profile,
                 signal_result=resultado,
                 timestamp=timestamp_atual,
+                candle_window=candle_slice,
             )
             if not live_plan.get("allowed", False):
                 log_info(f"Entrada live bloqueada: {live_plan.get('reason')}")
@@ -2888,6 +2946,9 @@ def _process_closed_candle(
                         "account_balance": live_plan.get("account_balance"),
                         "risk_amount": live_plan.get("risk_amount"),
                         "position_notional": live_plan.get("position_notional"),
+                        "required_margin": live_plan.get("required_margin"),
+                        "order_balance_usage_pct": live_plan.get("order_balance_usage_pct"),
+                        "risk_cap_applied": live_plan.get("risk_cap_applied"),
                         "stop_loss_price": live_plan.get("stop_loss_price"),
                         "take_profit_price": live_plan.get("take_profit_price"),
                     },
@@ -2903,6 +2964,7 @@ def _process_closed_candle(
                     atr=float(resultado.get("atr", 0.0) or 0.0),
                     execution_profile=position_execution_profile,
                     signal_result=resultado,
+                    candle_window=candle_slice,
                 )
                 posicao_atual.update(
                     {
@@ -3001,6 +3063,7 @@ def _process_closed_candle(
                 atr=float(resultado.get("atr", 0.0) or 0.0),
                 execution_profile=entry_execution_profile,
                 signal_result=resultado,
+                candle_window=candle_slice,
             )
             posicao_atual["execution_mode"] = "paper"
             posicao_atual["execution_profile"] = entry_execution_profile
