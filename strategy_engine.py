@@ -413,10 +413,6 @@ def _detect_liquidity_sweep_reversal_long(df: pd.DataFrame, params: StrategyPara
     elif bool(getattr(config, "LIQUIDITY_SWEEP_REQUIRE_CONFIRMATION", True)):
         return None
 
-    if float(structure.get("distance_to_recent_low_pct", 0.0) or 0.0) > float(
-        getattr(config, "LIQUIDITY_SWEEP_MAX_BOUNCE_FROM_LOW_PCT", 4.0) or 4.0
-    ):
-        return None
     if score < int(getattr(config, "LIQUIDITY_SWEEP_MIN_SCORE", 5) or 5):
         return None
     return {**structure, "score": score, "reasons": reasons}
@@ -472,10 +468,6 @@ def _detect_liquidity_sweep_reversal_short(df: pd.DataFrame, params: StrategyPar
     elif bool(getattr(config, "LIQUIDITY_SWEEP_REQUIRE_CONFIRMATION", True)):
         return None
 
-    if float(structure.get("distance_to_recent_high_pct", 0.0) or 0.0) > float(
-        getattr(config, "LIQUIDITY_SWEEP_MAX_PULLBACK_FROM_HIGH_PCT", 4.0) or 4.0
-    ):
-        return None
     if score < int(getattr(config, "LIQUIDITY_SWEEP_MIN_SCORE", 5) or 5):
         return None
     return {**structure, "score": score, "reasons": reasons}
@@ -489,6 +481,28 @@ def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> D
 
     pullback_long = bool(row["low"] <= row["ema_fast"] * (1 + params.pullback_buffer_pct / 100))
     pullback_short = bool(row["high"] >= row["ema_fast"] * (1 - params.pullback_buffer_pct / 100))
+
+    sweep_reversal_long = _detect_liquidity_sweep_reversal_long(df, params, index=index)
+    if sweep_reversal_long:
+        return {
+            "setup": "liquidity_sweep_reversal_long",
+            "direction": "long",
+            "regime": {
+                **regime,
+                "market_structure": sweep_reversal_long,
+            },
+        }
+
+    sweep_reversal_short = _detect_liquidity_sweep_reversal_short(df, params, index=index)
+    if sweep_reversal_short:
+        return {
+            "setup": "liquidity_sweep_reversal_short",
+            "direction": "short",
+            "regime": {
+                **regime,
+                "market_structure": sweep_reversal_short,
+            },
+        }
 
     if regime_name == "trend_bull" and pullback_long:
         return {"setup": "pullback_long", "direction": "long", "regime": regime}
@@ -517,28 +531,6 @@ def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> D
             },
         }
 
-    sweep_reversal_long = _detect_liquidity_sweep_reversal_long(df, params, index=index)
-    if sweep_reversal_long:
-        return {
-            "setup": "liquidity_sweep_reversal_long",
-            "direction": "long",
-            "regime": {
-                **regime,
-                "market_structure": sweep_reversal_long,
-            },
-        }
-
-    sweep_reversal_short = _detect_liquidity_sweep_reversal_short(df, params, index=index)
-    if sweep_reversal_short:
-        return {
-            "setup": "liquidity_sweep_reversal_short",
-            "direction": "short",
-            "regime": {
-                **regime,
-                "market_structure": sweep_reversal_short,
-            },
-        }
-
     if regime_name in {"trend_bull", "weak_bull"}:
         if row["close"] > row["ema_fast"] * (1 + params.long_max_distance_pct / 100):
             return {"setup": None, "direction": None, "regime": regime}
@@ -564,6 +556,46 @@ def get_min_required_rows(params: StrategyParams) -> int:
         config.ADX_PERIOD + 5,
         config.VOLUME_MA_PERIOD + 5,
     )
+
+
+def _has_complete_prepared_features(df: pd.DataFrame, index: int = -1) -> bool:
+    required_columns = {
+        "ema_fast",
+        "ema_slow",
+        "ema_trend",
+        "rsi",
+        "adx",
+        "vol_ma",
+        "atr",
+        "atr_pct",
+    }
+    if not required_columns.issubset(set(df.columns)):
+        return False
+    if df.empty:
+        return False
+    effective_index = len(df) + index if index < 0 else index
+    if effective_index < 0 or effective_index >= len(df):
+        return False
+    row = df.iloc[effective_index]
+    return all(pd.notna(row.get(column)) for column in required_columns)
+
+
+def _resolve_min_required_rows(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> int:
+    min_rows = get_min_required_rows(params)
+    if not _has_complete_prepared_features(df, index=index):
+        return min_rows
+
+    prepared_min_rows = max(
+        3,
+        int(getattr(config, "MARKET_STRUCTURE_LOOKBACK", 32) or 32) + 5,
+        int(getattr(config, "LIQUIDITY_SWEEP_LOOKBACK", 24) or 24) + 5,
+        int(getattr(config, "VOLUME_MA_PERIOD", 20) or 20) + 5,
+        int(getattr(config, "ADX_PERIOD", 14) or 14) + 5,
+        int(params.atr_period) + 5,
+        int(params.long_slope_lookback) + 5,
+        int(params.short_slope_lookback) + 5,
+    )
+    return min(min_rows, prepared_min_rows)
 
 
 def _build_signal_payload(
@@ -676,7 +708,15 @@ def _resolve_triggerless_fallback_setup(setup: Dict[str, object], row, prev) -> 
     return setup
 
 
-def _market_structure_entry_block(df: pd.DataFrame, row, prev, side: str, index: int = -1) -> Optional[str]:
+def _market_structure_entry_block(
+    df: pd.DataFrame,
+    row,
+    prev,
+    side: str,
+    index: int = -1,
+    *,
+    strict_reversal: bool = False,
+) -> Optional[str]:
     if not bool(getattr(config, "MARKET_STRUCTURE_GUARD_ENABLED", True)):
         return None
     structure = calculate_market_structure(df, index=index)
@@ -696,12 +736,13 @@ def _market_structure_entry_block(df: pd.DataFrame, row, prev, side: str, index:
             and not breakout_with_volume
         ):
             return "long_near_resistance"
-        risk_pct = float(structure.get("distance_to_recent_low_pct", 0.0) or 0.0)
-        if risk_pct > float(getattr(config, "LIQUIDITY_SWEEP_MAX_BOUNCE_FROM_LOW_PCT", 4.0) or 4.0):
-            return "long_entrada_tardia"
-        reward_pct = float(structure.get("space_to_next_resistance_pct", 0.0) or 0.0)
-        if reward_pct < min_space or risk_pct <= 0 or (reward_pct / risk_pct) < min_rr:
-            return "long_rr_insuficiente"
+        if strict_reversal:
+            risk_pct = float(structure.get("distance_to_recent_low_pct", 0.0) or 0.0)
+            if risk_pct > float(getattr(config, "LIQUIDITY_SWEEP_MAX_BOUNCE_FROM_LOW_PCT", 4.0) or 4.0):
+                return "long_entrada_tardia"
+            reward_pct = float(structure.get("space_to_next_resistance_pct", 0.0) or 0.0)
+            if reward_pct < min_space or risk_pct <= 0 or (reward_pct / risk_pct) < min_rr:
+                return "long_rr_insuficiente"
         return None
 
     breakdown_with_volume = bool(float(row["close"]) < float(structure.get("prior_recent_low", row["low"])) and volume_ok)
@@ -711,17 +752,23 @@ def _market_structure_entry_block(df: pd.DataFrame, row, prev, side: str, index:
         and not breakdown_with_volume
     ):
         return "short_near_support"
-    risk_pct = float(structure.get("distance_to_recent_high_pct", 0.0) or 0.0)
-    if risk_pct > float(getattr(config, "LIQUIDITY_SWEEP_MAX_PULLBACK_FROM_HIGH_PCT", 4.0) or 4.0):
-        return "short_entrada_tardia"
-    reward_pct = float(structure.get("space_to_next_support_pct", 0.0) or 0.0)
-    if reward_pct < min_space or risk_pct <= 0 or (reward_pct / risk_pct) < min_rr:
-        return "short_rr_insuficiente"
+    if strict_reversal:
+        risk_pct = float(structure.get("distance_to_recent_high_pct", 0.0) or 0.0)
+        if risk_pct > float(getattr(config, "LIQUIDITY_SWEEP_MAX_PULLBACK_FROM_HIGH_PCT", 4.0) or 4.0):
+            return "short_entrada_tardia"
+        reward_pct = float(structure.get("space_to_next_support_pct", 0.0) or 0.0)
+        if reward_pct < min_space or risk_pct <= 0 or (reward_pct / risk_pct) < min_rr:
+            return "short_rr_insuficiente"
     return None
 
 
+def _should_apply_market_structure_guard(setup: Dict[str, object]) -> bool:
+    setup_name = str((setup or {}).get("setup") or "").strip().lower()
+    return setup_name in {"trend_resume_long", "trend_resume_short"}
+
+
 def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Dict[str, object]:
-    min_rows = get_min_required_rows(params)
+    min_rows = _resolve_min_required_rows(df, params, index=index)
 
     if len(df) < min_rows:
         return {"signal": "hold", "reason": "dados insuficientes"}
@@ -856,7 +903,7 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             }
 
         if is_sweep_reversal_long:
-            block_reason = _market_structure_entry_block(df, row, prev, "long", index=index)
+            block_reason = _market_structure_entry_block(df, row, prev, "long", index=index, strict_reversal=True)
             if block_reason:
                 return {"signal": "hold", "reason": block_reason, "setup": setup}
             structure = dict(regime_payload.get("market_structure") or {})
@@ -1066,9 +1113,10 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
 
         min_long_score = getattr(config, "MIN_LONG_SCORE", 7)
         if score >= min_long_score:
-            block_reason = _market_structure_entry_block(df, row, prev, "long", index=index)
-            if block_reason:
-                return {"signal": "hold", "reason": block_reason, "setup": setup}
+            if _should_apply_market_structure_guard(setup):
+                block_reason = _market_structure_entry_block(df, row, prev, "long", index=index)
+                if block_reason:
+                    return {"signal": "hold", "reason": block_reason, "setup": setup}
             return {
                 "signal": "buy",
                 "reason": f"long_score={score}|" + ",".join(reasons),
@@ -1094,7 +1142,7 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             return {"signal": "hold", "reason": "trend_resume_short bloqueado", "setup": setup}
 
         if is_sweep_reversal_short:
-            block_reason = _market_structure_entry_block(df, row, prev, "short", index=index)
+            block_reason = _market_structure_entry_block(df, row, prev, "short", index=index, strict_reversal=True)
             if block_reason:
                 return {"signal": "hold", "reason": block_reason, "setup": setup}
             structure = dict(regime_payload.get("market_structure") or {})
@@ -1409,9 +1457,10 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             reasons.append("breakdown")
 
         if bool(getattr(config, "DISABLE_SHORT_SCORE_GATE", False)):
-            block_reason = _market_structure_entry_block(df, row, prev, "short", index=index)
-            if block_reason:
-                return {"signal": "hold", "reason": block_reason, "setup": setup}
+            if _should_apply_market_structure_guard(setup):
+                block_reason = _market_structure_entry_block(df, row, prev, "short", index=index)
+                if block_reason:
+                    return {"signal": "hold", "reason": block_reason, "setup": setup}
             return {
                 "signal": "sell",
                 "reason": f"short_score={score}|" + ",".join(reasons),
@@ -1422,9 +1471,10 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
 
         min_short_score = getattr(config, "MIN_SHORT_SCORE", 7)
         if score >= min_short_score:
-            block_reason = _market_structure_entry_block(df, row, prev, "short", index=index)
-            if block_reason:
-                return {"signal": "hold", "reason": block_reason, "setup": setup}
+            if _should_apply_market_structure_guard(setup):
+                block_reason = _market_structure_entry_block(df, row, prev, "short", index=index)
+                if block_reason:
+                    return {"signal": "hold", "reason": block_reason, "setup": setup}
             return {
                 "signal": "sell",
                 "reason": f"short_score={score}|" + ",".join(reasons),

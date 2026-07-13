@@ -357,6 +357,8 @@ def _resolve_structural_stop_price(
     min_buffer = float(entry_price) * max(float(getattr(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10) or 0.10), 0.0) / 100.0
     buffer = max(atr_buffer, min_buffer)
     setup = str(entry_setup or "").strip().lower()
+    if not setup:
+        return None
 
     if side == "long":
         reference = None

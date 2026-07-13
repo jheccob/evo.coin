@@ -3630,6 +3630,8 @@ class StrategyTests(unittest.TestCase):
 
     def test_short_below_min_score_does_not_sell_when_score_gate_enabled(self):
         df = self._build_liquidity_sweep_df("short", recover=True)
+        df = df.copy()
+        df["ema_trend"] = df["close"] + 2.0
         setup = {"setup": "trend_resume_short", "direction": "short", "regime": {"regime": "trend_bear"}}
 
         with (

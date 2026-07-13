@@ -148,7 +148,7 @@ class RiskManagementService:
             "sizing_mode": resolved_sizing_mode,
             "leverage": round(resolved_leverage, 4),
             "margin_allocation_pct": round(resolved_margin_allocation_pct, 4),
-            "margin_allocated_amount": round(margin_allocated_amount, 2),
+            "margin_allocated_amount": float(margin_allocated_amount),
             "margin_allocated_amount_raw": float(margin_allocated_amount),
             "effective_risk_pct": round(effective_risk_pct, 4),
             "requested_risk_pct": round(resolved_risk_pct, 4),
@@ -156,7 +156,7 @@ class RiskManagementService:
             "requested_order_notional_raw": float(requested_order_notional),
             "final_order_notional": round(position_notional, 2),
             "final_order_notional_raw": float(position_notional),
-            "required_margin": round(margin_allocated_amount, 2),
+            "required_margin": float(margin_allocated_amount),
             "required_margin_raw": float(margin_allocated_amount),
             "risk_cap_applied": bool(risk_cap_applied),
             "order_balance_usage_pct": round(
