@@ -5219,7 +5219,7 @@ def render_workspace_capital_risk_panel(
 ) -> None:
     selected_account_id = str(selected_account["account_id"])
     risk_profile = execution_context.get("risk_profile") or {}
-    min_live_capital = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
+    min_live_capital = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 0.0) or 0.0)
 
     st.markdown("### 💰 Capital e Limites do Bot")
     st.caption(
@@ -5944,7 +5944,7 @@ def render_multiuser_workspace_tab():
                     )
                 with acc_col3:
                     min_live_capital = float(
-                        getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0
+                        getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 0.0) or 0.0
                     )
                     selected_capital_base = max(
                         float(selected_account.get("capital_base", 0.0) or 0.0),

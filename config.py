@@ -100,9 +100,11 @@ ALT_MIN_GLOBAL_ATR_PCT = _get_float("ALT_MIN_GLOBAL_ATR_PCT", 0.0)
 POLL_SECONDS = _get_int("POLL_SECONDS", 30)
 LEVERAGE = _get_int("LEVERAGE", 10)
 POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", "hybrid").strip().lower() or "hybrid"
+ORDER_BALANCE_USAGE_PCT = _get_float("ORDER_BALANCE_USAGE_PCT", 100.0)
+ORDER_VALUE_RISK_CAP = _get_bool("ORDER_VALUE_RISK_CAP", True)
 POSITION_MARGIN_ALLOCATION_PCT = _get_float("POSITION_MARGIN_ALLOCATION_PCT", 100.0)
 ENFORCE_LIVE_RISK_CAPPED_ALLOCATION = _get_bool("ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True)
-MIN_LIVE_ACCOUNT_BALANCE_USDT = _get_float("MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0)
+MIN_LIVE_ACCOUNT_BALANCE_USDT = _get_float("MIN_LIVE_ACCOUNT_BALANCE_USDT", 0.0)
 SINGLE_USER_RUNTIME_USER_ID = _get_int("SINGLE_USER_RUNTIME_USER_ID", 0)
 SINGLE_USER_RUNTIME_ACCOUNT_ID = os.getenv("SINGLE_USER_RUNTIME_ACCOUNT_ID", "env-primary")
 SINGLE_USER_RUNTIME_ACCOUNT_ALIAS = os.getenv("SINGLE_USER_RUNTIME_ACCOUNT_ALIAS", "Primary Env Account")
@@ -356,6 +358,10 @@ BLOCK_UNKNOWN_REGIME = _get_bool("BLOCK_UNKNOWN_REGIME", True)
 MIN_LONG_SCORE = _get_int("MIN_LONG_SCORE", 7)
 MIN_SHORT_SCORE = _get_int("MIN_SHORT_SCORE", 7)
 DISABLE_SHORT_SCORE_GATE = _get_bool("DISABLE_SHORT_SCORE_GATE", True)
+USE_STRUCTURAL_STOP = _get_bool("USE_STRUCTURAL_STOP", True)
+STRUCTURAL_STOP_LOOKBACK = _get_int("STRUCTURAL_STOP_LOOKBACK", 10)
+STRUCTURAL_STOP_ATR_BUFFER_MULT = _get_float("STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25)
+STRUCTURAL_STOP_MIN_BUFFER_PCT = _get_float("STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10)
 
 USE_NEXT_CANDLE_OPEN_FOR_BACKTEST = _get_bool("USE_NEXT_CANDLE_OPEN_FOR_BACKTEST", True)
 EXECUTION_PROFILE = str(os.getenv("EXECUTION_PROFILE", "managed")).strip().lower() or "managed"
@@ -397,6 +403,8 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
         "symbol": SYMBOL,
           "timeframe": TIMEFRAME,
           "position_sizing_mode": str(POSITION_SIZING_MODE),
+          "order_balance_usage_pct": float(ORDER_BALANCE_USAGE_PCT),
+          "order_value_risk_cap": bool(ORDER_VALUE_RISK_CAP),
           "position_margin_allocation_pct": float(POSITION_MARGIN_ALLOCATION_PCT),
           "leverage": int(LEVERAGE),
           "context_timeframe": resolved_context,
@@ -421,6 +429,10 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
         "short_trend_ema_lookback": int(SHORT_TREND_EMA_LOOKBACK),
         "long_pullback_min_trend_strength_pct": float(LONG_PULLBACK_MIN_TREND_STRENGTH_PCT),
         "short_pullback_min_trend_strength_pct": float(SHORT_PULLBACK_MIN_TREND_STRENGTH_PCT),
+        "use_structural_stop": bool(USE_STRUCTURAL_STOP),
+        "structural_stop_lookback": int(STRUCTURAL_STOP_LOOKBACK),
+        "structural_stop_atr_buffer_mult": float(STRUCTURAL_STOP_ATR_BUFFER_MULT),
+        "structural_stop_min_buffer_pct": float(STRUCTURAL_STOP_MIN_BUFFER_PCT),
         "min_trend_strength_pct_long": float(MIN_TREND_STRENGTH_PCT),
         "min_trend_strength_pct_short": float(MIN_TREND_STRENGTH_PCT_SHORT),
         "long_adx_threshold": float(LONG_ADX_THRESHOLD),
@@ -1467,6 +1479,8 @@ class ProductionConfig:
     RISK_REDUCED_MODE_MULTIPLIER = _get_float("RISK_REDUCED_MODE_MULTIPLIER", 0.5)
     RISK_PER_TRADE_PCT = _get_float("RISK_PER_TRADE_PCT", RISK_PER_TRADE_PCT)
     POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", POSITION_SIZING_MODE).strip().lower() or "hybrid"
+    ORDER_BALANCE_USAGE_PCT = _get_float("ORDER_BALANCE_USAGE_PCT", ORDER_BALANCE_USAGE_PCT)
+    ORDER_VALUE_RISK_CAP = _get_bool("ORDER_VALUE_RISK_CAP", ORDER_VALUE_RISK_CAP)
     POSITION_MARGIN_ALLOCATION_PCT = _get_float(
         "POSITION_MARGIN_ALLOCATION_PCT",
         POSITION_MARGIN_ALLOCATION_PCT,
@@ -1482,6 +1496,16 @@ class ProductionConfig:
     ENFORCE_MIN_RISK_REWARD_RATIO = _get_bool(
         "ENFORCE_MIN_RISK_REWARD_RATIO",
         ENFORCE_MIN_RISK_REWARD_RATIO,
+    )
+    USE_STRUCTURAL_STOP = _get_bool("USE_STRUCTURAL_STOP", USE_STRUCTURAL_STOP)
+    STRUCTURAL_STOP_LOOKBACK = _get_int("STRUCTURAL_STOP_LOOKBACK", STRUCTURAL_STOP_LOOKBACK)
+    STRUCTURAL_STOP_ATR_BUFFER_MULT = _get_float(
+        "STRUCTURAL_STOP_ATR_BUFFER_MULT",
+        STRUCTURAL_STOP_ATR_BUFFER_MULT,
+    )
+    STRUCTURAL_STOP_MIN_BUFFER_PCT = _get_float(
+        "STRUCTURAL_STOP_MIN_BUFFER_PCT",
+        STRUCTURAL_STOP_MIN_BUFFER_PCT,
     )
     MIN_RISK_REWARD_RATIO = _get_float("MIN_RISK_REWARD_RATIO", MIN_RISK_REWARD_RATIO)
     MAX_OPEN_PAPER_TRADES = _get_int("MAX_OPEN_PAPER_TRADES", 1)
@@ -1591,10 +1615,16 @@ __all__ = [
     "POLL_SECONDS",
     "LEVERAGE",
     "POSITION_SIZING_MODE",
+    "ORDER_BALANCE_USAGE_PCT",
+    "ORDER_VALUE_RISK_CAP",
     "POSITION_MARGIN_ALLOCATION_PCT",
     "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION",
     "MIN_LIVE_ACCOUNT_BALANCE_USDT",
     "ENFORCE_MIN_RISK_REWARD_RATIO",
+    "USE_STRUCTURAL_STOP",
+    "STRUCTURAL_STOP_LOOKBACK",
+    "STRUCTURAL_STOP_ATR_BUFFER_MULT",
+    "STRUCTURAL_STOP_MIN_BUFFER_PCT",
     "MIN_RISK_REWARD_RATIO",
     "SINGLE_USER_RUNTIME_USER_ID",
     "SINGLE_USER_RUNTIME_ACCOUNT_ID",

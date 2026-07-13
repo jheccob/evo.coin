@@ -2382,6 +2382,146 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
+    def test_calculate_position_size_order_value_uses_balance_pct_as_order_notional(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=22.0,
+            entry_price=63000.0,
+            stop_loss_pct=1.5,
+            risk_pct=4.0,
+            leverage=10,
+            sizing_mode="order_value",
+            margin_allocation_pct=100.0,
+        )
+
+        self.assertEqual(sizing["sizing_mode"], "order_value")
+        self.assertAlmostEqual(sizing["position_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 2.2, places=2)
+        self.assertAlmostEqual(sizing["quantity"], 22.0 / 63000.0, places=6)
+        self.assertFalse(sizing["risk_cap_applied"])
+
+    def test_calculate_position_size_order_value_supports_half_balance_usage(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=22.0,
+            entry_price=63000.0,
+            stop_loss_pct=1.5,
+            risk_pct=4.0,
+            leverage=10,
+            sizing_mode="order_value",
+            margin_allocation_pct=50.0,
+        )
+
+        self.assertAlmostEqual(sizing["position_notional"], 11.0, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 1.1, places=2)
+        self.assertAlmostEqual(sizing["order_balance_usage_pct"], 50.0, places=4)
+
+    def test_calculate_position_size_order_value_risk_cap_reduces_notional(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=63000.0,
+                stop_loss_pct=10.0,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertAlmostEqual(sizing["requested_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["final_order_notional"], 8.8, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 0.88, places=2)
+        self.assertTrue(sizing["risk_cap_applied"])
+
+    def test_calculate_position_size_order_value_can_block_when_risk_cap_disabled(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", False):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=63000.0,
+                stop_loss_pct=10.0,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertTrue(sizing["blocked"])
+        self.assertEqual(sizing["risk_reason"], "order_value_risco_acima_do_limite")
+        self.assertEqual(sizing["position_notional"], 0.0)
+
+    def test_calculate_position_size_short_stop_loss_price_is_above_entry(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=22.0,
+            entry_price=100.0,
+            stop_loss_pct=1.5,
+            risk_pct=4.0,
+            leverage=10,
+            sizing_mode="order_value",
+            margin_allocation_pct=50.0,
+            position_side="short",
+        )
+
+        self.assertGreater(sizing["stop_loss_price"], 100.0)
+        self.assertAlmostEqual(sizing["stop_loss_price"], 101.5, places=6)
+
+    def test_structural_stop_long_stays_below_recent_low(self):
+        candles = pd.DataFrame(
+            {
+                "low": [99.0, 98.0, 97.5],
+                "high": [101.0, 101.5, 102.0],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="buy",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+            )
+
+        self.assertLess(position["current_stop"], 97.5)
+        self.assertLess(position["current_stop"], position["entry_price"])
+
+    def test_structural_stop_short_stays_above_recent_high(self):
+        candles = pd.DataFrame(
+            {
+                "low": [98.0, 98.5, 99.0],
+                "high": [101.0, 102.0, 102.5],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="sell",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+            )
+
+        self.assertGreater(position["current_stop"], 102.5)
+        self.assertGreater(position["current_stop"], position["entry_price"])
+
     def test_live_trade_plan_caps_configured_allocation_by_risk_for_small_btc_account(self):
         database = mock.Mock()
         database.get_user_live_portfolio_risk_summary.return_value = {

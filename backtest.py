@@ -184,6 +184,7 @@ def build_account_risk_summary(
     leverage: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
 ):
     resolved_initial_balance = float(initial_balance or 0.0)
     resolved_risk_pct = max(float(risk_per_trade_pct or 0.0), 0.0)
@@ -193,9 +194,17 @@ def build_account_risk_summary(
     ).strip().lower()
     resolved_position_margin_allocation_pct = max(
         float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            (
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)
+            )
+            if resolved_position_sizing_mode == "order_value"
+            else (
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            )
         ),
         0.0,
     )
@@ -204,6 +213,8 @@ def build_account_risk_summary(
         model_name = "fixed_margin_allocation"
     elif resolved_position_sizing_mode == "hybrid":
         model_name = "risk_capped_by_margin_allocation"
+    elif resolved_position_sizing_mode == "order_value":
+        model_name = "order_value_notional"
     else:
         model_name = "fixed_risk_per_trade"
 
@@ -218,6 +229,11 @@ def build_account_risk_summary(
             "risk_per_trade_pct": round(resolved_risk_pct, 4),
             "position_sizing_mode": resolved_position_sizing_mode,
             "position_margin_allocation_pct": round(resolved_position_margin_allocation_pct, 4),
+            "order_balance_usage_pct": (
+                round(resolved_position_margin_allocation_pct, 4)
+                if resolved_position_sizing_mode == "order_value"
+                else 0.0
+            ),
             "leverage": round(resolved_leverage, 4),
             "avg_effective_risk_pct": 0.0,
             "max_effective_risk_pct": 0.0,
@@ -401,6 +417,7 @@ def _create_backtest_position(
     atr: float,
     execution_profile: str,
     signal_result: dict | None = None,
+    candle_window=None,
 ):
     setup_payload = (signal_result or {}).get("setup") or {}
     entry_setup = str(setup_payload.get("setup") or "")
@@ -419,6 +436,7 @@ def _create_backtest_position(
         atr=atr,
         entry_setup=entry_setup,
         entry_source_setup=entry_source_setup,
+        candle_window=candle_window,
     )
 
 
@@ -692,6 +710,7 @@ def run_backtest(
     risk_per_trade_pct: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
     leverage: float | None = None,
     strategy_params: StrategyParams | None = None,
 ):
@@ -715,12 +734,24 @@ def run_backtest(
     ).strip().lower()
     resolved_position_margin_allocation_pct = max(
         float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(
-                config.ProductionConfig,
-                "POSITION_MARGIN_ALLOCATION_PCT",
-                getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+            (
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "ORDER_BALANCE_USAGE_PCT",
+                    getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0),
+                )
+            )
+            if resolved_position_sizing_mode == "order_value"
+            else (
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+                )
             )
         ),
         0.0,
@@ -842,6 +873,7 @@ def run_backtest(
                 atr=float(pending_signal["atr"]),
                 execution_profile=resolved_execution_profile,
                 signal_result=pending_signal,
+                candle_window=candle_slice,
             )
             position = _attach_backtest_entry_context(
                 position=position,
@@ -925,6 +957,9 @@ def run_backtest(
         leverage=resolved_leverage,
         position_sizing_mode=resolved_position_sizing_mode,
         position_margin_allocation_pct=resolved_position_margin_allocation_pct,
+        order_balance_usage_pct=(
+            resolved_position_margin_allocation_pct if resolved_position_sizing_mode == "order_value" else None
+        ),
     )
     if verbose:
         applied = symbol_override_report.get("applied") or {}
@@ -969,13 +1004,18 @@ if __name__ == "__main__":
     parser.add_argument("--risk-per-trade-pct", type=float, default=config.ProductionConfig.RISK_PER_TRADE_PCT)
     parser.add_argument(
         "--position-sizing-mode",
-        choices=["risk", "allocation", "hybrid"],
+        choices=["risk", "allocation", "hybrid", "order_value"],
         default=getattr(config.ProductionConfig, "POSITION_SIZING_MODE", "risk"),
     )
     parser.add_argument(
         "--position-margin-allocation-pct",
         type=float,
         default=getattr(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+    )
+    parser.add_argument(
+        "--order-balance-usage-pct",
+        type=float,
+        default=getattr(config.ProductionConfig, "ORDER_BALANCE_USAGE_PCT", getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)),
     )
     parser.add_argument("--leverage", type=float, default=float(getattr(config, "LEVERAGE", 1) or 1))
     parser.add_argument("--testnet", action="store_true")
@@ -1012,6 +1052,7 @@ if __name__ == "__main__":
                 risk_per_trade_pct=args.risk_per_trade_pct,
                 position_sizing_mode=args.position_sizing_mode,
                 position_margin_allocation_pct=args.position_margin_allocation_pct,
+                order_balance_usage_pct=args.order_balance_usage_pct,
                 leverage=args.leverage,
             )
             ready = check_governance_readiness(summary, days)
