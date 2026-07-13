@@ -119,6 +119,106 @@ class StrategyTests(unittest.TestCase):
         return pd.DataFrame(rows)
 
     @staticmethod
+    def _build_liquidity_sweep_long_df(
+        *,
+        final_open: float = 98.4,
+        final_high: float = 99.6,
+        final_low: float = 97.5,
+        final_close: float = 99.2,
+        final_volume: float = 2200.0,
+    ) -> pd.DataFrame:
+        rows = []
+        base_time = pd.Timestamp("2026-07-06 01:00:00+00:00")
+        for i in range(40):
+            rows.append(
+                {
+                    "timestamp": base_time + pd.Timedelta(minutes=15 * i),
+                    "open": 100.0,
+                    "high": 104.0 - ((i % 3) * 0.05),
+                    "low": 98.0 + ((i % 4) * 0.05),
+                    "close": 100.0 + ((i % 5) * 0.05),
+                    "volume": 1000.0,
+                    "ema_fast": 99.0,
+                    "ema_slow": 100.0,
+                    "ema_trend": 99.5,
+                    "rsi": 40.0,
+                    "adx": 28.0,
+                    "vol_ma": 1000.0,
+                    "atr": 1.0,
+                    "atr_pct": 1.0,
+                    "macd": -0.2,
+                    "macd_signal": -0.1,
+                    "macd_hist": -0.12,
+                    "is_closed": True,
+                }
+            )
+        rows[-2]["rsi"] = 40.0
+        rows[-2]["macd_hist"] = -0.12
+        rows[-1].update(
+            {
+                "open": final_open,
+                "high": final_high,
+                "low": final_low,
+                "close": final_close,
+                "volume": final_volume,
+                "rsi": 44.0,
+                "macd_hist": -0.02,
+                "ema_fast": 98.9,
+            }
+        )
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _build_liquidity_sweep_short_df(
+        *,
+        final_open: float = 101.8,
+        final_high: float = 102.6,
+        final_low: float = 100.7,
+        final_close: float = 101.0,
+        final_volume: float = 2200.0,
+    ) -> pd.DataFrame:
+        rows = []
+        base_time = pd.Timestamp("2026-07-06 02:00:00+00:00")
+        for i in range(40):
+            rows.append(
+                {
+                    "timestamp": base_time + pd.Timedelta(minutes=15 * i),
+                    "open": 100.0,
+                    "high": 102.0 - ((i % 3) * 0.05),
+                    "low": 94.0 + ((i % 4) * 0.05),
+                    "close": 100.0 - ((i % 5) * 0.05),
+                    "volume": 1000.0,
+                    "ema_fast": 101.2,
+                    "ema_slow": 100.0,
+                    "ema_trend": 100.5,
+                    "rsi": 60.0,
+                    "adx": 28.0,
+                    "vol_ma": 1000.0,
+                    "atr": 1.0,
+                    "atr_pct": 1.0,
+                    "macd": 0.2,
+                    "macd_signal": 0.1,
+                    "macd_hist": 0.12,
+                    "is_closed": True,
+                }
+            )
+        rows[-2]["rsi"] = 60.0
+        rows[-2]["macd_hist"] = 0.12
+        rows[-1].update(
+            {
+                "open": final_open,
+                "high": final_high,
+                "low": final_low,
+                "close": final_close,
+                "volume": final_volume,
+                "rsi": 56.0,
+                "macd_hist": 0.02,
+                "ema_fast": 101.2,
+            }
+        )
+        return pd.DataFrame(rows)
+
+    @staticmethod
     def _build_buy_signal_df() -> pd.DataFrame:
         df = StrategyTests._build_trend_df(start_price=100.0, step=0.8, length=260)
         tail_rows = [
@@ -367,6 +467,131 @@ class StrategyTests(unittest.TestCase):
             setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
 
         self.assertNotEqual(setup.get("setup"), "reversal_rejection_short")
+
+    def test_detects_liquidity_sweep_reversal_long(self):
+        df = self._build_liquidity_sweep_long_df()
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "liquidity_sweep_reversal_long")
+        self.assertIn("sweep_detected", result["reason"])
+        self.assertIn("reclaim_confirmed", result["reason"])
+
+    def test_liquidity_sweep_long_requires_reclaim(self):
+        df = self._build_liquidity_sweep_long_df(
+            final_open=97.8,
+            final_high=98.2,
+            final_low=97.5,
+            final_close=97.6,
+        )
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertNotEqual((result.get("setup") or {}).get("setup"), "liquidity_sweep_reversal_long")
+
+    def test_liquidity_sweep_long_blocks_late_entry_from_low(self):
+        df = self._build_liquidity_sweep_long_df(
+            final_open=99.8,
+            final_high=102.8,
+            final_low=97.5,
+            final_close=102.4,
+        )
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertTrue(str(result["reason"]).startswith("long_entrada_tardia"))
+
+    def test_liquidity_sweep_long_blocks_near_resistance_without_breakout(self):
+        df = self._build_liquidity_sweep_long_df(
+            final_open=100.1,
+            final_high=104.2,
+            final_low=97.5,
+            final_close=103.9,
+        )
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertTrue(str(result["reason"]).startswith("long_near_resistance"))
+
+    def test_detects_liquidity_sweep_reversal_short(self):
+        df = self._build_liquidity_sweep_short_df()
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "sell")
+        self.assertEqual(result["setup"]["setup"], "liquidity_sweep_reversal_short")
+        self.assertIn("sweep_detected", result["reason"])
+        self.assertIn("reclaim_confirmed", result["reason"])
+
+    def test_trend_resume_short_blocks_near_support_without_breakdown(self):
+        df = self._build_liquidity_sweep_short_df(
+            final_open=100.0,
+            final_high=100.5,
+            final_low=99.05,
+            final_close=99.1,
+            final_volume=1000.0,
+        )
+        for idx in df.index[:-1]:
+            df.loc[idx, "low"] = 99.0
+            df.loc[idx, "high"] = 101.0
+            df.loc[idx, "close"] = 100.0
+
+        patched_setup = {
+            "setup": "trend_resume_short",
+            "direction": "short",
+            "regime": {"regime": "trend_bear", "tradeable_short": True},
+        }
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=patched_setup),
+            mock.patch.object(config, "DISABLE_SHORT_SCORE_GATE", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+            mock.patch.object(config, "SHORT_REQUIRE_STRICT_REGIME", False),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MIN_TREND_STRENGTH_PCT_SHORT", 0.0),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertTrue(str(result["reason"]).startswith("short_near_support"))
+
+    def test_existing_reversal_setup_still_runs_with_market_structure_guard(self):
+        df = self._build_reversal_rebound_df(final_volume=2500.0)
+
+        with (
+            mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", True),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "reversal_rebound_long")
 
     def test_analyze_prepared_candle_hold_when_data_is_insufficient(self):
         df = pd.DataFrame(

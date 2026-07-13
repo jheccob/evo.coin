@@ -6,6 +6,12 @@ from typing import Dict, Optional
 import pandas as pd
 
 import config
+from services.market_structure_service import (
+    annotate_market_structure,
+    detect_liquidity_sweep_reversal_long,
+    detect_liquidity_sweep_reversal_short,
+    evaluate_market_structure_guard,
+)
 
 
 @dataclass
@@ -78,6 +84,7 @@ def calculate_indicators(df: pd.DataFrame, params: StrategyParams) -> pd.DataFra
     out["vol_ma"] = out["volume"].rolling(config.VOLUME_MA_PERIOD).mean()
     out["atr"] = tr.rolling(params.atr_period).mean()
     out["atr_pct"] = out["atr"] / out["close"] * 100
+    out = annotate_market_structure(out)
     return out
 
 
@@ -376,6 +383,30 @@ def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> D
     if regime_name == "trend_bear" and pullback_short:
         return {"setup": "pullback_short", "direction": "short", "regime": regime}
 
+    liquidity_sweep_long = detect_liquidity_sweep_reversal_long(df, index=index)
+    if liquidity_sweep_long:
+        return {
+            "setup": "liquidity_sweep_reversal_long",
+            "direction": "long",
+            "regime": {
+                **regime,
+                "liquidity_sweep": liquidity_sweep_long,
+                "market_structure": liquidity_sweep_long.get("market_structure") or {},
+            },
+        }
+
+    liquidity_sweep_short = detect_liquidity_sweep_reversal_short(df, index=index)
+    if liquidity_sweep_short:
+        return {
+            "setup": "liquidity_sweep_reversal_short",
+            "direction": "short",
+            "regime": {
+                **regime,
+                "liquidity_sweep": liquidity_sweep_short,
+                "market_structure": liquidity_sweep_short.get("market_structure") or {},
+            },
+        }
+
     reversal_rebound = _detect_long_reversal_rebound(df, params, index=index)
     if reversal_rebound:
         return {
@@ -431,15 +462,52 @@ def _build_signal_payload(
     reason: str,
     setup: Dict[str, object],
     row,
+    df: Optional[pd.DataFrame] = None,
+    index: int = -1,
 ) -> Dict[str, object]:
+    resolved_setup = dict(setup or {})
+    if signal in {"buy", "sell"} and df is not None:
+        direction = "long" if signal == "buy" else "short"
+        guard = evaluate_market_structure_guard(
+            df,
+            index=index,
+            direction=direction,
+            setup_name=str(resolved_setup.get("setup") or ""),
+        )
+        market_structure = guard.get("market_structure") or {}
+        if market_structure:
+            resolved_setup = {
+                **resolved_setup,
+                "regime": {
+                    **(dict(resolved_setup.get("regime") or {})),
+                    "market_structure": market_structure,
+                    "market_structure_guard": {
+                        "allowed": bool(guard.get("allowed", True)),
+                        "reason": str(guard.get("reason") or ""),
+                        "detail": str(guard.get("detail") or ""),
+                    },
+                },
+            }
+        if not bool(guard.get("allowed", True)):
+            detail = str(guard.get("detail") or "").strip()
+            return {
+                "signal": "hold",
+                "reason": f"{guard.get('reason')}{'|' + detail if detail else ''}",
+                "setup": resolved_setup,
+                "market_structure": market_structure,
+            }
+
     payload = {
         "signal": signal,
         "reason": reason,
-        "setup": setup,
+        "setup": resolved_setup,
     }
     if signal in {"buy", "sell"}:
         payload["entry_price"] = float(row["close"])
         payload["atr"] = float(row["atr"])
+        market_structure = ((resolved_setup.get("regime") or {}).get("market_structure") or {})
+        if market_structure:
+            payload["market_structure"] = market_structure
     return payload
 
 
@@ -552,6 +620,8 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     regime_label = str(regime_payload.get("regime_detail") or regime_name).strip().lower()
     is_reversal_rebound_long = bool(setup.get("setup") == "reversal_rebound_long")
     is_reversal_rejection_short = bool(setup.get("setup") == "reversal_rejection_short")
+    is_liquidity_sweep_long = bool(setup.get("setup") == "liquidity_sweep_reversal_long")
+    is_liquidity_sweep_short = bool(setup.get("setup") == "liquidity_sweep_reversal_short")
 
     if bool(getattr(config, "BLOCK_UNKNOWN_REGIME", True)) and regime_name in {"", "unknown", "none", "null"}:
         return {
@@ -565,7 +635,7 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     if row["atr_pct"] < config.GLOBAL_MIN_ATR_PCT:
         return {"signal": "hold", "reason": f"volatilidade insuficiente ({row['atr_pct']:.2f}%)", "setup": setup}
 
-    if trend_strength_pct < config.MIN_TREND_STRENGTH_PCT and not is_reversal_rebound_long:
+    if trend_strength_pct < config.MIN_TREND_STRENGTH_PCT and not (is_reversal_rebound_long or is_liquidity_sweep_long):
         return {"signal": "hold", "reason": f"tendência abaixo do piso ({trend_strength_pct:.2f}%)", "setup": setup}
 
     trend_context_pct = abs(row["ema_slow"] - row["ema_trend"]) / row["close"] * 100
@@ -613,9 +683,23 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             regime_name != "trend_bull"
             and not allow_weak_bull_atr
             and not is_reversal_rebound_long
+            and not is_liquidity_sweep_long
             and not bool(getattr(config, "BYPASS_WEAK_REGIME_GATE", False))
         ):
             return {"signal": "hold", "reason": f"regime fraco ({regime_label})", "setup": setup}
+
+        if is_liquidity_sweep_long:
+            sweep_payload = dict(regime_payload.get("liquidity_sweep") or {})
+            sweep_score = int(sweep_payload.get("score", 0) or 0)
+            sweep_reasons = [str(item) for item in (sweep_payload.get("reasons") or []) if str(item).strip()]
+            return _build_signal_payload(
+                signal="buy",
+                reason=f"liquidity_sweep_reversal_long_score={sweep_score}|{','.join(sweep_reasons)}",
+                setup=setup,
+                row=row,
+                df=df,
+                index=index,
+            )
 
         if is_reversal_rebound_long:
             reversal_payload = dict(regime_payload.get("reversal_rebound") or {})
@@ -653,13 +737,14 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
 
             min_reversal_score = int(getattr(config, "LONG_REVERSAL_MIN_SCORE", 5) or 5)
             if score >= min_reversal_score:
-                return {
-                    "signal": "buy",
-                    "reason": f"reversal_rebound_long_score={score}|" + ",".join(reasons),
-                    "setup": setup,
-                    "entry_price": float(row["close"]),
-                    "atr": float(row["atr"]),
-                }
+                return _build_signal_payload(
+                    signal="buy",
+                    reason=f"reversal_rebound_long_score={score}|" + ",".join(reasons),
+                    setup=setup,
+                    row=row,
+                    df=df,
+                    index=index,
+                )
 
             return {
                 "signal": "hold",
@@ -864,13 +949,14 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
 
         min_long_score = getattr(config, "MIN_LONG_SCORE", 7)
         if score >= min_long_score:
-            return {
-                "signal": "buy",
-                "reason": f"long_score={score}|" + ",".join(reasons),
-                "setup": setup,
-                "entry_price": float(row["close"]),
-                "atr": float(row["atr"]),
-            }
+            return _build_signal_payload(
+                signal="buy",
+                reason=f"long_score={score}|" + ",".join(reasons),
+                setup=setup,
+                row=row,
+                df=df,
+                index=index,
+            )
 
         return {
             "signal": "hold",
@@ -897,6 +983,19 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
                 "reason": f"hora bloqueada para short ({signal_timestamp.hour:02d} UTC)",
                 "setup": setup,
             }
+
+        if is_liquidity_sweep_short:
+            sweep_payload = dict(regime_payload.get("liquidity_sweep") or {})
+            sweep_score = int(sweep_payload.get("score", 0) or 0)
+            sweep_reasons = [str(item) for item in (sweep_payload.get("reasons") or []) if str(item).strip()]
+            return _build_signal_payload(
+                signal="sell",
+                reason=f"liquidity_sweep_reversal_short_score={sweep_score}|{','.join(sweep_reasons)}",
+                setup=setup,
+                row=row,
+                df=df,
+                index=index,
+            )
 
         if is_reversal_rejection_short:
             rejection_payload = dict(regime_payload.get("reversal_rejection") or {})
@@ -936,13 +1035,14 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
 
             min_rejection_score = int(getattr(config, "SHORT_REVERSAL_MIN_SCORE", 5) or 5)
             if score >= min_rejection_score:
-                return {
-                    "signal": "sell",
-                    "reason": f"reversal_rejection_short_score={score}|" + ",".join(reasons),
-                    "setup": setup,
-                    "entry_price": float(row["close"]),
-                    "atr": float(row["atr"]),
-                }
+                return _build_signal_payload(
+                    signal="sell",
+                    reason=f"reversal_rejection_short_score={score}|" + ",".join(reasons),
+                    setup=setup,
+                    row=row,
+                    df=df,
+                    index=index,
+                )
 
             return {
                 "signal": "hold",
@@ -1190,23 +1290,25 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             reasons.append("breakdown")
 
         if bool(getattr(config, "DISABLE_SHORT_SCORE_GATE", False)):
-            return {
-                "signal": "sell",
-                "reason": f"short_score={score}|" + ",".join(reasons),
-                "setup": setup,
-                "entry_price": float(row["close"]),
-                "atr": float(row["atr"]),
-            }
+            return _build_signal_payload(
+                signal="sell",
+                reason=f"short_score={score}|" + ",".join(reasons),
+                setup=setup,
+                row=row,
+                df=df,
+                index=index,
+            )
 
         min_short_score = getattr(config, "MIN_SHORT_SCORE", 7)
         if score >= min_short_score:
-            return {
-                "signal": "sell",
-                "reason": f"short_score={score}|" + ",".join(reasons),
-                "setup": setup,
-                "entry_price": float(row["close"]),
-                "atr": float(row["atr"]),
-            }
+            return _build_signal_payload(
+                signal="sell",
+                reason=f"short_score={score}|" + ",".join(reasons),
+                setup=setup,
+                row=row,
+                df=df,
+                index=index,
+            )
 
         return {"signal": "hold", "reason": f"short_score_baixo={score}", "setup": setup}
 
