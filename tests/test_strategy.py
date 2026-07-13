@@ -290,6 +290,69 @@ class StrategyTests(unittest.TestCase):
             )
         return pd.DataFrame(rows).set_index("timestamp")
 
+    @staticmethod
+    def _build_liquidity_sweep_df(side: str = "long", *, recover: bool = True, extended: bool = False) -> pd.DataFrame:
+        rows = []
+        for i in range(80):
+            base = 102.0 if side == "long" else 98.0
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp("2026-07-07 00:00:00+00:00") + pd.Timedelta(minutes=15 * i),
+                    "open": base,
+                    "high": 105.0 if side == "long" else 100.0,
+                    "low": 100.0 if side == "long" else 95.0,
+                    "close": base,
+                    "volume": 1000.0,
+                    "ema_fast": 101.0 if side == "long" else 99.0,
+                    "ema_slow": 101.5 if side == "long" else 98.5,
+                    "ema_trend": 102.5 if side == "long" else 97.5,
+                    "rsi": 38.0 if side == "long" else 62.0,
+                    "adx": 36.0,
+                    "vol_ma": 1000.0,
+                    "atr": 0.8,
+                    "atr_pct": 0.8,
+                    "macd": -0.3 if side == "long" else 0.3,
+                    "macd_signal": -0.2 if side == "long" else 0.2,
+                    "macd_hist": -0.20 if side == "long" else 0.20,
+                    "is_closed": True,
+                }
+            )
+        if side == "long":
+            close = 104.5 if extended else (100.35 if recover else 99.85)
+            rows[-2].update({"close": 100.4, "rsi": 39.0, "macd_hist": -0.22})
+            rows[-1].update(
+                {
+                    "open": 100.20,
+                    "high": max(100.60, close + 0.15),
+                    "low": 99.70,
+                    "close": close,
+                    "volume": 1800.0,
+                    "ema_fast": 100.10,
+                    "ema_slow": 101.0,
+                    "ema_trend": 102.0,
+                    "rsi": 42.0,
+                    "macd_hist": -0.10,
+                }
+            )
+        else:
+            close = 95.5 if extended else (99.65 if recover else 100.15)
+            rows[-2].update({"close": 99.6, "rsi": 61.0, "macd_hist": 0.22})
+            rows[-1].update(
+                {
+                    "open": 99.90,
+                    "high": 100.35,
+                    "low": min(99.40, close - 0.15),
+                    "close": close,
+                    "volume": 1800.0,
+                    "ema_fast": 99.90,
+                    "ema_slow": 99.0,
+                    "ema_trend": 98.0,
+                    "rsi": 58.0,
+                    "macd_hist": 0.10,
+                }
+            )
+        return pd.DataFrame(rows).set_index("timestamp")
+
     def test_prepare_candle_features_adds_expected_columns(self):
         df = self._build_trend_df(start_price=100.0, step=1.0, length=80)
         features = prepare_candle_features(df)
@@ -367,6 +430,104 @@ class StrategyTests(unittest.TestCase):
             setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
 
         self.assertNotEqual(setup.get("setup"), "reversal_rejection_short")
+
+    def test_detects_liquidity_sweep_reversal_long_with_reclaim(self):
+        df = self._build_liquidity_sweep_df("long", recover=True)
+
+        with (
+            mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", False),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "liquidity_sweep_reversal_long")
+        self.assertIn("sweep_detected", result["reason"])
+
+    def test_liquidity_sweep_long_without_reclaim_does_not_buy(self):
+        df = self._build_liquidity_sweep_df("long", recover=False)
+
+        with mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", False):
+            setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(setup.get("setup"), "liquidity_sweep_reversal_long")
+
+    def test_liquidity_sweep_long_blocks_late_entry_far_from_low(self):
+        df = self._build_liquidity_sweep_df("long", recover=True, extended=True)
+
+        with (
+            mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", False),
+            mock.patch.object(config, "LIQUIDITY_SWEEP_MAX_BOUNCE_FROM_LOW_PCT", 4.0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertIn(result["reason"], {"long_entrada_tardia", "long_rr_insuficiente"})
+
+    def test_market_structure_guard_blocks_long_near_resistance_without_volume_breakout(self):
+        df = self._build_liquidity_sweep_df("long", recover=True)
+        df.iloc[-1, df.columns.get_loc("close")] = 104.90
+        df.iloc[-1, df.columns.get_loc("high")] = 105.00
+        setup = {"setup": "trend_resume_long", "direction": "long", "regime": {"regime": "trend_bull"}}
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=setup),
+            mock.patch.object(config, "MIN_LONG_SCORE", 1),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertEqual(result["reason"], "long_near_resistance")
+
+    def test_detects_liquidity_sweep_reversal_short_with_rejection(self):
+        df = self._build_liquidity_sweep_df("short", recover=True)
+
+        with (
+            mock.patch.object(config, "ENABLE_SHORT_REVERSAL_REJECTION", False),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "sell")
+        self.assertEqual(result["setup"]["setup"], "liquidity_sweep_reversal_short")
+        self.assertIn("sweep_detected", result["reason"])
+
+    def test_market_structure_guard_blocks_short_near_support_without_breakdown(self):
+        df = self._build_liquidity_sweep_df("short", recover=True)
+        df.iloc[-1, df.columns.get_loc("close")] = 95.10
+        df.iloc[-1, df.columns.get_loc("low")] = 95.00
+        setup = {"setup": "trend_resume_short", "direction": "short", "regime": {"regime": "trend_bear"}}
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=setup),
+            mock.patch.object(config, "DISABLE_SHORT_SCORE_GATE", True),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertEqual(result["reason"], "short_near_support")
+
+    def test_legacy_reversal_rebound_setup_still_works_with_structure_guard_disabled(self):
+        df = self._build_reversal_rebound_df(final_volume=2500.0)
+
+        with (
+            mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", False),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "reversal_rebound_long")
 
     def test_analyze_prepared_candle_hold_when_data_is_insufficient(self):
         df = pd.DataFrame(
@@ -2340,6 +2501,39 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
+    def test_calculate_position_size_order_value_uses_balance_pct_as_notional_not_margin(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=21.45,
+            entry_price=62500.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            leverage=10,
+            sizing_mode="order_value",
+            margin_allocation_pct=100.0,
+        )
+
+        self.assertEqual(sizing["sizing_mode"], "order_value")
+        self.assertAlmostEqual(sizing["position_notional"], 21.45, places=2)
+        self.assertAlmostEqual(sizing["margin_allocated_amount"], 2.145, places=3)
+        self.assertAlmostEqual(sizing["quantity"], 0.000343, places=6)
+
+    def test_calculate_position_size_short_stop_price_stays_above_entry(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=100.0,
+            entry_price=100.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            leverage=10,
+            sizing_mode="risk",
+            position_side="short",
+        )
+
+        self.assertAlmostEqual(sizing["stop_loss_price"], 101.5, places=6)
+
     def test_build_account_risk_summary_supports_margin_allocation_model(self):
         trades = [
             {"side": "long", "net_pct": 2.82},
@@ -3336,6 +3530,173 @@ class StrategyTests(unittest.TestCase):
                         recovered_position=None,
                     )
 
+    def test_order_value_balance_22_uses_notional_and_margin_not_balance_as_margin(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=10000.0,
+                stop_loss_pct=1.1,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertEqual(sizing["sizing_mode"], "order_value")
+        self.assertAlmostEqual(sizing["requested_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["final_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["position_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 2.2, places=2)
+        self.assertFalse(sizing["risk_cap_applied"])
+
+    def test_order_value_risk_cap_reduces_notional_when_stop_exceeds_risk_limit(self):
+        service = RiskManagementService()
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            sizing = service.calculate_position_size(
+                account_balance=22.0,
+                entry_price=10000.0,
+                stop_loss_pct=10.0,
+                risk_pct=4.0,
+                leverage=10,
+                sizing_mode="order_value",
+                margin_allocation_pct=100.0,
+            )
+
+        self.assertAlmostEqual(sizing["requested_order_notional"], 22.0, places=2)
+        self.assertAlmostEqual(sizing["final_order_notional"], 8.8, places=2)
+        self.assertAlmostEqual(sizing["required_margin"], 0.88, places=2)
+        self.assertTrue(sizing["risk_cap_applied"])
+        self.assertEqual(sizing["risk_reason"], "order_value_risk_cap_applied")
+
+    def test_backtest_parser_accepts_order_value_sizing_options(self):
+        parser = backtest.build_arg_parser()
+
+        args = parser.parse_args([
+            "--position-sizing-mode",
+            "order_value",
+            "--order-balance-usage-pct",
+            "100",
+            "--output-dir",
+            "reports/backtests/test",
+        ])
+
+        self.assertEqual(args.position_sizing_mode, "order_value")
+        self.assertEqual(args.order_balance_usage_pct, 100.0)
+        self.assertEqual(args.output_dir, "reports/backtests/test")
+
+    def test_structural_stop_long_stays_below_structural_low(self):
+        candles = pd.DataFrame(
+            {
+                "open": [101.0, 100.5, 100.0],
+                "high": [102.0, 101.0, 100.5],
+                "low": [99.0, 98.0, 97.5],
+                "close": [100.5, 100.0, 100.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="buy",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+                entry_setup="trend_resume_long",
+            )
+
+        self.assertLess(position["initial_stop"], candles["low"].min())
+
+    def test_structural_stop_short_stays_above_structural_high(self):
+        candles = pd.DataFrame(
+            {
+                "open": [99.0, 99.5, 100.0],
+                "high": [101.0, 102.0, 102.5],
+                "low": [98.0, 99.0, 99.5],
+                "close": [99.5, 100.0, 100.0],
+                "volume": [1000.0, 1000.0, 1000.0],
+            }
+        )
+
+        with (
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+        ):
+            position = create_position(
+                signal="sell",
+                entry_price=100.0,
+                timestamp="2026-01-01T00:00:00Z",
+                atr=1.0,
+                candle_window=candles,
+                entry_setup="trend_resume_short",
+            )
+
+        self.assertGreater(position["initial_stop"], candles["high"].max())
+
+    def test_short_below_min_score_does_not_sell_when_score_gate_enabled(self):
+        df = self._build_liquidity_sweep_df("short", recover=True)
+        df = df.copy()
+        df["ema_trend"] = df["close"] + 2.0
+        setup = {"setup": "trend_resume_short", "direction": "short", "regime": {"regime": "trend_bear"}}
+
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=setup),
+            mock.patch.object(config, "DISABLE_SHORT_SCORE_GATE", False),
+            mock.patch.object(config, "MIN_SHORT_SCORE", 99),
+            mock.patch.object(config, "MARKET_STRUCTURE_GUARD_ENABLED", False),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertIn("short_score_baixo", result["reason"])
+
+    def test_resolve_trade_stop_pct_prefers_real_initial_stop(self):
+        trade = {"side": "long", "entry_price": 100.0, "initial_stop": 97.5}
+
+        self.assertAlmostEqual(backtest._resolve_trade_stop_pct(trade), 2.5, places=4)
+
+    def test_equity_curve_uses_order_value_sizing_and_real_stop(self):
+        trades = [
+            {
+                "side": "long",
+                "entry_price": 100.0,
+                "initial_stop": 95.0,
+                "net_pct": 10.0,
+                "exit_timestamp": "2026-01-01T00:15:00Z",
+            }
+        ]
+
+        with mock.patch.object(config, "ORDER_VALUE_RISK_CAP", True):
+            rows = backtest._build_equity_curve_rows(
+                trades,
+                22.0,
+                risk_per_trade_pct=4.0,
+                leverage=10.0,
+                position_sizing_mode="order_value",
+                position_margin_allocation_pct=100.0,
+            )
+
+        self.assertAlmostEqual(rows[1]["position_notional"], 17.6, places=2)
+        self.assertAlmostEqual(rows[1]["pnl_usdt"], 1.76, places=2)
+        self.assertAlmostEqual(rows[1]["equity"], 23.76, places=2)
+        self.assertTrue(rows[1]["risk_cap_applied"])
+
+    def test_account_model_name_maps_order_value_and_hybrid(self):
+        self.assertEqual(backtest._resolve_account_model_name("order_value"), "order_value_notional")
+        self.assertEqual(backtest._resolve_account_model_name("hybrid"), "risk_capped_by_margin_allocation")
+
 
 class SymbolGovernanceTests(unittest.TestCase):
     def test_symbol_validation_record_reads_registry(self):
@@ -3632,6 +3993,258 @@ class SymbolGovernanceTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Banca minima", result["reason"])
         risk_service.build_trade_plan.assert_not_called()
+
+    def test_build_live_execution_plan_order_value_checks_available_margin_not_equity(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 21.45, "free": 2.20}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.000343,
+            "position_notional": 21.45,
+            "risk_per_trade_pct": 2.0,
+            "leverage": 10.0,
+            "sizing_mode": "order_value",
+        }
+        risk_service.evaluate_symbol_operability.return_value = {
+            "allowed": True,
+            "rounded_quantity": 0.000343,
+            "rounded_notional": 21.45,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+            mock.patch.object(config, "FEE_PCT", 0.08),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=62500.0,
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertAlmostEqual(result["account_equity"], 21.45, places=2)
+        self.assertAlmostEqual(result["available_balance"], 2.20, places=2)
+        self.assertAlmostEqual(result["margin_check"]["order_notional"], 21.45, places=2)
+        self.assertAlmostEqual(result["margin_check"]["required_margin"], 2.145, places=3)
+
+    def test_build_live_execution_plan_order_value_blocks_only_when_available_below_required_margin(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 21.45, "free": 2.00}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.000343,
+            "position_notional": 21.45,
+            "risk_per_trade_pct": 2.0,
+            "leverage": 10.0,
+            "sizing_mode": "order_value",
+        }
+        risk_service.evaluate_symbol_operability.return_value = {
+            "allowed": True,
+            "rounded_quantity": 0.000343,
+            "rounded_notional": 21.45,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+            mock.patch.object(config, "FEE_PCT", 0.08),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=62500.0,
+            )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("Saldo disponivel insuficiente", result["reason"])
+        self.assertAlmostEqual(result["margin_check"]["required_margin"], 2.145, places=3)
+        self.assertGreater(result["margin_check"]["required_margin_with_buffer"], 2.145)
+
+    def test_build_live_execution_plan_order_value_free_zero_blocks_instead_of_fallback_to_equity(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 21.45, "free": 0.0}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.000343,
+            "position_notional": 21.45,
+            "risk_per_trade_pct": 2.0,
+            "leverage": 10.0,
+            "sizing_mode": "order_value",
+        }
+        risk_service.evaluate_symbol_operability.return_value = {
+            "allowed": True,
+            "rounded_quantity": 0.000343,
+            "rounded_notional": 21.45,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+            mock.patch.object(config, "FEE_PCT", 0.08),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=62500.0,
+            )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["available_balance"], 0.0)
+        self.assertIn("Saldo disponivel insuficiente", result["reason"])
+
+    def _build_mock_live_plan_services(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 100.0, "free": 100.0}
+        execution_service.fetch_symbol_trading_rules.return_value = {"min_qty": 0.0, "min_notional": 0.0}
+        risk_service = mock.Mock()
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.01,
+            "position_notional": 100.0,
+            "risk_per_trade_pct": 2.0,
+            "leverage": 10.0,
+            "sizing_mode": "order_value",
+            "margin_allocation_pct": 100.0,
+        }
+        risk_service.evaluate_symbol_operability.return_value = {
+            "allowed": True,
+            "rounded_quantity": 0.01,
+            "rounded_notional": 100.0,
+        }
+        return execution_service, risk_service
+
+    def test_live_long_entry_uses_structural_stop_below_recent_low(self):
+        candles = pd.DataFrame({"low": [99.0, 98.0, 97.5], "high": [101.0, 101.5, 102.0]})
+        execution_service, risk_service = self._build_mock_live_plan_services()
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=100.0,
+                atr=1.0,
+                candle_window=candles,
+                signal_result={"setup": {"setup": "trend_resume_long", "direction": "long"}},
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertLess(result["preview_position"]["initial_stop"], candles["low"].min())
+        _, kwargs = risk_service.build_trade_plan.call_args
+        self.assertEqual(kwargs["position_side"], "long")
+
+    def test_live_short_entry_uses_structural_stop_above_recent_high(self):
+        candles = pd.DataFrame({"low": [98.0, 98.5, 99.0], "high": [101.0, 102.0, 102.5]})
+        execution_service, risk_service = self._build_mock_live_plan_services()
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_LOOKBACK", 3),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="sell",
+                entry_price=100.0,
+                atr=1.0,
+                candle_window=candles,
+                signal_result={"setup": {"setup": "trend_resume_short", "direction": "short"}},
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertGreater(result["preview_position"]["initial_stop"], candles["high"].max())
+        _, kwargs = risk_service.build_trade_plan.call_args
+        self.assertEqual(kwargs["position_side"], "short")
+
+    def test_live_liquidity_sweep_long_prefers_sweep_low_for_structural_stop(self):
+        candles = pd.DataFrame({"low": [90.0, 98.0, 99.0], "high": [101.0, 102.0, 103.0]})
+        execution_service, risk_service = self._build_mock_live_plan_services()
+        signal_result = {
+            "setup": {
+                "setup": "liquidity_sweep_reversal_long",
+                "direction": "long",
+                "regime": {"market_structure": {"sweep_low": 95.0}},
+            }
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="buy",
+                entry_price=100.0,
+                atr=1.0,
+                candle_window=candles,
+                signal_result=signal_result,
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertAlmostEqual(result["preview_position"]["initial_stop"], 94.75, places=2)
+
+    def test_live_liquidity_sweep_short_prefers_sweep_high_for_structural_stop(self):
+        candles = pd.DataFrame({"low": [97.0, 98.0, 99.0], "high": [110.0, 102.0, 103.0]})
+        execution_service, risk_service = self._build_mock_live_plan_services()
+        signal_result = {
+            "setup": {
+                "setup": "liquidity_sweep_reversal_short",
+                "direction": "short",
+                "regime": {"market_structure": {"sweep_high": 105.0}},
+            }
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config, "USE_STRUCTURAL_STOP", True),
+            mock.patch.object(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25),
+            mock.patch.object(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10),
+            mock.patch.object(config, "POSITION_SIZING_MODE", "order_value"),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="sell",
+                entry_price=100.0,
+                atr=1.0,
+                candle_window=candles,
+                signal_result=signal_result,
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertAlmostEqual(result["preview_position"]["initial_stop"], 105.25, places=2)
 
     def test_build_live_execution_plan_requires_trailing_stop(self):
         execution_service = mock.Mock()

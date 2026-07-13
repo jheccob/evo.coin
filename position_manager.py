@@ -304,6 +304,85 @@ def _resolve_risk_distance(
     return min(max(pct_distance, float(atr) * 1.5), entry_price * 0.02)
 
 
+
+
+def _last_numeric_values(candle_window, column: str, lookback: int) -> list[float]:
+    if candle_window is None or lookback <= 0:
+        return []
+    try:
+        if hasattr(candle_window, "tail") and column in candle_window:
+            values = candle_window.tail(lookback)[column].tolist()
+        else:
+            rows = list(candle_window)[-lookback:]
+            values = [row.get(column) for row in rows if isinstance(row, dict)]
+    except Exception:
+        return []
+    resolved = []
+    for value in values:
+        try:
+            resolved.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    return resolved
+
+
+def _market_structure_value(signal_result: dict | None, *keys: str) -> float | None:
+    setup = (signal_result or {}).get("setup") or {}
+    regime = setup.get("regime") or {}
+    market_structure = regime.get("market_structure") or setup.get("market_structure") or {}
+    for key in keys:
+        try:
+            value = float(market_structure.get(key))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return None
+
+
+def _resolve_structural_stop_price(
+    *,
+    side: str,
+    entry_price: float,
+    atr: float,
+    entry_setup: str | None,
+    candle_window=None,
+    signal_result: dict | None = None,
+) -> float | None:
+    if not bool(getattr(config, "USE_STRUCTURAL_STOP", True)):
+        return None
+
+    lookback = max(int(getattr(config, "STRUCTURAL_STOP_LOOKBACK", 10) or 10), 1)
+    atr_buffer = max(float(atr or 0.0), 0.0) * max(float(getattr(config, "STRUCTURAL_STOP_ATR_BUFFER_MULT", 0.25) or 0.25), 0.0)
+    min_buffer = float(entry_price) * max(float(getattr(config, "STRUCTURAL_STOP_MIN_BUFFER_PCT", 0.10) or 0.10), 0.0) / 100.0
+    buffer = max(atr_buffer, min_buffer)
+    setup = str(entry_setup or "").strip().lower()
+    if not setup:
+        return None
+
+    if side == "long":
+        reference = None
+        if setup == "liquidity_sweep_reversal_long":
+            reference = _market_structure_value(signal_result, "sweep_low", "recent_low_32", "prior_recent_low")
+        lows = _last_numeric_values(candle_window, "low", lookback)
+        if reference is None and lows:
+            reference = min(lows)
+        if reference is None:
+            return None
+        stop_price = float(reference) - buffer
+        return stop_price if stop_price < float(entry_price) else None
+
+    reference = None
+    if setup == "liquidity_sweep_reversal_short":
+        reference = _market_structure_value(signal_result, "sweep_high", "recent_high_32", "prior_recent_high")
+    highs = _last_numeric_values(candle_window, "high", lookback)
+    if reference is None and highs:
+        reference = max(highs)
+    if reference is None:
+        return None
+    stop_price = float(reference) + buffer
+    return stop_price if stop_price > float(entry_price) else None
+
 def _resolve_reward_distances(
     *,
     entry_price: float,
@@ -345,6 +424,8 @@ def create_position(
     entry_setup: str | None = None,
     entry_source_setup: str | None = None,
     management_profile: str | None = None,
+    candle_window=None,
+    signal_result: dict | None = None,
 ):
     side = "long" if signal == "buy" else "short"
     profile = _resolve_managed_position_profile(
@@ -363,6 +444,18 @@ def create_position(
         stop_loss_pct=float(profile["stop_loss_pct"]),
         use_fixed_stop=bool(profile["use_fixed_stop"]),
     )
+    structural_stop_price = _resolve_structural_stop_price(
+        side=side,
+        entry_price=entry_price,
+        atr=atr,
+        entry_setup=entry_setup or entry_source_setup,
+        candle_window=candle_window,
+        signal_result=signal_result,
+    )
+    if structural_stop_price is not None:
+        risk_distance = (entry_price - structural_stop_price) if side == "long" else (structural_stop_price - entry_price)
+        if entry_price > 0 and risk_distance > 0:
+            profile["stop_loss_pct"] = (risk_distance / entry_price) * 100.0
     reward_distances = _resolve_reward_distances(
         entry_price=entry_price,
         risk_distance=risk_distance,

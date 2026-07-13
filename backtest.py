@@ -169,6 +169,14 @@ def _build_reason_breakdown(trades):
 
 def _resolve_trade_stop_pct(trade: dict) -> float:
     side = str(trade.get("side") or "").strip().lower()
+    try:
+        entry_price = float(trade.get("entry_price") or 0.0)
+        initial_stop = float(trade.get("initial_stop") or 0.0)
+    except (TypeError, ValueError):
+        entry_price = 0.0
+        initial_stop = 0.0
+    if entry_price > 0 and initial_stop > 0:
+        return abs(entry_price - initial_stop) / entry_price * 100.0
     if side == "long":
         return float(getattr(config, "LONG_STOP_LOSS_PCT", 0.0) or 0.0)
     if side == "short":
@@ -184,6 +192,7 @@ def build_account_risk_summary(
     leverage: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
 ):
     resolved_initial_balance = float(initial_balance or 0.0)
     resolved_risk_pct = max(float(risk_per_trade_pct or 0.0), 0.0)
@@ -193,9 +202,17 @@ def build_account_risk_summary(
     ).strip().lower()
     resolved_position_margin_allocation_pct = max(
         float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            (
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)
+            )
+            if resolved_position_sizing_mode == "order_value"
+            else (
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0)
+            )
         ),
         0.0,
     )
@@ -204,6 +221,8 @@ def build_account_risk_summary(
         model_name = "fixed_margin_allocation"
     elif resolved_position_sizing_mode == "hybrid":
         model_name = "risk_capped_by_margin_allocation"
+    elif resolved_position_sizing_mode == "order_value":
+        model_name = "order_value_notional"
     else:
         model_name = "fixed_risk_per_trade"
 
@@ -330,6 +349,120 @@ def build_trade_diagnostics(trades):
     }
 
 
+
+def _flatten_summary_for_csv(summary: dict) -> dict:
+    row = {}
+    for key, value in (summary or {}).items():
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                row[f"{key}.{nested_key}"] = nested_value
+        else:
+            row[key] = value
+    return row
+
+
+def _build_setup_report_rows(trades: list[dict]) -> list[dict]:
+    grouped = defaultdict(list)
+    for trade in trades:
+        setup = str(trade.get("entry_setup") or trade.get("entry_source_setup") or "unknown")
+        grouped[setup].append(trade)
+
+    rows = []
+    for setup, setup_trades in sorted(grouped.items()):
+        net_values = [float(trade.get("net_pct", 0.0) or 0.0) for trade in setup_trades]
+        wins = [value for value in net_values if value > 0]
+        losses = [value for value in net_values if value <= 0]
+        gross_wins = sum(wins)
+        gross_losses = abs(sum(losses))
+        profit_factor = gross_wins / gross_losses if gross_losses > 0 else (99.0 if gross_wins > 0 else 0.0)
+        rows.append(
+            {
+                "setup": setup,
+                "trades": len(setup_trades),
+                "win_rate_pct": round((len(wins) / len(setup_trades)) * 100, 4) if setup_trades else 0.0,
+                "net_pct": round(sum(net_values), 4),
+                "profit_factor": round(profit_factor, 4),
+                "avg_trade_pct": round(sum(net_values) / len(net_values), 4) if net_values else 0.0,
+                "best_trade_pct": round(max(net_values), 4) if net_values else 0.0,
+                "worst_trade_pct": round(min(net_values), 4) if net_values else 0.0,
+            }
+        )
+    return rows
+
+
+def _resolve_account_model_name(position_sizing_mode: str | None) -> str:
+    mode = str(position_sizing_mode or "risk").strip().lower()
+    if mode == "order_value":
+        return "order_value_notional"
+    if mode == "hybrid":
+        return "risk_capped_by_margin_allocation"
+    if mode == "allocation":
+        return "fixed_margin_allocation"
+    return "fixed_risk_per_trade"
+
+
+def _build_equity_curve_rows(
+    trades: list[dict],
+    initial_balance: float,
+    *,
+    risk_per_trade_pct: float,
+    leverage: float,
+    position_sizing_mode: str,
+    position_margin_allocation_pct: float,
+    order_balance_usage_pct: float | None = None,
+) -> list[dict]:
+    equity = float(initial_balance or 0.0)
+    peak = equity
+    sizing_service = RiskManagementService(database=db)
+    rows = [
+        {
+            "trade_index": 0,
+            "timestamp": None,
+            "equity": round(equity, 8),
+            "drawdown_pct": 0.0,
+            "position_notional": 0.0,
+            "pnl_usdt": 0.0,
+            "stop_loss_pct": 0.0,
+        }
+    ]
+    for index, trade in enumerate(trades, start=1):
+        stop_pct = _resolve_trade_stop_pct(trade)
+        net_pct = float(trade.get("net_pct", 0.0) or 0.0)
+        sizing = sizing_service.calculate_position_size(
+            account_balance=equity,
+            entry_price=1.0,
+            stop_loss_pct=stop_pct,
+            risk_pct=float(risk_per_trade_pct or 0.0),
+            leverage=leverage,
+            sizing_mode=position_sizing_mode,
+            margin_allocation_pct=(
+                order_balance_usage_pct
+                if str(position_sizing_mode or "").strip().lower() == "order_value"
+                and order_balance_usage_pct is not None
+                else position_margin_allocation_pct
+            ),
+        )
+        position_notional = float(
+            sizing.get("position_notional_raw", sizing.get("position_notional", 0.0)) or 0.0
+        )
+        pnl_usdt = position_notional * (net_pct / 100.0)
+        equity += pnl_usdt
+        peak = max(peak, equity)
+        drawdown_pct = ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
+        rows.append(
+            {
+                "trade_index": index,
+                "timestamp": trade.get("exit_timestamp") or trade.get("entry_timestamp"),
+                "equity": round(equity, 8),
+                "drawdown_pct": round(drawdown_pct, 8),
+                "position_notional": round(position_notional, 8),
+                "pnl_usdt": round(pnl_usdt, 8),
+                "stop_loss_pct": round(stop_pct, 8),
+                "risk_cap_applied": bool(sizing.get("risk_cap_applied", False)),
+            }
+        )
+    return rows
+
 def save_detailed_report(
     trades,
     summary,
@@ -344,10 +477,13 @@ def save_detailed_report(
     leverage: float,
     position_sizing_mode: str,
     position_margin_allocation_pct: float,
+    order_balance_usage_pct: float | None = None,
+    output_dir: str | None = None,
 ):
-    os.makedirs("reports/backtests", exist_ok=True)
+    output_path = Path(output_dir or "reports/backtests")
+    output_path.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"reports/backtests/backtest_{symbol.replace('/', '_')}_{timeframe}_{days}d_{timestamp}.json"
+    filename = output_path / "backtest_report.json"
     strategy_snapshot = config.build_runtime_strategy_snapshot()
     report = {
         "metadata": {
@@ -362,21 +498,58 @@ def save_detailed_report(
                 "risk_per_trade_pct": round(float(risk_per_trade_pct), 4),
                 "position_sizing_mode": str(position_sizing_mode),
                 "position_margin_allocation_pct": round(float(position_margin_allocation_pct), 4),
-                "leverage": round(float(leverage), 4),
-                "model": (
-                    "fixed_margin_allocation"
-                    if str(position_sizing_mode).strip().lower() == "allocation"
-                    else "fixed_risk_per_trade"
+                "order_balance_usage_pct": (
+                    round(float(order_balance_usage_pct), 4) if order_balance_usage_pct is not None else None
                 ),
+                "leverage": round(float(leverage), 4),
+                "model": _resolve_account_model_name(position_sizing_mode),
             },
         },
         "summary": summary,
         "diagnostics": build_trade_diagnostics(trades),
         "trades": trades
     }
+    trade_columns = [
+        "side",
+        "entry_price",
+        "exit_price",
+        "entry_timestamp",
+        "exit_timestamp",
+        "gross_pct",
+        "net_pct",
+        "reason",
+        "entry_setup",
+        "entry_source_setup",
+    ]
+    trades_df = pd.DataFrame(trades) if trades else pd.DataFrame(columns=trade_columns)
+    trades_df.to_csv(output_path / "trades.csv", index=False)
+    pd.DataFrame([_flatten_summary_for_csv(summary)]).to_csv(output_path / "summary.csv", index=False)
+    setup_columns = [
+        "setup",
+        "trades",
+        "win_rate_pct",
+        "net_pct",
+        "profit_factor",
+        "avg_trade_pct",
+        "best_trade_pct",
+        "worst_trade_pct",
+    ]
+    setup_rows = _build_setup_report_rows(trades)
+    pd.DataFrame(setup_rows, columns=setup_columns).to_csv(output_path / "setup_report.csv", index=False)
+    pd.DataFrame(
+        _build_equity_curve_rows(
+            trades,
+            initial_balance,
+            risk_per_trade_pct=risk_per_trade_pct,
+            leverage=leverage,
+            position_sizing_mode=position_sizing_mode,
+            position_margin_allocation_pct=position_margin_allocation_pct,
+            order_balance_usage_pct=order_balance_usage_pct,
+        )
+    ).to_csv(output_path / "equity_curve.csv", index=False)
     with open(filename, 'w') as f:
         json.dump(report, f, indent=4)
-    print(f"Relatorio detalhado salvo em: {filename}")
+    print(f"Relatorios salvos em: {output_path}")
 
 def format_timestamp(ts):
     if isinstance(ts, pd.Timestamp):
@@ -401,6 +574,7 @@ def _create_backtest_position(
     atr: float,
     execution_profile: str,
     signal_result: dict | None = None,
+    candle_window=None,
 ):
     setup_payload = (signal_result or {}).get("setup") or {}
     entry_setup = str(setup_payload.get("setup") or "")
@@ -419,6 +593,8 @@ def _create_backtest_position(
         atr=atr,
         entry_setup=entry_setup,
         entry_source_setup=entry_source_setup,
+        candle_window=candle_window,
+        signal_result=signal_result,
     )
 
 
@@ -692,6 +868,8 @@ def run_backtest(
     risk_per_trade_pct: float | None = None,
     position_sizing_mode: str | None = None,
     position_margin_allocation_pct: float | None = None,
+    order_balance_usage_pct: float | None = None,
+    output_dir: str | None = None,
     leverage: float | None = None,
     strategy_params: StrategyParams | None = None,
 ):
@@ -713,18 +891,32 @@ def run_backtest(
         if position_sizing_mode is not None
         else getattr(config.ProductionConfig, "POSITION_SIZING_MODE", getattr(config, "POSITION_SIZING_MODE", "risk"))
     ).strip().lower()
-    resolved_position_margin_allocation_pct = max(
-        float(
-            position_margin_allocation_pct
-            if position_margin_allocation_pct is not None
-            else getattr(
-                config.ProductionConfig,
-                "POSITION_MARGIN_ALLOCATION_PCT",
-                getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
-            )
-        ),
-        0.0,
-    )
+    if resolved_position_sizing_mode == "order_value":
+        resolved_position_margin_allocation_pct = max(
+            float(
+                order_balance_usage_pct
+                if order_balance_usage_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "ORDER_BALANCE_USAGE_PCT",
+                    getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0),
+                )
+            ),
+            0.0,
+        )
+    else:
+        resolved_position_margin_allocation_pct = max(
+            float(
+                position_margin_allocation_pct
+                if position_margin_allocation_pct is not None
+                else getattr(
+                    config.ProductionConfig,
+                    "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+                )
+            ),
+            0.0,
+        )
     resolved_leverage = max(
         float(leverage if leverage is not None else getattr(config, "LEVERAGE", 1) or 1),
         1.0,
@@ -842,6 +1034,7 @@ def run_backtest(
                 atr=float(pending_signal["atr"]),
                 execution_profile=resolved_execution_profile,
                 signal_result=pending_signal,
+                candle_window=candle_slice,
             )
             position = _attach_backtest_entry_context(
                 position=position,
@@ -925,6 +1118,9 @@ def run_backtest(
         leverage=resolved_leverage,
         position_sizing_mode=resolved_position_sizing_mode,
         position_margin_allocation_pct=resolved_position_margin_allocation_pct,
+        order_balance_usage_pct=(
+            resolved_position_margin_allocation_pct if resolved_position_sizing_mode == "order_value" else None
+        ),
     )
     if verbose:
         applied = symbol_override_report.get("applied") or {}
@@ -953,12 +1149,16 @@ def run_backtest(
             leverage=resolved_leverage,
             position_sizing_mode=resolved_position_sizing_mode,
             position_margin_allocation_pct=resolved_position_margin_allocation_pct,
+            order_balance_usage_pct=(
+                resolved_position_margin_allocation_pct if resolved_position_sizing_mode == "order_value" else None
+            ),
+            output_dir=output_dir,
         )
 
     return trades, summary
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", default=config.SYMBOL)
     parser.add_argument("--timeframe", default=config.TIMEFRAME)
@@ -969,7 +1169,7 @@ if __name__ == "__main__":
     parser.add_argument("--risk-per-trade-pct", type=float, default=config.ProductionConfig.RISK_PER_TRADE_PCT)
     parser.add_argument(
         "--position-sizing-mode",
-        choices=["risk", "allocation", "hybrid"],
+        choices=["risk", "allocation", "hybrid", "order_value"],
         default=getattr(config.ProductionConfig, "POSITION_SIZING_MODE", "risk"),
     )
     parser.add_argument(
@@ -977,6 +1177,13 @@ if __name__ == "__main__":
         type=float,
         default=getattr(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 50.0),
     )
+    parser.add_argument(
+        "--order-balance-usage-pct",
+        type=float,
+        default=getattr(config.ProductionConfig, "ORDER_BALANCE_USAGE_PCT", getattr(config, "ORDER_BALANCE_USAGE_PCT", 100.0)),
+    )
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--single-run", action="store_true", help="Executar somente a quantidade exata de candles informada.")
     parser.add_argument("--leverage", type=float, default=float(getattr(config, "LEVERAGE", 1) or 1))
     parser.add_argument("--testnet", action="store_true")
     parser.add_argument(
@@ -991,10 +1198,15 @@ if __name__ == "__main__":
         action="store_false",
         help="Usar API em vez do CSV local.",
     )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     print(f"Iniciando bateria de testes para {args.symbol}...")
-    periods = {30: 2880, 90: 8640, 180: 17280, 365: 35040}
+    periods = {"single": int(args.candles)} if args.single_run else {30: 2880, 90: 8640, 180: 17280, 365: 35040}
 
     results_summary = []
     for days, candle_count in periods.items():
@@ -1012,9 +1224,12 @@ if __name__ == "__main__":
                 risk_per_trade_pct=args.risk_per_trade_pct,
                 position_sizing_mode=args.position_sizing_mode,
                 position_margin_allocation_pct=args.position_margin_allocation_pct,
+                order_balance_usage_pct=args.order_balance_usage_pct,
+                output_dir=args.output_dir,
                 leverage=args.leverage,
             )
-            ready = check_governance_readiness(summary, days)
+            readiness_days = 1 if args.single_run else int(days)
+            ready = check_governance_readiness(summary, readiness_days)
             results_summary.append({"days": days, "net": summary["net_pct"], "ready": ready})
         except Exception as exc:
             print(f"Erro no periodo {days}d: {exc}")

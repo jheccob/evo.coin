@@ -20,6 +20,8 @@ class RiskManagementService:
             return "hybrid"
         if token in {"allocation", "margin_allocation", "capital_allocation"}:
             return "allocation"
+        if token in {"order_value", "order_notional", "notional"}:
+            return "order_value"
         return "risk"
 
     @staticmethod
@@ -36,6 +38,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict[str, float]:
         normalized_stop_loss_pct = self._normalize_pct(stop_loss_pct)
         resolved_balance = float(account_balance or 0.0)
@@ -51,7 +54,7 @@ class RiskManagementService:
             or resolved_entry <= 0
             or normalized_stop_loss_pct <= 0
             or (mode_requires_risk_pct and resolved_risk_pct <= 0)
-            or (resolved_sizing_mode in {"allocation", "hybrid"} and requested_margin_allocation_pct <= 0)
+            or (resolved_sizing_mode in {"allocation", "hybrid", "order_value"} and requested_margin_allocation_pct <= 0)
         ):
             return {
                 "risk_amount": 0.0,
@@ -68,7 +71,21 @@ class RiskManagementService:
                 "margin_allocated_amount_raw": 0.0,
                 "effective_risk_pct": 0.0,
                 "requested_risk_pct": round(resolved_risk_pct, 4),
+                "requested_order_notional": 0.0,
+                "requested_order_notional_raw": 0.0,
+                "final_order_notional": 0.0,
+                "final_order_notional_raw": 0.0,
+                "required_margin": 0.0,
+                "required_margin_raw": 0.0,
+                "risk_cap_applied": False,
+                "order_balance_usage_pct": round(requested_margin_allocation_pct, 4),
+                "blocked": True,
+                "risk_reason": "Parametros invalidos para calcular tamanho da posicao.",
             }
+
+        requested_order_notional = 0.0
+        risk_cap_applied = False
+        risk_reason = ""
 
         if resolved_sizing_mode == "allocation":
             margin_allocated_amount = resolved_balance * (requested_margin_allocation_pct / 100.0)
@@ -88,6 +105,27 @@ class RiskManagementService:
             resolved_margin_allocation_pct = (
                 (margin_allocated_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
             )
+        elif resolved_sizing_mode == "order_value":
+            requested_order_notional = resolved_balance * (requested_margin_allocation_pct / 100.0)
+            max_risk_amount = resolved_balance * (resolved_risk_pct / 100.0)
+            requested_risk_amount = requested_order_notional * normalized_stop_loss_pct
+            risk_cap_enabled = bool(getattr(config, "ORDER_VALUE_RISK_CAP", True))
+
+            if resolved_risk_pct > 0 and requested_risk_amount > max_risk_amount:
+                if risk_cap_enabled:
+                    position_notional = max_risk_amount / normalized_stop_loss_pct
+                    risk_cap_applied = True
+                    risk_reason = "order_value_risk_cap_applied"
+                else:
+                    position_notional = 0.0
+                    risk_reason = "order_value_risco_acima_do_limite"
+            else:
+                position_notional = requested_order_notional
+
+            margin_allocated_amount = position_notional / resolved_leverage if resolved_leverage > 0 else position_notional
+            risk_amount = position_notional * normalized_stop_loss_pct
+            effective_risk_pct = (risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
+            resolved_margin_allocation_pct = requested_margin_allocation_pct
         else:
             risk_amount = resolved_balance * (resolved_risk_pct / 100.0)
             position_notional = risk_amount / normalized_stop_loss_pct
@@ -98,7 +136,12 @@ class RiskManagementService:
             )
 
         quantity = position_notional / resolved_entry if resolved_entry > 0 else 0.0
-        stop_loss_price = resolved_entry * (1 - normalized_stop_loss_pct)
+        side = str(position_side or "long").strip().lower()
+        stop_loss_price = (
+            resolved_entry * (1 + normalized_stop_loss_pct)
+            if side == "short"
+            else resolved_entry * (1 - normalized_stop_loss_pct)
+        )
 
         return {
             "risk_amount": round(risk_amount, 2),
@@ -111,10 +154,22 @@ class RiskManagementService:
             "sizing_mode": resolved_sizing_mode,
             "leverage": round(resolved_leverage, 4),
             "margin_allocation_pct": round(resolved_margin_allocation_pct, 4),
-            "margin_allocated_amount": round(margin_allocated_amount, 2),
+            "margin_allocated_amount": float(margin_allocated_amount),
             "margin_allocated_amount_raw": float(margin_allocated_amount),
             "effective_risk_pct": round(effective_risk_pct, 4),
             "requested_risk_pct": round(resolved_risk_pct, 4),
+            "requested_order_notional": round(requested_order_notional, 2),
+            "requested_order_notional_raw": float(requested_order_notional),
+            "final_order_notional": round(position_notional, 2),
+            "final_order_notional_raw": float(position_notional),
+            "required_margin": float(margin_allocated_amount),
+            "required_margin_raw": float(margin_allocated_amount),
+            "risk_cap_applied": bool(risk_cap_applied),
+            "order_balance_usage_pct": round(
+                requested_margin_allocation_pct if resolved_sizing_mode == "order_value" else 0.0, 4
+            ),
+            "blocked": bool(risk_reason == "order_value_risco_acima_do_limite"),
+            "risk_reason": risk_reason,
         }
 
     def evaluate_symbol_operability(
@@ -151,8 +206,16 @@ class RiskManagementService:
                 if margin_allocation_pct is not None
                 else getattr(
                     ProductionConfig,
-                    "POSITION_MARGIN_ALLOCATION_PCT",
-                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
+                    "ORDER_BALANCE_USAGE_PCT"
+                    if resolved_sizing_mode == "order_value"
+                    else "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(
+                        config,
+                        "ORDER_BALANCE_USAGE_PCT"
+                        if resolved_sizing_mode == "order_value"
+                        else "POSITION_MARGIN_ALLOCATION_PCT",
+                        0.0,
+                    ),
                 )
                 or 0.0
             ),
@@ -256,6 +319,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         position_sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict:
         resolved_execution_scope = self._normalize_execution_scope(execution_scope)
         live_context = live_context or {}
@@ -304,8 +368,16 @@ class RiskManagementService:
                 if margin_allocation_pct is not None
                 else getattr(
                     ProductionConfig,
-                    "POSITION_MARGIN_ALLOCATION_PCT",
-                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
+                    "ORDER_BALANCE_USAGE_PCT"
+                    if resolved_position_sizing_mode == "order_value"
+                    else "POSITION_MARGIN_ALLOCATION_PCT",
+                    getattr(
+                        config,
+                        "ORDER_BALANCE_USAGE_PCT"
+                        if resolved_position_sizing_mode == "order_value"
+                        else "POSITION_MARGIN_ALLOCATION_PCT",
+                        0.0,
+                    ),
                 )
                 or 0.0
             ),
@@ -427,7 +499,11 @@ class RiskManagementService:
         }
 
         min_live_balance = float(getattr(ProductionConfig, "MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0) or 20.0)
-        if resolved_execution_scope == "live" and resolved_account_balance < min_live_balance:
+        if (
+            resolved_execution_scope == "live"
+            and resolved_position_sizing_mode != "order_value"
+            and resolved_account_balance < min_live_balance
+        ):
             system_health_guard.update({"status": "blocked", "triggered": True})
             return self._blocked_plan(
                 (
@@ -618,11 +694,12 @@ class RiskManagementService:
             leverage=resolved_leverage,
             sizing_mode=resolved_position_sizing_mode,
             margin_allocation_pct=resolved_margin_allocation_pct,
+            position_side=position_side,
         )
 
         if sizing["quantity"] <= 0 or sizing["position_notional"] <= 0:
             return self._blocked_plan(
-                "Nao foi possivel calcular um tamanho de posicao valido.",
+                str(sizing.get("risk_reason") or "Nao foi possivel calcular um tamanho de posicao valido."),
                 portfolio_summary=portfolio_summary,
                 circuit_breaker=circuit_breaker,
                 drawdown_summary=drawdown_summary,
@@ -657,6 +734,11 @@ class RiskManagementService:
             "effective_risk_pct": sizing["effective_risk_pct"],
             "position_notional": sizing["position_notional"],
             "quantity": sizing["quantity"],
+            "requested_order_notional": sizing.get("requested_order_notional", 0.0),
+            "final_order_notional": sizing.get("final_order_notional", sizing.get("position_notional", 0.0)),
+            "required_margin": sizing.get("required_margin", sizing.get("margin_allocated_amount", 0.0)),
+            "risk_cap_applied": bool(sizing.get("risk_cap_applied", False)),
+            "order_balance_usage_pct": sizing.get("order_balance_usage_pct", 0.0),
             "portfolio_open_trades": open_trades,
             "symbol_open_trades": symbol_open_trades,
             "portfolio_open_risk_pct": round(total_open_risk_pct, 4),
@@ -700,6 +782,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         position_sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict:
         # Compatibility alias kept for older callers and tests.
         return self.evaluate_risk_engine(
@@ -723,6 +806,7 @@ class RiskManagementService:
             leverage=leverage,
             position_sizing_mode=position_sizing_mode,
             margin_allocation_pct=margin_allocation_pct,
+            position_side=position_side,
         )
 
     def get_portfolio_risk_summary(self) -> Dict:

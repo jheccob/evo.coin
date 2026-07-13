@@ -1,0 +1,73 @@
+name: Backtest
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: Trading symbol
+        default: BTC/USDT
+        required: true
+      timeframe:
+        description: Candle timeframe
+        default: 15m
+        required: true
+      candles:
+        description: Number of candles per period
+        default: '3000'
+        required: true
+      initial_balance:
+        description: Initial balance in USDT
+        default: '21.45'
+        required: true
+      order_balance_usage_pct:
+        description: Order notional as percent of balance
+        default: '100'
+        required: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backtest dependencies
+        run: pip install -r requirements-backtest.txt
+      - name: Run unit tests
+        env:
+          ENABLE_AI_ASSISTANT: 'false'
+        run: pytest tests/test_strategy.py -q
+
+  backtest:
+    if: github.event_name == 'workflow_dispatch'
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backtest dependencies
+        run: pip install -r requirements-backtest.txt
+      - name: Run order_value backtest
+        env:
+          ENABLE_AI_ASSISTANT: 'false'
+        run: |
+          python backtest.py \
+            --single-run \
+            --symbol "${{ inputs.symbol }}" \
+            --timeframe "${{ inputs.timeframe }}" \
+            --candles "${{ inputs.candles }}" \
+            --initial-balance "${{ inputs.initial_balance }}" \
+            --position-sizing-mode order_value \
+            --order-balance-usage-pct "${{ inputs.order_balance_usage_pct }}" \
+            --output-dir reports/backtests/manual
+      - name: Upload backtest reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-reports
+          path: reports/backtests/manual/**
+          if-no-files-found: warn
