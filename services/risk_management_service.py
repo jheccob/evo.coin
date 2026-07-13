@@ -38,6 +38,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict[str, float]:
         normalized_stop_loss_pct = self._normalize_pct(stop_loss_pct)
         resolved_balance = float(account_balance or 0.0)
@@ -135,7 +136,12 @@ class RiskManagementService:
             )
 
         quantity = position_notional / resolved_entry if resolved_entry > 0 else 0.0
-        stop_loss_price = resolved_entry * (1 - normalized_stop_loss_pct)
+        side = str(position_side or "long").strip().lower()
+        stop_loss_price = (
+            resolved_entry * (1 + normalized_stop_loss_pct)
+            if side == "short"
+            else resolved_entry * (1 - normalized_stop_loss_pct)
+        )
 
         return {
             "risk_amount": round(risk_amount, 2),
@@ -313,6 +319,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         position_sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict:
         resolved_execution_scope = self._normalize_execution_scope(execution_scope)
         live_context = live_context or {}
@@ -687,6 +694,7 @@ class RiskManagementService:
             leverage=resolved_leverage,
             sizing_mode=resolved_position_sizing_mode,
             margin_allocation_pct=resolved_margin_allocation_pct,
+            position_side=position_side,
         )
 
         if sizing["quantity"] <= 0 or sizing["position_notional"] <= 0:
@@ -774,6 +782,7 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         position_sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        position_side: Optional[str] = None,
     ) -> Dict:
         # Compatibility alias kept for older callers and tests.
         return self.evaluate_risk_engine(
@@ -797,6 +806,7 @@ class RiskManagementService:
             leverage=leverage,
             position_sizing_mode=position_sizing_mode,
             margin_allocation_pct=margin_allocation_pct,
+            position_side=position_side,
         )
 
     def get_portfolio_risk_summary(self) -> Dict:

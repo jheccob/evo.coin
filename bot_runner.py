@@ -898,6 +898,7 @@ def _build_live_entry_plan(
         max_open_trades=max_open_real_trades,
         execution_scope="live",
         live_context=context,
+        position_side="long" if signal_side == "buy" else "short",
     )
 
     if not bool(risk_data.get("allowed", False)):

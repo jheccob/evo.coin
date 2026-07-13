@@ -2519,6 +2519,21 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["margin_allocated_amount"], 2.145, places=3)
         self.assertAlmostEqual(sizing["quantity"], 0.000343, places=6)
 
+    def test_calculate_position_size_short_stop_price_stays_above_entry(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=100.0,
+            entry_price=100.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            leverage=10,
+            sizing_mode="risk",
+            position_side="short",
+        )
+
+        self.assertAlmostEqual(sizing["stop_loss_price"], 101.5, places=6)
+
     def test_build_account_risk_summary_supports_margin_allocation_model(self):
         trades = [
             {"side": "long", "net_pct": 2.82},
@@ -4136,6 +4151,8 @@ class SymbolGovernanceTests(unittest.TestCase):
 
         self.assertTrue(result["allowed"])
         self.assertLess(result["preview_position"]["initial_stop"], candles["low"].min())
+        _, kwargs = risk_service.build_trade_plan.call_args
+        self.assertEqual(kwargs["position_side"], "long")
 
     def test_live_short_entry_uses_structural_stop_above_recent_high(self):
         candles = pd.DataFrame({"low": [98.0, 98.5, 99.0], "high": [101.0, 102.0, 102.5]})
@@ -4162,6 +4179,8 @@ class SymbolGovernanceTests(unittest.TestCase):
 
         self.assertTrue(result["allowed"])
         self.assertGreater(result["preview_position"]["initial_stop"], candles["high"].max())
+        _, kwargs = risk_service.build_trade_plan.call_args
+        self.assertEqual(kwargs["position_side"], "short")
 
     def test_live_liquidity_sweep_long_prefers_sweep_low_for_structural_stop(self):
         candles = pd.DataFrame({"low": [90.0, 98.0, 99.0], "high": [101.0, 102.0, 103.0]})

@@ -409,6 +409,7 @@ def _build_equity_curve_rows(
     leverage: float,
     position_sizing_mode: str,
     position_margin_allocation_pct: float,
+    order_balance_usage_pct: float | None = None,
 ) -> list[dict]:
     equity = float(initial_balance or 0.0)
     peak = equity
@@ -434,7 +435,12 @@ def _build_equity_curve_rows(
             risk_pct=float(risk_per_trade_pct or 0.0),
             leverage=leverage,
             sizing_mode=position_sizing_mode,
-            margin_allocation_pct=position_margin_allocation_pct,
+            margin_allocation_pct=(
+                order_balance_usage_pct
+                if str(position_sizing_mode or "").strip().lower() == "order_value"
+                and order_balance_usage_pct is not None
+                else position_margin_allocation_pct
+            ),
         )
         position_notional = float(
             sizing.get("position_notional_raw", sizing.get("position_notional", 0.0)) or 0.0
@@ -538,6 +544,7 @@ def save_detailed_report(
             leverage=leverage,
             position_sizing_mode=position_sizing_mode,
             position_margin_allocation_pct=position_margin_allocation_pct,
+            order_balance_usage_pct=order_balance_usage_pct,
         )
     ).to_csv(output_path / "equity_curve.csv", index=False)
     with open(filename, 'w') as f:
