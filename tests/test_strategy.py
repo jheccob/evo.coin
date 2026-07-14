@@ -3611,6 +3611,44 @@ class SymbolGovernanceTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Operabilidade negada", result["reason"])
 
+    def test_build_live_execution_plan_adjusts_btc_micro_size_to_exchange_minimum(self):
+        execution_service = mock.Mock()
+        execution_service.fetch_account_balance_snapshot.return_value = {"total": 22.0, "free": 22.0}
+        execution_service.fetch_symbol_trading_rules.return_value = {
+            "min_qty": 0.001,
+            "min_notional": 50.0,
+            "qty_step": 0.001,
+        }
+        real_risk_service = RiskManagementService(database=mock.Mock())
+        risk_service = mock.Mock(wraps=real_risk_service)
+        risk_service.build_trade_plan.return_value = {
+            "allowed": True,
+            "quantity": 0.00035,
+            "position_notional": 21.875,
+            "risk_per_trade_pct": 5.0,
+            "leverage": 10,
+            "sizing_mode": "hybrid",
+            "margin_allocation_pct": 100.0,
+        }
+
+        with (
+            mock.patch.object(bot_runner, "_find_live_positions", return_value=[]),
+            mock.patch.object(config.ProductionConfig, "REQUIRE_LIVE_TRAILING_STOP", False, create=True),
+        ):
+            result = bot_runner._build_live_entry_plan(
+                execution_service=execution_service,
+                risk_management_service=risk_service,
+                context={"account_id": "env-primary"},
+                signal_side="sell",
+                entry_price=62500.0,
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["quantity"], 0.001)
+        self.assertAlmostEqual(result["position_notional"], 62.5, places=4)
+        self.assertTrue(result["operability"]["exchange_minimum_adjusted"])
+        self.assertAlmostEqual(result["required_margin"], 6.25, places=4)
+
     def test_build_live_execution_plan_blocks_balance_below_minimum_bankroll(self):
         execution_service = mock.Mock()
         execution_service.fetch_account_balance_snapshot.return_value = {"total": 19.99, "free": 19.99}

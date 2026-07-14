@@ -831,6 +831,9 @@ def _build_live_entry_plan(
     account_balance = float(balance_snapshot.get("total") or 0.0)
     if account_balance <= 0:
         account_balance = float(balance_snapshot.get("free") or 0.0)
+    available_balance = float(balance_snapshot.get("free") or 0.0)
+    if available_balance <= 0:
+        available_balance = account_balance
     if account_balance <= 0:
         return {
             "allowed": False,
@@ -917,6 +920,9 @@ def _build_live_entry_plan(
             or getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0)
             or 0.0
         ),
+        account_balance=account_balance,
+        available_balance=available_balance,
+        allow_exchange_minimum_adjustment=True,
     )
     if not bool(operability.get("allowed", False)):
         return {
@@ -931,6 +937,29 @@ def _build_live_entry_plan(
     resolved_position_notional = float(
         operability.get("rounded_notional") or risk_data.get("position_notional", 0.0) or 0.0
     )
+    resolved_leverage = max(float(risk_data.get("leverage") or getattr(config, "LEVERAGE", 1) or 1), 1.0)
+    required_margin = resolved_position_notional / resolved_leverage if resolved_leverage > 0 else resolved_position_notional
+    fee_buffer_pct = max(float(getattr(config, "FEE_PCT", 0.0) or 0.0), 0.0)
+    required_margin_with_buffer = required_margin + (resolved_position_notional * (fee_buffer_pct / 100.0))
+    if available_balance + 1e-12 < required_margin_with_buffer:
+        return {
+            "allowed": False,
+            "reason": (
+                "Saldo livre insuficiente para margem da ordem live "
+                f"(saldo_livre={available_balance:.4f}, margem_estimada={required_margin_with_buffer:.4f})."
+            ),
+            "balance_snapshot": balance_snapshot,
+            "risk_data": risk_data,
+            "trading_rules": trading_rules,
+            "operability": operability,
+            "margin_check": {
+                "available_balance": round(available_balance, 8),
+                "order_notional": round(resolved_position_notional, 8),
+                "leverage": round(resolved_leverage, 8),
+                "required_margin": round(required_margin, 8),
+                "required_margin_with_buffer": round(required_margin_with_buffer, 8),
+            },
+        }
 
     return {
         "allowed": True,
@@ -942,6 +971,8 @@ def _build_live_entry_plan(
         **risk_data,
         "quantity": resolved_quantity,
         "position_notional": resolved_position_notional,
+        "required_margin": required_margin,
+        "required_margin_with_buffer": required_margin_with_buffer,
         "execution_profile": _resolve_runtime_execution_profile(execution_profile),
         "preview_position": preview_position,
         "take_profit_price": take_profit_price,

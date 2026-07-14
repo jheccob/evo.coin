@@ -26,6 +26,78 @@ class RiskManagementService:
     def _normalize_execution_scope(execution_scope: Optional[str]) -> str:
         return "live" if str(execution_scope or "").strip().lower() == "live" else "paper"
 
+    @staticmethod
+    def _round_quantity_down(quantity: float, qty_step: float = 0.0, qty_precision: Any = None) -> float:
+        resolved_quantity = max(float(quantity or 0.0), 0.0)
+        resolved_step = max(float(qty_step or 0.0), 0.0)
+        if resolved_step > 0:
+            return max(math.floor((resolved_quantity + 1e-12) / resolved_step) * resolved_step, 0.0)
+        if qty_precision not in (None, ""):
+            return max(round(resolved_quantity, int(qty_precision)), 0.0)
+        return resolved_quantity
+
+    @staticmethod
+    def _round_quantity_up(quantity: float, qty_step: float = 0.0, qty_precision: Any = None) -> float:
+        resolved_quantity = max(float(quantity or 0.0), 0.0)
+        resolved_step = max(float(qty_step or 0.0), 0.0)
+        if resolved_quantity <= 0:
+            return 0.0
+        if resolved_step > 0:
+            return max(math.ceil((resolved_quantity - 1e-12) / resolved_step) * resolved_step, 0.0)
+        if qty_precision not in (None, ""):
+            precision = int(qty_precision)
+            factor = 10**precision
+            return max(math.ceil((resolved_quantity - 1e-12) * factor) / factor, 0.0)
+        return resolved_quantity
+
+    def _resolve_exchange_minimum_order(
+        self,
+        *,
+        entry_price: float,
+        stop_loss_pct: float,
+        risk_pct: float,
+        trading_rules: Optional[Dict[str, float]] = None,
+        leverage: Optional[float] = None,
+        account_balance: Optional[float] = None,
+    ) -> Dict[str, float]:
+        rules = trading_rules or {}
+        resolved_entry = max(float(entry_price or 0.0), 0.0)
+        normalized_stop_loss_pct = self._normalize_pct(stop_loss_pct)
+        resolved_risk_pct = max(float(risk_pct or 0.0), 0.0)
+        resolved_balance = max(float(account_balance or 0.0), 0.0)
+        resolved_leverage = max(float(leverage or getattr(config, "LEVERAGE", 1) or 1), 1.0)
+        min_qty = max(float(rules.get("min_qty", 0.0) or 0.0), 0.0)
+        min_notional = max(float(rules.get("min_notional", 0.0) or 0.0), 0.0)
+        qty_step = max(float(rules.get("qty_step", 0.0) or 0.0), 0.0)
+        qty_precision = rules.get("qty_precision")
+
+        min_qty_from_notional = min_notional / resolved_entry if resolved_entry > 0 and min_notional > 0 else 0.0
+        required_quantity_raw = max(min_qty, min_qty_from_notional)
+        required_quantity = self._round_quantity_up(required_quantity_raw, qty_step, qty_precision)
+        required_notional = required_quantity * resolved_entry if resolved_entry > 0 else 0.0
+        if min_notional > 0 and required_notional < min_notional and resolved_entry > 0:
+            required_quantity = self._round_quantity_up(min_notional / resolved_entry, qty_step, qty_precision)
+            required_notional = required_quantity * resolved_entry
+        required_margin = required_notional / resolved_leverage if resolved_leverage > 0 else required_notional
+        required_risk_amount = required_notional * normalized_stop_loss_pct
+        required_risk_pct = (required_risk_amount / resolved_balance) * 100.0 if resolved_balance > 0 else 0.0
+
+        min_balance_for_risk = 0.0
+        if normalized_stop_loss_pct > 0 and resolved_risk_pct > 0:
+            min_balance_for_risk = (required_notional * normalized_stop_loss_pct) / (resolved_risk_pct / 100.0)
+
+        return {
+            "required_quantity": required_quantity,
+            "required_notional": required_notional,
+            "required_margin": required_margin,
+            "required_risk_amount": required_risk_amount,
+            "required_risk_pct": required_risk_pct,
+            "min_balance_for_risk": min_balance_for_risk,
+            "min_qty": min_qty,
+            "min_notional": min_notional,
+            "qty_step": qty_step,
+        }
+
     def calculate_position_size(
         self,
         account_balance: float,
@@ -129,6 +201,9 @@ class RiskManagementService:
         leverage: Optional[float] = None,
         sizing_mode: Optional[str] = None,
         margin_allocation_pct: Optional[float] = None,
+        account_balance: Optional[float] = None,
+        available_balance: Optional[float] = None,
+        allow_exchange_minimum_adjustment: bool = False,
     ) -> Dict[str, float | bool | str]:
         rules = trading_rules or {}
         resolved_entry = float(entry_price or 0.0)
@@ -159,18 +234,31 @@ class RiskManagementService:
             0.0,
         )
 
-        rounded_quantity = resolved_quantity
-        if qty_step > 0:
-            rounded_quantity = math.floor((resolved_quantity + 1e-12) / qty_step) * qty_step
-        elif qty_precision not in (None, ""):
-            rounded_quantity = round(resolved_quantity, int(qty_precision))
-        rounded_quantity = max(float(rounded_quantity or 0.0), 0.0)
+        resolved_account_balance = max(float(account_balance or 0.0), 0.0)
+        resolved_available_balance = (
+            max(float(available_balance or 0.0), 0.0)
+            if available_balance is not None
+            else resolved_account_balance
+        )
+
+        rounded_quantity = self._round_quantity_down(resolved_quantity, qty_step, qty_precision)
         rounded_notional = resolved_notional
         if resolved_entry > 0 and rounded_quantity > 0:
             rounded_notional = rounded_quantity * resolved_entry
 
-        required_notional_for_qty = min_qty * resolved_entry if min_qty > 0 and resolved_entry > 0 else 0.0
-        required_notional = max(required_notional_for_qty, min_notional)
+        exchange_minimum = self._resolve_exchange_minimum_order(
+            entry_price=resolved_entry,
+            stop_loss_pct=normalized_stop_loss_pct,
+            risk_pct=resolved_risk_pct,
+            trading_rules=rules,
+            leverage=resolved_leverage,
+            account_balance=resolved_account_balance,
+        )
+        required_notional = float(exchange_minimum.get("required_notional", 0.0) or 0.0)
+        required_quantity = float(exchange_minimum.get("required_quantity", 0.0) or 0.0)
+        required_margin = float(exchange_minimum.get("required_margin", 0.0) or 0.0)
+        required_risk_pct = float(exchange_minimum.get("required_risk_pct", 0.0) or 0.0)
+        required_risk_amount = float(exchange_minimum.get("required_risk_amount", 0.0) or 0.0)
         min_balance_for_risk = 0.0
         min_balance_for_allocation = 0.0
         if normalized_stop_loss_pct > 0 and resolved_risk_pct > 0:
@@ -184,15 +272,79 @@ class RiskManagementService:
             min_required_balance = max(min_balance_for_risk, min_balance_for_allocation)
         else:
             min_required_balance = min_balance_for_risk
+
+        details = {
+            "min_qty": round(min_qty, 12),
+            "min_notional": round(min_notional, 8),
+            "min_required_balance": round(min_required_balance, 4),
+            "requested_quantity": round(resolved_quantity, 12),
+            "requested_notional": round(resolved_notional, 8),
+            "rounded_quantity": round(rounded_quantity, 12),
+            "rounded_notional": round(rounded_notional, 8),
+            "required_quantity": round(required_quantity, 12),
+            "required_notional": round(required_notional, 8),
+            "required_margin": round(required_margin, 8),
+            "required_risk_amount": round(required_risk_amount, 8),
+            "required_risk_pct": round(required_risk_pct, 4),
+            "exchange_minimum_adjusted": False,
+        }
+
+        below_exchange_minimum = (
+            (rounded_quantity <= 0 and resolved_quantity > 0)
+            or (min_qty > 0 and rounded_quantity < min_qty)
+            or (min_notional > 0 and rounded_notional < min_notional)
+        )
+
+        if below_exchange_minimum and allow_exchange_minimum_adjustment and required_quantity > rounded_quantity:
+            can_cover_margin = resolved_available_balance <= 0 or required_margin <= resolved_available_balance + 1e-12
+            if resolved_sizing_mode == "allocation":
+                margin_budget = (
+                    resolved_account_balance * (resolved_margin_allocation_pct / 100.0)
+                    if resolved_account_balance > 0 and resolved_margin_allocation_pct > 0
+                    else 0.0
+                )
+                can_respect_risk_model = margin_budget <= 0 or required_margin <= margin_budget + 1e-12
+            else:
+                can_respect_risk_model = (
+                    resolved_risk_pct <= 0
+                    or resolved_account_balance <= 0
+                    or required_risk_pct <= resolved_risk_pct + 1e-12
+                )
+            if can_cover_margin and can_respect_risk_model:
+                return {
+                    "allowed": True,
+                    "reason": "Quantidade ajustada para o minimo operavel da exchange.",
+                    **details,
+                    "rounded_quantity": round(required_quantity, 12),
+                    "rounded_notional": round(required_notional, 8),
+                    "exchange_minimum_adjusted": True,
+                }
+            if not can_cover_margin:
+                return {
+                    "allowed": False,
+                    "reason": (
+                        "Ordem abaixo do minimo da exchange e saldo livre insuficiente para ajustar "
+                        f"(margem_minima={required_margin:.4f} USDT, saldo_livre={resolved_available_balance:.4f} USDT)."
+                    ),
+                    **details,
+                }
+            return {
+                "allowed": False,
+                "reason": (
+                    "Ordem abaixo do minimo da exchange; ajustar para o minimo violaria o limite de risco "
+                    f"(risco_minimo={required_risk_pct:.2f}%, limite={resolved_risk_pct:.2f}%)."
+                ),
+                **details,
+            }
+
         if rounded_quantity <= 0 and resolved_quantity > 0:
             return {
                 "allowed": False,
-                "reason": "Quantidade arredondada pela exchange ficou zerada.",
-                "min_qty": round(min_qty, 12),
-                "min_notional": round(min_notional, 8),
-                "min_required_balance": round(min_required_balance, 4),
-                "rounded_quantity": round(rounded_quantity, 12),
-                "rounded_notional": round(rounded_notional, 8),
+                "reason": (
+                    "Ordem abaixo do minimo da exchange: quantidade arredondada ficou zerada "
+                    f"(calculado={resolved_quantity:.12f}, minimo={required_quantity:.12f})."
+                ),
+                **details,
             }
         if min_qty > 0 and rounded_quantity < min_qty:
             return {
@@ -200,11 +352,7 @@ class RiskManagementService:
                 "reason": (
                     f"Quantidade abaixo do minimo da exchange ({rounded_quantity:.6f} < {min_qty:.6f})."
                 ),
-                "min_qty": round(min_qty, 12),
-                "min_notional": round(min_notional, 8),
-                "min_required_balance": round(min_required_balance, 4),
-                "rounded_quantity": round(rounded_quantity, 12),
-                "rounded_notional": round(rounded_notional, 8),
+                **details,
             }
         if min_notional > 0 and rounded_notional < min_notional:
             return {
@@ -212,21 +360,13 @@ class RiskManagementService:
                 "reason": (
                     f"Notional abaixo do minimo da exchange ({rounded_notional:.2f} < {min_notional:.2f})."
                 ),
-                "min_qty": round(min_qty, 12),
-                "min_notional": round(min_notional, 8),
-                "min_required_balance": round(min_required_balance, 4),
-                "rounded_quantity": round(rounded_quantity, 12),
-                "rounded_notional": round(rounded_notional, 8),
+                **details,
             }
 
         return {
             "allowed": True,
             "reason": "",
-            "min_qty": round(min_qty, 12),
-            "min_notional": round(min_notional, 8),
-            "min_required_balance": round(min_required_balance, 4),
-            "rounded_quantity": round(rounded_quantity, 12),
-            "rounded_notional": round(rounded_notional, 8),
+            **details,
         }
 
     def evaluate_risk_engine(

@@ -463,7 +463,71 @@ class LiveExecutionServiceTests(unittest.TestCase):
         )
 
         self.assertTrue(result["allowed"])
-        self.assertAlmostEqual(result["min_required_balance"], 10.0, places=4)
+        self.assertAlmostEqual(result["min_required_balance"], 12.5, places=4)
+
+    def test_risk_operability_reports_btc_exchange_minimum_for_micro_size(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=62500.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            quantity=0.00035,
+            position_notional=21.875,
+            trading_rules={"min_qty": 0.001, "min_notional": 50.0, "qty_step": 0.001},
+            leverage=10,
+            sizing_mode="hybrid",
+            account_balance=22.0,
+            available_balance=22.0,
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("minimo da exchange", result["reason"])
+        self.assertEqual(result["rounded_quantity"], 0.0)
+        self.assertEqual(result["required_quantity"], 0.001)
+        self.assertAlmostEqual(result["required_notional"], 62.5, places=4)
+        self.assertGreater(result["required_risk_pct"], 2.0)
+
+    def test_risk_operability_adjusts_btc_micro_size_when_risk_allows(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=62500.0,
+            stop_loss_pct=1.5,
+            risk_pct=5.0,
+            quantity=0.00035,
+            position_notional=21.875,
+            trading_rules={"min_qty": 0.001, "min_notional": 50.0, "qty_step": 0.001},
+            leverage=10,
+            sizing_mode="hybrid",
+            account_balance=22.0,
+            available_balance=22.0,
+            allow_exchange_minimum_adjustment=True,
+        )
+
+        self.assertTrue(result["allowed"])
+        self.assertTrue(result["exchange_minimum_adjusted"])
+        self.assertEqual(result["rounded_quantity"], 0.001)
+        self.assertAlmostEqual(result["rounded_notional"], 62.5, places=4)
+        self.assertAlmostEqual(result["required_margin"], 6.25, places=4)
+
+    def test_risk_operability_blocks_exchange_minimum_when_risk_cap_is_exceeded(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=62500.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            quantity=0.00035,
+            position_notional=21.875,
+            trading_rules={"min_qty": 0.001, "min_notional": 50.0, "qty_step": 0.001},
+            leverage=10,
+            sizing_mode="hybrid",
+            account_balance=22.0,
+            available_balance=22.0,
+            allow_exchange_minimum_adjustment=True,
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("violaria o limite de risco", result["reason"])
+        self.assertAlmostEqual(result["required_risk_pct"], 4.2614, places=4)
 
 
 class MultiUserRuntimeExecutionTests(unittest.TestCase):
