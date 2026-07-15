@@ -362,6 +362,142 @@ def _detect_short_reversal_rejection(df: pd.DataFrame, params: StrategyParams, i
     }
 
 
+def _detect_momentum_breakout_long(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Optional[Dict[str, object]]:
+    if not bool(getattr(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True)):
+        return None
+
+    effective_index = len(df) + index if index < 0 else index
+    if effective_index <= 0:
+        return None
+
+    lookback = max(int(getattr(config, "MOMENTUM_BREAKOUT_LOOKBACK", 32) or 32), 8)
+    start_index = max(effective_index - lookback, 0)
+    window = df.iloc[start_index:effective_index]
+    if len(window) < 8:
+        return None
+
+    row = df.iloc[effective_index]
+    prev = df.iloc[effective_index - 1]
+    recent_high = float(window["high"].max())
+    current_close = float(row["close"])
+    current_high = float(row["high"])
+    if recent_high <= 0 or current_close <= 0:
+        return None
+
+    min_break_pct = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_BREAK_PCT", 0.18) or 0.18)
+    max_extension_fast = float(
+        getattr(config, "MOMENTUM_BREAKOUT_MAX_EXTENSION_FAST_EMA_PCT", 1.75) or 1.75
+    )
+    min_volume_ratio = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_VOLUME_RATIO", 2.0) or 2.0)
+    followup_min_volume_ratio = float(
+        getattr(config, "MOMENTUM_BREAKOUT_FOLLOWUP_MIN_VOLUME_RATIO", 0.85) or 0.85
+    )
+    min_rsi = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_RSI", 62.0) or 62.0)
+    max_rsi = float(getattr(config, "MOMENTUM_BREAKOUT_MAX_RSI", 88.0) or 88.0)
+    min_adx = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_ADX", 18.0) or 18.0)
+    require_macd_improving = bool(getattr(config, "MOMENTUM_BREAKOUT_REQUIRE_MACD_IMPROVING", True))
+    min_score = int(getattr(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6) or 6)
+    min_trend_strength_pct = float(
+        getattr(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0) or 0.0
+    )
+    min_context_gap_pct = float(
+        getattr(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0) or 0.0
+    )
+    allow_early_breakout = bool(getattr(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", False))
+    allow_followup_volume = bool(getattr(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True))
+
+    close_break_pct = ((current_close - recent_high) / recent_high) * 100.0
+    high_break_pct = ((current_high - recent_high) / recent_high) * 100.0
+    close_breakout = bool(close_break_pct >= min_break_pct)
+    early_breakout = bool(high_break_pct >= min_break_pct and current_close > recent_high)
+    breakout_confirmed = bool(close_breakout or (allow_early_breakout and early_breakout))
+    if not breakout_confirmed:
+        return None
+
+    fast = float(row["ema_fast"])
+    slow = float(row["ema_slow"])
+    trend = float(row["ema_trend"])
+    extension_fast_pct = ((current_close - fast) / current_close) * 100.0 if current_close > 0 else 0.0
+    trend_strength_pct = abs(fast - slow) / current_close * 100.0 if current_close > 0 else 0.0
+    context_gap_pct = abs(slow - trend) / current_close * 100.0 if current_close > 0 else 0.0
+    if extension_fast_pct > max_extension_fast:
+        return None
+    if trend_strength_pct < min_trend_strength_pct:
+        return None
+    if context_gap_pct < min_context_gap_pct:
+        return None
+
+    volume_ma = row.get("vol_ma")
+    if pd.isna(volume_ma) or float(volume_ma or 0.0) <= 0:
+        volume_ratio = 0.0
+    else:
+        volume_ratio = float(row.get("volume", 0.0) or 0.0) / float(volume_ma)
+
+    rsi_value = float(row.get("rsi", 0.0) or 0.0)
+    if rsi_value < min_rsi or rsi_value > max_rsi:
+        return None
+
+    adx_value = float(row.get("adx", 0.0) or 0.0)
+    prev_adx = float(prev.get("adx", adx_value) or adx_value)
+    macd_hist = float(row.get("macd_hist", 0.0) or 0.0)
+    prev_macd_hist = float(prev.get("macd_hist", macd_hist) or macd_hist)
+    macd_improving = bool(macd_hist > prev_macd_hist)
+    candle_state = _resolve_candle_state(row, prev)
+
+    score = 0
+    reasons = []
+    if current_close > fast:
+        score += 1
+        reasons.append("acima_ema_rapida")
+    if current_close > slow and current_close > trend:
+        score += 1
+        reasons.append("reclaim_medias")
+    if close_breakout:
+        score += 2
+        reasons.append(f"rompe_topo={close_break_pct:.2f}%")
+    elif allow_early_breakout and early_breakout:
+        score += 1
+        reasons.append(f"varre_topo={high_break_pct:.2f}%")
+    if volume_ratio >= min_volume_ratio:
+        score += 2
+        reasons.append(f"volume={volume_ratio:.2f}x")
+    elif allow_followup_volume and volume_ratio >= followup_min_volume_ratio and close_breakout:
+        score += 1
+        reasons.append(f"volume_follow={volume_ratio:.2f}x")
+    if min_rsi <= rsi_value <= max_rsi:
+        score += 1
+        reasons.append(f"rsi={rsi_value:.2f}")
+    if macd_hist > 0 and (macd_improving or not require_macd_improving):
+        score += 1
+        reasons.append("macd_expande")
+    if adx_value >= min_adx or adx_value > prev_adx:
+        score += 1
+        reasons.append(f"adx={adx_value:.2f}")
+    if bool(candle_state["bullish_close"]) and float(candle_state["close_position"]) >= 0.55:
+        score += 1
+        reasons.append("fechamento_forte")
+
+    if score < min_score:
+        return None
+
+    return {
+        "score": int(score),
+        "reasons": reasons,
+        "recent_high": round(recent_high, 6),
+        "close_break_pct": round(close_break_pct, 4),
+        "high_break_pct": round(high_break_pct, 4),
+        "extension_fast_pct": round(extension_fast_pct, 4),
+        "trend_strength_pct": round(trend_strength_pct, 4),
+        "context_gap_pct": round(context_gap_pct, 4),
+        "volume_ratio": round(volume_ratio, 4),
+        "rsi": round(rsi_value, 4),
+        "adx": round(adx_value, 4),
+        "macd_hist": round(macd_hist, 8),
+        "macd_hist_delta": round(macd_hist - prev_macd_hist, 8),
+        "early_breakout": bool(allow_early_breakout and early_breakout and not close_breakout),
+    }
+
+
 def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> Dict[str, object]:
     row = df.iloc[index]
     prev = df.iloc[index - 1]
@@ -395,6 +531,17 @@ def detect_setup(df: pd.DataFrame, params: StrategyParams, index: int = -1) -> D
             "regime": {
                 **regime,
                 "reversal_rejection": reversal_rejection,
+            },
+        }
+
+    momentum_breakout = _detect_momentum_breakout_long(df, params, index=index)
+    if momentum_breakout:
+        return {
+            "setup": "momentum_breakout_long",
+            "direction": "long",
+            "regime": {
+                **regime,
+                "momentum_breakout": momentum_breakout,
             },
         }
 
@@ -552,6 +699,7 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     regime_label = str(regime_payload.get("regime_detail") or regime_name).strip().lower()
     is_reversal_rebound_long = bool(setup.get("setup") == "reversal_rebound_long")
     is_reversal_rejection_short = bool(setup.get("setup") == "reversal_rejection_short")
+    is_momentum_breakout_long = bool(setup.get("setup") == "momentum_breakout_long")
 
     if bool(getattr(config, "BLOCK_UNKNOWN_REGIME", True)) and regime_name in {"", "unknown", "none", "null"}:
         return {
@@ -565,7 +713,11 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
     if row["atr_pct"] < config.GLOBAL_MIN_ATR_PCT:
         return {"signal": "hold", "reason": f"volatilidade insuficiente ({row['atr_pct']:.2f}%)", "setup": setup}
 
-    if trend_strength_pct < config.MIN_TREND_STRENGTH_PCT and not is_reversal_rebound_long:
+    if (
+        trend_strength_pct < config.MIN_TREND_STRENGTH_PCT
+        and not is_reversal_rebound_long
+        and not is_momentum_breakout_long
+    ):
         return {"signal": "hold", "reason": f"tendência abaixo do piso ({trend_strength_pct:.2f}%)", "setup": setup}
 
     trend_context_pct = abs(row["ema_slow"] - row["ema_trend"]) / row["close"] * 100
@@ -613,9 +765,30 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
             regime_name != "trend_bull"
             and not allow_weak_bull_atr
             and not is_reversal_rebound_long
+            and not is_momentum_breakout_long
             and not bool(getattr(config, "BYPASS_WEAK_REGIME_GATE", False))
         ):
             return {"signal": "hold", "reason": f"regime fraco ({regime_label})", "setup": setup}
+
+        if is_momentum_breakout_long:
+            breakout_payload = dict(regime_payload.get("momentum_breakout") or {})
+            score = int(breakout_payload.get("score", 0) or 0)
+            min_score = int(getattr(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6) or 6)
+            if score >= min_score:
+                reasons = list(breakout_payload.get("reasons") or [])
+                return {
+                    "signal": "buy",
+                    "reason": f"momentum_breakout_long_score={score}|" + ",".join(map(str, reasons)),
+                    "setup": setup,
+                    "entry_price": float(row["close"]),
+                    "atr": float(row["atr"]),
+                }
+
+            return {
+                "signal": "hold",
+                "reason": f"momentum_breakout_long_score_baixo={score}",
+                "setup": setup,
+            }
 
         if is_reversal_rebound_long:
             reversal_payload = dict(regime_payload.get("reversal_rebound") or {})

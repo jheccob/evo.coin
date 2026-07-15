@@ -50,3 +50,7 @@ ia/__pycache__/
 
 # Streamlit
 .streamlit/
+
+# Local workspace artifacts
+.codex-remote-attachments/
+exports/

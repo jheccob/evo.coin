@@ -42,7 +42,6 @@ from runtime_process import (
     tail_text_file,
     write_runtime_process_state,
 )
-from trading_bot import TradingBot
 from config import AppConfig, ExchangeConfig, ProductionConfig
 try:
     from live_go_live_check import build_go_live_report
@@ -64,6 +63,7 @@ MAX_SIGNAL_DATA_AGE_SECONDS = int(os.getenv("MAX_SIGNAL_DATA_AGE_SECONDS", "180"
 _TELEGRAM_SERVICE_CLASS = None
 _TELEGRAM_SERVICE_AVAILABLE = None
 _BACKTEST_ENGINE_CLASS = None
+_TRADING_BOT_CLASS = None
 DASHBOARD_SESSION_QUERY_KEY = "workspace_session"
 ADMIN_SESSION_QUERY_KEY = "admin_session"
 ADMIN_SESSION_USER_ID = -1
@@ -1439,9 +1439,18 @@ def get_or_init_session_telegram_bot():
     return st.session_state.telegram_bot
 
 
+def get_trading_bot_class():
+    global _TRADING_BOT_CLASS
+    if _TRADING_BOT_CLASS is None:
+        from trading_bot import TradingBot as trading_bot_class
+
+        _TRADING_BOT_CLASS = trading_bot_class
+    return _TRADING_BOT_CLASS
+
+
 def get_or_init_trading_bot():
     if 'trading_bot' not in st.session_state or st.session_state.trading_bot is None:
-        st.session_state.trading_bot = TradingBot()
+        st.session_state.trading_bot = get_trading_bot_class()()
     return st.session_state.trading_bot
 
 

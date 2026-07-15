@@ -1,10 +1,10 @@
 {
-  "generated_at_utc": "2026-06-16T10:21:03.692220+00:00",
+  "generated_at_utc": "2026-07-15T09:23:40.854264+00:00",
   "timeframe": "15m",
   "use_local_csv": true,
   "account_model": {
-    "initial_balance_usdt": 50.0,
-    "risk_per_trade_pct": 0.25
+    "initial_balance_usdt": 10000.0,
+    "risk_per_trade_pct": 2.0
   },
   "symbols": {
     "BTC/USDT": {
@@ -14,107 +14,51 @@
       "reason": "Passou no anual e no out-of-sample com PF e DD dentro da governanca.",
       "horizons": {
         "30": {
-          "trades": 19,
-          "wins": 8,
-          "losses": 11,
-          "win_rate_pct": 42.11,
-          "profit_factor": 1.41,
-          "max_drawdown_pct": 7.84,
-          "net_pct": 6.3958,
-          "avg_trade_pct": 0.3366,
-          "account_return_pct": 1.2924
+          "trades": 20,
+          "wins": 14,
+          "losses": 6,
+          "win_rate_pct": 70.0,
+          "profit_factor": 1.99,
+          "max_drawdown_pct": 3.13,
+          "net_pct": 10.2016,
+          "avg_trade_pct": 0.5101,
+          "account_return_pct": 17.0497
         },
         "90": {
-          "trades": 62,
-          "wins": 27,
-          "losses": 35,
-          "win_rate_pct": 43.55,
-          "profit_factor": 1.45,
-          "max_drawdown_pct": 9.47,
-          "net_pct": 23.3558,
-          "avg_trade_pct": 0.3767,
-          "account_return_pct": 5.0345
+          "trades": 83,
+          "wins": 55,
+          "losses": 28,
+          "win_rate_pct": 66.27,
+          "profit_factor": 1.59,
+          "max_drawdown_pct": 14.58,
+          "net_pct": 31.6122,
+          "avg_trade_pct": 0.3809,
+          "account_return_pct": 60.4685
         },
         "180": {
-          "trades": 118,
-          "wins": 49,
-          "losses": 69,
-          "win_rate_pct": 41.53,
-          "profit_factor": 1.32,
-          "max_drawdown_pct": 12.22,
-          "net_pct": 32.9758,
-          "avg_trade_pct": 0.2795,
-          "account_return_pct": 7.0238
-        },
-        "365": {
-          "trades": 199,
-          "wins": 77,
-          "losses": 122,
-          "win_rate_pct": 38.69,
-          "profit_factor": 1.16,
-          "max_drawdown_pct": 19.74,
-          "net_pct": 29.7958,
-          "avg_trade_pct": 0.1497,
-          "account_return_pct": 5.4436
-        }
-      },
-      "validated_at_utc": "2026-05-23T01:36:56.486192+00:00"
-    },
-    "XLM/USDT": {
-      "symbol": "XLM/USDT",
-      "status": "approved",
-      "approval_label": "approved",
-      "reason": "Aprovado no perfil XLM 15m dual-resume, com long e short lucrativos e baseline combinada positiva em 1y, 2y e 4y.",
-      "timeframe": "15m",
-      "execution_profile": "managed",
-      "account_model": {
-        "initial_balance_usdt": 15.0,
-        "risk_per_trade_pct": 3.0,
-        "leverage": 5
-      },
-      "governance_profile": {
-        "timeframe_scaled_trades": false,
-        "trade_scale": 1.0,
-        "max_drawdown_pct": 25.0,
-        "min_profit_factor": 1.1,
-        "min_expectancy_pct": 0.01
-      },
-      "horizons": {
-        "365": {
-          "trades": 74,
-          "wins": 33,
-          "losses": 41,
-          "win_rate_pct": 44.59,
-          "profit_factor": 1.2,
-          "max_drawdown_pct": 18.89,
-          "net_pct": 12.9518,
-          "avg_trade_pct": 0.175,
-          "account_return_pct": 11.9197
-        },
-        "730": {
-          "trades": 169,
-          "wins": 84,
-          "losses": 85,
-          "win_rate_pct": 49.7,
+          "trades": 165,
+          "wins": 101,
+          "losses": 64,
+          "win_rate_pct": 61.21,
           "profit_factor": 1.25,
-          "max_drawdown_pct": 18.89,
-          "net_pct": 32.3182,
-          "avg_trade_pct": 0.1912,
-          "account_return_pct": 61.262
+          "max_drawdown_pct": 15.61,
+          "net_pct": 31.4307,
+          "avg_trade_pct": 0.1905,
+          "account_return_pct": 56.9228
         },
-        "1460": {
-          "trades": 265,
-          "wins": 132,
-          "losses": 133,
-          "win_rate_pct": 49.81,
-          "profit_factor": 1.15,
-          "max_drawdown_pct": 18.89,
-          "net_pct": 29.4397,
-          "avg_trade_pct": 0.1111,
-          "account_return_pct": 34.998
+        "365": {
+          "trades": 278,
+          "wins": 171,
+          "losses": 107,
+          "win_rate_pct": 61.51,
+          "profit_factor": 1.14,
+          "max_drawdown_pct": 20.29,
+          "net_pct": 29.563,
+          "avg_trade_pct": 0.1063,
+          "account_return_pct": 45.6981
         }
       },
-      "validated_at_utc": "2026-06-16T10:21:03.692269+00:00"
+      "validated_at_utc": "2026-07-15T09:23:40.854264+00:00"
     }
   }
 }

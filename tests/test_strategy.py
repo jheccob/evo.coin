@@ -187,6 +187,59 @@ class StrategyTests(unittest.TestCase):
         return df
 
     @staticmethod
+    def _build_momentum_breakout_df(*, late_extension: bool = False) -> pd.DataFrame:
+        rows = []
+        for i in range(240):
+            base = 100 + (((i % 10) - 5) * 0.08)
+            rows.append(
+                {
+                    "timestamp": i,
+                    "open": base - 0.02,
+                    "high": base + 0.18,
+                    "low": base - 0.18,
+                    "close": base,
+                    "volume": 1000 + ((i % 5) * 20),
+                }
+            )
+
+        for j, close_price in enumerate([99.9, 100.18, 99.96, 100.24, 100.12]):
+            rows.append(
+                {
+                    "timestamp": 240 + j,
+                    "open": close_price - 0.06,
+                    "high": close_price + 0.22,
+                    "low": close_price - 0.18,
+                    "close": close_price,
+                    "volume": 1300 + (j * 100),
+                }
+            )
+
+        if late_extension:
+            rows.append(
+                {
+                    "timestamp": 245,
+                    "open": 100.18,
+                    "high": 103.20,
+                    "low": 100.10,
+                    "close": 103.00,
+                    "volume": 5200,
+                }
+            )
+        else:
+            rows.append(
+                {
+                    "timestamp": 245,
+                    "open": 100.18,
+                    "high": 101.05,
+                    "low": 100.10,
+                    "close": 100.55,
+                    "volume": 5200,
+                }
+            )
+
+        return pd.DataFrame(rows)
+
+    @staticmethod
     def _build_reversal_rebound_df(final_volume: float = 2500.0, final_adx: float = 38.0) -> pd.DataFrame:
         rows = []
         for i in range(260):
@@ -324,6 +377,124 @@ class StrategyTests(unittest.TestCase):
             setup = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
 
         self.assertNotEqual(setup.get("setup"), "reversal_rebound_long")
+
+    def test_generate_entry_signal_detects_momentum_breakout_long_from_range(self):
+        df = calculate_indicators(self._build_momentum_breakout_df(), StrategyParams())
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(result["signal"], "buy")
+        self.assertEqual(result["setup"]["setup"], "momentum_breakout_long")
+        self.assertEqual(result["setup"]["regime"]["regime"], "weak_bull")
+        self.assertIn("momentum_breakout_long_score", result["reason"])
+        self.assertIn("volume=", result["reason"])
+
+    def test_momentum_breakout_long_blocks_late_extension_from_fast_ema(self):
+        df = calculate_indicators(self._build_momentum_breakout_df(late_extension=True), StrategyParams())
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(result.get("setup", {}).get("setup"), "momentum_breakout_long")
+        self.assertEqual(result["signal"], "hold")
+
+    def test_momentum_breakout_long_blocks_early_breakout_when_disabled(self):
+        df = self._build_momentum_breakout_df().copy()
+        recent_high = float(df.iloc[-33:-1]["high"].max())
+        df.loc[df.index[-1], "close"] = recent_high * 1.001
+        df.loc[df.index[-1], "high"] = recent_high * 1.0035
+        df = calculate_indicators(df, StrategyParams())
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_BREAK_PCT", 0.2),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", False),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            blocked = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_BREAK_PCT", 0.2),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            allowed = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertEqual(blocked["signal"], "hold")
+        self.assertEqual(allowed["signal"], "buy")
+
+    def test_momentum_breakout_long_blocks_followup_volume_when_disabled(self):
+        df = self._build_momentum_breakout_df().copy()
+        recent_high = float(df.iloc[-33:-1]["high"].max())
+        df.loc[df.index[-1], "open"] = recent_high * 1.0005
+        df.loc[df.index[-1], "close"] = recent_high * 1.003
+        df.loc[df.index[-1], "high"] = recent_high * 1.004
+        df.loc[df.index[-1], "low"] = recent_high * 0.999
+        df.loc[df.index[-1], "volume"] = 2100.0
+        df = calculate_indicators(df, StrategyParams())
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 9),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_BREAK_PCT", 0.2),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_VOLUME_RATIO", 3.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_FOLLOWUP_MIN_VOLUME_RATIO", 1.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", False),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", False),
+        ):
+            blocked = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 9),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_BREAK_PCT", 0.2),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_VOLUME_RATIO", 3.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_FOLLOWUP_MIN_VOLUME_RATIO", 1.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", False),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            allowed = strategy_engine.detect_setup(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(blocked.get("setup"), "momentum_breakout_long")
+        self.assertEqual(allowed.get("setup"), "momentum_breakout_long")
 
     def test_generate_entry_signal_catches_strong_short_reversal_rejection(self):
         df = self._build_short_reversal_rejection_df(final_volume=2500.0)
@@ -1587,14 +1758,12 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result["signal"], "hold")
         self.assertIn("hora bloqueada para long", result["reason"])
 
-    def test_runtime_defaults_keep_both_sides_with_short_hour_filter_enabled(self):
+    def test_runtime_defaults_keep_both_sides_without_hour_blocks(self):
         self.assertTrue(config.ALLOW_LONG)
         self.assertTrue(config.ALLOW_SHORT)
-        self.assertTrue(config.USE_ENTRY_HOUR_BLOCKS)
-        self.assertEqual(
-            config.BLOCKED_SHORT_ENTRY_HOURS_UTC,
-            [0, 3, 6, 9, 12, 13, 15, 16, 17],
-        )
+        self.assertFalse(config.USE_ENTRY_HOUR_BLOCKS)
+        self.assertEqual(config.BLOCKED_SHORT_ENTRY_HOURS_UTC, [])
+        self.assertEqual(config.SHORT_REVERSAL_BLOCKED_ENTRY_HOURS_UTC, [])
 
     def test_analyze_prepared_candle_sell_signal(self):
         df = self._build_sell_signal_df()
@@ -1913,6 +2082,41 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(position["stop_loss_pct"], 0.9, places=6)
         self.assertEqual(position["management_profile"], "trend_resume_long")
         self.assertEqual(position["entry_setup"], "trend_resume_long")
+
+    def test_runtime_position_applies_momentum_breakout_long_profile(self):
+        signal_result = {
+            "signal": "buy",
+            "reason": "momentum_breakout_long_score=8",
+            "atr": 0.2,
+            "setup": {
+                "setup": "momentum_breakout_long",
+                "direction": "long",
+                "regime": {"regime": "weak_bull"},
+            },
+        }
+
+        with (
+            mock.patch.object(config, "ENFORCE_MIN_RISK_REWARD_RATIO", False),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_LONG_STOP_LOSS_PCT", 1.35),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_LONG_PARTIAL_TARGET_PCT", 1.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_LONG_TRAILING_TRIGGER_PCT", 1.2),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_LONG_TRAILING_STOP_PCT", 0.55),
+        ):
+            position = bot_runner._build_runtime_position(
+                signal="buy",
+                entry_price=100.0,
+                timestamp="2026-04-12T00:00:00+00:00",
+                atr=0.2,
+                execution_profile="managed",
+                signal_result=signal_result,
+            )
+
+        self.assertAlmostEqual(position["initial_stop"], 98.65, places=6)
+        self.assertAlmostEqual(position["partial_target"], 101.0, places=6)
+        self.assertAlmostEqual(position["trailing_trigger_price"], 101.2, places=6)
+        self.assertAlmostEqual(position["trailing_stop_pct"], 0.55, places=6)
+        self.assertEqual(position["management_profile"], "momentum_breakout_long")
+        self.assertEqual(position["entry_setup"], "momentum_breakout_long")
 
     def test_runtime_position_applies_trend_resume_short_profile(self):
         signal_result = {

@@ -12,6 +12,6 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 
 COPY . .
 
-EXPOSE 8501
+EXPOSE 8080
 
 CMD ["python", "start_railway.py"]
