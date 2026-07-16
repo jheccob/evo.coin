@@ -16,6 +16,8 @@ class RiskManagementService:
     @staticmethod
     def _normalize_sizing_mode(sizing_mode: Optional[str]) -> str:
         token = str(sizing_mode or "").strip().lower()
+        if token in {"fixed_allocation", "bankroll_pct", "bankroll_percent", "bankroll_percentage"}:
+            return "fixed_allocation"
         if token in {"hybrid", "risk_capped_allocation", "capped_allocation"}:
             return "hybrid"
         if token in {"allocation", "margin_allocation", "capital_allocation"}:
@@ -142,7 +144,7 @@ class RiskManagementService:
                 "requested_risk_pct": round(resolved_risk_pct, 4),
             }
 
-        if resolved_sizing_mode == "allocation":
+        if resolved_sizing_mode in {"allocation", "fixed_allocation"}:
             margin_allocated_amount = resolved_balance * (requested_margin_allocation_pct / 100.0)
             position_notional = margin_allocated_amount * resolved_leverage
             risk_amount = position_notional * normalized_stop_loss_pct
@@ -427,10 +429,31 @@ class RiskManagementService:
             ),
             1.0,
         )
+        if resolved_execution_scope in {"live", "paper"}:
+            default_position_sizing_mode = getattr(
+                ProductionConfig,
+                "RUNTIME_POSITION_SIZING_MODE",
+                getattr(config, "RUNTIME_POSITION_SIZING_MODE", "fixed_allocation"),
+            )
+            default_margin_allocation_pct = getattr(
+                ProductionConfig,
+                "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT",
+                getattr(config, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+            )
+        else:
+            default_position_sizing_mode = getattr(
+                ProductionConfig,
+                "POSITION_SIZING_MODE",
+                getattr(config, "POSITION_SIZING_MODE", "risk"),
+            )
+            default_margin_allocation_pct = getattr(
+                ProductionConfig,
+                "POSITION_MARGIN_ALLOCATION_PCT",
+                getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
+            )
+
         resolved_position_sizing_mode = str(
-            position_sizing_mode
-            or getattr(ProductionConfig, "POSITION_SIZING_MODE", getattr(config, "POSITION_SIZING_MODE", "risk"))
-            or "risk"
+            position_sizing_mode if position_sizing_mode is not None else default_position_sizing_mode or "risk"
         ).strip().lower()
         if (
             resolved_execution_scope == "live"
@@ -442,11 +465,7 @@ class RiskManagementService:
             float(
                 margin_allocation_pct
                 if margin_allocation_pct is not None
-                else getattr(
-                    ProductionConfig,
-                    "POSITION_MARGIN_ALLOCATION_PCT",
-                    getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0),
-                )
+                else default_margin_allocation_pct
                 or 0.0
             ),
             0.0,

@@ -101,6 +101,12 @@ POLL_SECONDS = _get_int("POLL_SECONDS", 30)
 LEVERAGE = _get_int("LEVERAGE", 10)
 POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", "hybrid").strip().lower() or "hybrid"
 POSITION_MARGIN_ALLOCATION_PCT = _get_float("POSITION_MARGIN_ALLOCATION_PCT", 100.0)
+# Runtime operacional: permite usar uma fatia fixa da banca por ordem
+# (ex.: 100%, 50%, 25%) sem alterar o sizing da camada de pesquisa/backtest.
+RUNTIME_POSITION_SIZING_MODE = (
+    os.getenv("RUNTIME_POSITION_SIZING_MODE", "fixed_allocation").strip().lower() or "fixed_allocation"
+)
+RUNTIME_POSITION_MARGIN_ALLOCATION_PCT = _get_float("RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0)
 ENFORCE_LIVE_RISK_CAPPED_ALLOCATION = _get_bool("ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True)
 MIN_LIVE_ACCOUNT_BALANCE_USDT = _get_float("MIN_LIVE_ACCOUNT_BALANCE_USDT", 20.0)
 SINGLE_USER_RUNTIME_USER_ID = _get_int("SINGLE_USER_RUNTIME_USER_ID", 0)
@@ -426,6 +432,8 @@ def build_runtime_strategy_snapshot(context_timeframe: Optional[str] = None) -> 
           "timeframe": TIMEFRAME,
           "position_sizing_mode": str(POSITION_SIZING_MODE),
           "position_margin_allocation_pct": float(POSITION_MARGIN_ALLOCATION_PCT),
+          "runtime_position_sizing_mode": str(RUNTIME_POSITION_SIZING_MODE),
+          "runtime_position_margin_allocation_pct": float(RUNTIME_POSITION_MARGIN_ALLOCATION_PCT),
           "leverage": int(LEVERAGE),
           "context_timeframe": resolved_context,
         "rsi_period": int(RSI_PERIOD),
@@ -1555,6 +1563,14 @@ class ProductionConfig:
         "POSITION_MARGIN_ALLOCATION_PCT",
         POSITION_MARGIN_ALLOCATION_PCT,
     )
+    RUNTIME_POSITION_SIZING_MODE = (
+        os.getenv("RUNTIME_POSITION_SIZING_MODE", RUNTIME_POSITION_SIZING_MODE).strip().lower()
+        or "fixed_allocation"
+    )
+    RUNTIME_POSITION_MARGIN_ALLOCATION_PCT = _get_float(
+        "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT",
+        RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
+    )
     ENFORCE_LIVE_RISK_CAPPED_ALLOCATION = _get_bool(
         "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION",
         ENFORCE_LIVE_RISK_CAPPED_ALLOCATION,
@@ -1676,6 +1692,8 @@ __all__ = [
     "LEVERAGE",
     "POSITION_SIZING_MODE",
     "POSITION_MARGIN_ALLOCATION_PCT",
+    "RUNTIME_POSITION_SIZING_MODE",
+    "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT",
     "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION",
     "MIN_LIVE_ACCOUNT_BALANCE_USDT",
     "ENFORCE_MIN_RISK_REWARD_RATIO",

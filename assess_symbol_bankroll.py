@@ -41,8 +41,18 @@ def assess_symbol(symbol: str, bankroll: float, entry_price: float, stop_loss_pc
         ticker = public_exchange.fetch_ticker(resolved_symbol) or {}
         resolved_entry_price = float(ticker.get("last") or ticker.get("close") or 0.0)
     leverage = float(getattr(config, "LEVERAGE", 1) or 1)
-    sizing_mode = str(getattr(config, "POSITION_SIZING_MODE", "risk") or "risk").strip().lower()
-    margin_allocation_pct = float(getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0) or 0.0)
+    sizing_mode = str(
+        getattr(config.ProductionConfig, "RUNTIME_POSITION_SIZING_MODE", getattr(config, "RUNTIME_POSITION_SIZING_MODE", "fixed_allocation"))
+        or "fixed_allocation"
+    ).strip().lower()
+    margin_allocation_pct = float(
+        getattr(
+            config.ProductionConfig,
+            "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT",
+            getattr(config, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+        )
+        or 0.0
+    )
     sizing = risk_service.calculate_position_size(
         account_balance=bankroll,
         entry_price=resolved_entry_price,

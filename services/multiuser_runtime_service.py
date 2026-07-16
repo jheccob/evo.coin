@@ -146,8 +146,8 @@ class MultiUserRuntimeService:
             execution_scope="live",
             live_context=context,
             leverage=resolved_leverage,
-            position_sizing_mode=ProductionConfig.POSITION_SIZING_MODE,
-            margin_allocation_pct=ProductionConfig.POSITION_MARGIN_ALLOCATION_PCT,
+            position_sizing_mode=ProductionConfig.RUNTIME_POSITION_SIZING_MODE,
+            margin_allocation_pct=ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
         )
 
         if not risk_plan.get("allowed", False):

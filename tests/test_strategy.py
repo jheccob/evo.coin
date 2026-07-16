@@ -2745,6 +2745,26 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
+    def test_calculate_position_size_supports_fixed_bankroll_allocation(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=100.0,
+            entry_price=60000.0,
+            stop_loss_pct=1.5,
+            risk_pct=2.0,
+            leverage=10,
+            sizing_mode="fixed_allocation",
+            margin_allocation_pct=50.0,
+        )
+
+        self.assertEqual(sizing["sizing_mode"], "fixed_allocation")
+        self.assertAlmostEqual(sizing["position_notional"], 500.0, places=2)
+        self.assertAlmostEqual(sizing["margin_allocated_amount"], 50.0, places=2)
+        self.assertAlmostEqual(sizing["margin_allocation_pct"], 50.0, places=2)
+        self.assertAlmostEqual(sizing["risk_amount"], 7.5, places=2)
+        self.assertAlmostEqual(sizing["effective_risk_pct"], 7.5, places=4)
+
     def test_calculate_position_size_supports_sub_one_percent_stop_values(self):
         service = RiskManagementService()
 
@@ -2785,6 +2805,8 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "LEVERAGE", 10),
             mock.patch.object(config.ProductionConfig, "POSITION_SIZING_MODE", "allocation"),
             mock.patch.object(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_SIZING_MODE", "allocation"),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0),
             mock.patch.object(config.ProductionConfig, "ENFORCE_LIVE_RISK_CAPPED_ALLOCATION", True, create=True),
         ):
             plan = service.build_trade_plan(
@@ -2830,6 +2852,8 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "LEVERAGE", 10),
             mock.patch.object(config.ProductionConfig, "POSITION_SIZING_MODE", "hybrid"),
             mock.patch.object(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_SIZING_MODE", "hybrid"),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0),
         ):
             plan = service.build_trade_plan(
                 entry_price=62500.0,
@@ -2851,6 +2875,50 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(plan["position_notional"], 62.5, places=2)
         self.assertAlmostEqual(plan["risk_amount"], 0.5, places=2)
         self.assertAlmostEqual(plan["effective_risk_pct"], 2.0, places=4)
+
+    def test_live_trade_plan_uses_fixed_bankroll_runtime_allocation(self):
+        database = mock.Mock()
+        database.get_user_live_portfolio_risk_summary.return_value = {
+            "open_trades": 0,
+            "total_open_risk_pct": 0.0,
+        }
+        database.get_daily_live_guardrail_summary.return_value = {
+            "closed_trades": 0,
+            "realized_pnl_pct": 0.0,
+            "consecutive_losses": 0,
+        }
+        database.get_live_drawdown_summary.return_value = {
+            "current_drawdown_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+        }
+        service = RiskManagementService(database=database)
+
+        with (
+            mock.patch.object(config, "LEVERAGE", 10),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_SIZING_MODE", "fixed_allocation"),
+            mock.patch.object(config.ProductionConfig, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 50.0),
+        ):
+            plan = service.build_trade_plan(
+                entry_price=62500.0,
+                stop_loss_pct=1.5,
+                account_balance=100.0,
+                risk_per_trade_pct=2.0,
+                max_open_trades=1,
+                symbol="BTC/USDT",
+                timeframe="15m",
+                execution_scope="live",
+                live_context={
+                    "user_id": 0,
+                    "account_id": "env-primary",
+                    "exchange_name": "binanceusdm",
+                },
+            )
+
+        self.assertTrue(plan["allowed"])
+        self.assertEqual(plan["sizing_mode"], "fixed_allocation")
+        self.assertAlmostEqual(plan["position_notional"], 500.0, places=2)
+        self.assertAlmostEqual(plan["margin_allocated_amount"], 50.0, places=2)
+        self.assertAlmostEqual(plan["effective_risk_pct"], 7.5, places=4)
 
     def test_live_trade_plan_blocks_balance_below_minimum_bankroll(self):
         database = mock.Mock()

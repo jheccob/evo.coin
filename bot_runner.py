@@ -1390,11 +1390,26 @@ def _build_runtime_paper_position_metrics(position: dict, runtime_snapshot: dict
     entry_price = float(position.get("entry_price", 0.0) or 0.0)
     stop_loss_pct = _resolve_runtime_position_stop_pct(position)
     risk_pct = float(getattr(config, "RISK_PER_TRADE_PCT", 0.0) or 0.0)
+    runtime_sizing_mode = str(
+        getattr(config.ProductionConfig, "RUNTIME_POSITION_SIZING_MODE", getattr(config, "RUNTIME_POSITION_SIZING_MODE", "fixed_allocation"))
+        or "fixed_allocation"
+    ).strip().lower()
+    runtime_margin_allocation_pct = float(
+        getattr(
+            config.ProductionConfig,
+            "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT",
+            getattr(config, "RUNTIME_POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+        )
+        or 0.0
+    )
     sizing = risk_service.calculate_position_size(
         account_balance=account_balance,
         entry_price=entry_price,
         stop_loss_pct=stop_loss_pct,
         risk_pct=risk_pct,
+        leverage=float(getattr(config, "LEVERAGE", 1) or 1),
+        sizing_mode=runtime_sizing_mode,
+        margin_allocation_pct=runtime_margin_allocation_pct,
     )
     quantity = float(sizing.get("quantity", 0.0) or 0.0)
     position_notional = float(sizing.get("position_notional", 0.0) or 0.0)
