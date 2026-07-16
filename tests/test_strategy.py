@@ -354,6 +354,8 @@ class StrategyTests(unittest.TestCase):
 
         with (
             mock.patch.object(config, "ENABLE_LONG_REVERSAL_REBOUND", True),
+            mock.patch.object(config, "LONG_REVERSAL_MAX_RSI", 68.0),
+            mock.patch.object(config, "LONG_REVERSAL_MIN_SCORE", 5),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
         ):
             result = generate_entry_signal(df, StrategyParams(), index=-1)
@@ -495,6 +497,48 @@ class StrategyTests(unittest.TestCase):
 
         self.assertNotEqual(blocked.get("setup"), "momentum_breakout_long")
         self.assertEqual(allowed.get("setup"), "momentum_breakout_long")
+
+    def test_momentum_breakout_long_blocks_when_adx_exceeds_cap(self):
+        df = calculate_indicators(self._build_momentum_breakout_df(), StrategyParams())
+        df.loc[df.index[-1], "adx"] = 60.0
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MAX_ADX", 45.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(result.get("setup", {}).get("setup"), "momentum_breakout_long")
+        self.assertEqual(result["signal"], "hold")
+
+    def test_momentum_breakout_long_blocks_when_trend_strength_exceeds_cap(self):
+        df = calculate_indicators(self._build_momentum_breakout_df(), StrategyParams())
+        df.loc[df.index[-1], "ema_fast"] = float(df.loc[df.index[-1], "close"]) * 1.01
+        df.loc[df.index[-1], "ema_slow"] = float(df.loc[df.index[-1], "close"]) * 0.99
+
+        with (
+            mock.patch.object(config, "ENABLE_MOMENTUM_BREAKOUT_LONG", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_RSI", 60.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MAX_ADX", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MAX_TREND_STRENGTH_PCT", 0.6),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_EARLY_BREAKOUT", True),
+            mock.patch.object(config, "MOMENTUM_BREAKOUT_ALLOW_FOLLOWUP_VOLUME", True),
+        ):
+            result = generate_entry_signal(df, StrategyParams(), index=-1)
+
+        self.assertNotEqual(result.get("setup", {}).get("setup"), "momentum_breakout_long")
+        self.assertEqual(result["signal"], "hold")
 
     def test_generate_entry_signal_catches_strong_short_reversal_rejection(self):
         df = self._build_short_reversal_rejection_df(final_volume=2500.0)
@@ -725,6 +769,9 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_LONG_SCORE", 8),
             mock.patch.object(config, "MAX_PULLBACK_LONG_SCORE", 8),
             mock.patch.object(config, "PULLBACK_LONG_COUNT_BREAKOUT_SCORE", True),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MAX_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_RSI", 0.0),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", False),
         ):
             result = strategy_engine.generate_entry_signal(df, params, index=len(df) - 1)
@@ -770,6 +817,9 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_LONG_SCORE", 8),
             mock.patch.object(config, "MAX_PULLBACK_LONG_SCORE", 99),
             mock.patch.object(config, "PULLBACK_LONG_COUNT_BREAKOUT_SCORE", False),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MAX_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_RSI", 0.0),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", False),
         ):
             result = strategy_engine.generate_entry_signal(df, params, index=len(df) - 1)
@@ -822,6 +872,9 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_LONG_SCORE", 7),
             mock.patch.object(config, "MAX_PULLBACK_LONG_SCORE", 99),
             mock.patch.object(config, "PULLBACK_LONG_COUNT_BREAKOUT_SCORE", True),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MAX_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_RSI", 0.0),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", False),
         ):
             result = strategy_engine.generate_entry_signal(df, params, index=len(df) - 1)
@@ -875,6 +928,9 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_LONG_SCORE", 5),
             mock.patch.object(config, "MAX_PULLBACK_LONG_SCORE", 99),
             mock.patch.object(config, "PULLBACK_LONG_COUNT_BREAKOUT_SCORE", False),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MAX_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_RSI", 0.0),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", False),
         ):
@@ -886,6 +942,9 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_LONG_SCORE", 5),
             mock.patch.object(config, "MAX_PULLBACK_LONG_SCORE", 99),
             mock.patch.object(config, "PULLBACK_LONG_COUNT_BREAKOUT_SCORE", False),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MAX_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "PULLBACK_LONG_MIN_RSI", 0.0),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", True),
             mock.patch.object(config, "LONG_PULLBACK_HOT_CONTEXT_GAP_PCT", 0.85),
@@ -941,6 +1000,10 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
             mock.patch.object(strategy_engine, "detect_setup", return_value=patched_setup),
             mock.patch.object(config, "MIN_LONG_SCORE", 5),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_REQUIRE_CLOSE_ABOVE_PREV_CLOSE", False),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", False),
         ):
@@ -950,6 +1013,10 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
             mock.patch.object(strategy_engine, "detect_setup", return_value=patched_setup),
             mock.patch.object(config, "MIN_LONG_SCORE", 5),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_CONTEXT_GAP_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_ADX", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_MIN_TREND_STRENGTH_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_LONG_REQUIRE_CLOSE_ABOVE_PREV_CLOSE", False),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
             mock.patch.object(config, "EXPERIMENTAL_LONG_SIDE_LOGIC", True),
             mock.patch.object(config, "LONG_RESUME_HOT_CONTEXT_GAP_PCT", 0.88),
@@ -1554,6 +1621,94 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(result["signal"], "hold")
         self.assertTrue(str(result["reason"]).startswith("trend_resume_short_sem_breakdown="))
 
+    def test_generate_entry_signal_trend_resume_short_blocks_when_adx_is_overextended(self):
+        rows = []
+        base_time = pd.Timestamp("2026-04-12T00:00:00+00:00")
+        for i in range(12):
+            close_price = 100.0 - (i * 0.05)
+            rows.append(
+                {
+                    "timestamp": base_time + pd.Timedelta(minutes=15 * i),
+                    "open": close_price + 0.2,
+                    "high": close_price + 0.4,
+                    "low": close_price - 0.05,
+                    "close": close_price,
+                    "volume": 2000.0 + i,
+                    "ema_fast": close_price + 0.2,
+                    "ema_slow": close_price + 0.6,
+                    "ema_trend": close_price + 1.2,
+                    "rsi": 33.0,
+                    "adx": 60.0,
+                    "vol_ma": 1000.0,
+                    "atr": 1.0,
+                    "atr_pct": 0.9,
+                }
+            )
+        df = pd.DataFrame(rows)
+        params = StrategyParams()
+
+        patched_setup = {
+            "setup": "trend_resume_short",
+            "direction": "short",
+            "regime": {"regime": "trend_bear", "tradeable_long": True, "tradeable_short": True},
+        }
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=patched_setup),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_CONTEXT_GAP_PCT", 0.10),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_ADX", 20.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_ADX", 45.0),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = strategy_engine.generate_entry_signal(df, params, index=len(df) - 1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertTrue(str(result["reason"]).startswith("trend_resume_short_adx_estendido="))
+
+    def test_generate_entry_signal_trend_resume_short_blocks_when_trend_is_overextended(self):
+        rows = []
+        base_time = pd.Timestamp("2026-04-12T00:00:00+00:00")
+        for i in range(12):
+            close_price = 100.0 - (i * 0.05)
+            rows.append(
+                {
+                    "timestamp": base_time + pd.Timedelta(minutes=15 * i),
+                    "open": close_price + 0.2,
+                    "high": close_price + 0.4,
+                    "low": close_price - 0.05,
+                    "close": close_price,
+                    "volume": 2000.0 + i,
+                    "ema_fast": close_price - 0.9,
+                    "ema_slow": close_price + 1.2,
+                    "ema_trend": close_price + 2.0,
+                    "rsi": 33.0,
+                    "adx": 42.0,
+                    "vol_ma": 1000.0,
+                    "atr": 1.0,
+                    "atr_pct": 0.9,
+                }
+            )
+        df = pd.DataFrame(rows)
+        params = StrategyParams()
+
+        patched_setup = {
+            "setup": "trend_resume_short",
+            "direction": "short",
+            "regime": {"regime": "trend_bear", "tradeable_long": True, "tradeable_short": True},
+        }
+        with (
+            mock.patch.object(strategy_engine, "get_min_required_rows", return_value=0),
+            mock.patch.object(strategy_engine, "detect_setup", return_value=patched_setup),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_CONTEXT_GAP_PCT", 0.10),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MIN_ADX", 20.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_TREND_STRENGTH_PCT", 0.7),
+            mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
+        ):
+            result = strategy_engine.generate_entry_signal(df, params, index=len(df) - 1)
+
+        self.assertEqual(result["signal"], "hold")
+        self.assertTrue(str(result["reason"]).startswith("trend_resume_short_tendencia_estendida="))
+
     def test_generate_entry_signal_short_handles_prev_rsi_na_without_crashing(self):
         rows = []
         base_time = pd.Timestamp("2026-04-12T00:00:00+00:00")
@@ -1767,7 +1922,7 @@ class StrategyTests(unittest.TestCase):
 
     def test_analyze_prepared_candle_sell_signal(self):
         df = self._build_sell_signal_df()
-        with mock.patch.object(config, "ALLOW_SHORT", True), mock.patch.object(config, "MIN_SHORT_SCORE", 4), mock.patch.object(config, "ENABLE_SHORT_RESUME", True), mock.patch.object(config, "SHORT_MAX_DISTANCE_EMA_PCT", 20.0), mock.patch.object(config, "SHORT_BREAKDOWN_BUFFER_PCT", 0.0), mock.patch.object(config, "BLOCKED_SHORT_ENTRY_HOURS_UTC", []):
+        with mock.patch.object(config, "ALLOW_SHORT", True), mock.patch.object(config, "MIN_SHORT_SCORE", 4), mock.patch.object(config, "ENABLE_SHORT_RESUME", True), mock.patch.object(config, "SHORT_MAX_DISTANCE_EMA_PCT", 20.0), mock.patch.object(config, "SHORT_BREAKDOWN_BUFFER_PCT", 0.0), mock.patch.object(config, "TREND_RESUME_SHORT_MAX_ADX", 0.0), mock.patch.object(config, "TREND_RESUME_SHORT_MAX_TREND_STRENGTH_PCT", 0.0), mock.patch.object(config, "BLOCKED_SHORT_ENTRY_HOURS_UTC", []):
             result = analyze_prepared_candle(df)
         self.assertEqual(result["signal"], "sell")
 
@@ -1801,6 +1956,8 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "ENABLE_SHORT_RESUME", True),
             mock.patch.object(config, "SHORT_MAX_DISTANCE_EMA_PCT", 20.0),
             mock.patch.object(config, "SHORT_BREAKDOWN_BUFFER_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_ADX", 0.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_TREND_STRENGTH_PCT", 0.0),
             mock.patch.object(config, "BLOCKED_SHORT_ENTRY_HOURS_UTC", [prepared.index[-1].hour]),
             mock.patch.object(config, "USE_ENTRY_HOUR_BLOCKS", False),
         ):
@@ -1824,6 +1981,8 @@ class StrategyTests(unittest.TestCase):
             mock.patch.object(config, "MIN_SHORT_SCORE", 99),
             mock.patch.object(config, "SHORT_MAX_DISTANCE_EMA_PCT", 20.0),
             mock.patch.object(config, "SHORT_BREAKDOWN_BUFFER_PCT", 0.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_ADX", 0.0),
+            mock.patch.object(config, "TREND_RESUME_SHORT_MAX_TREND_STRENGTH_PCT", 0.0),
         ):
             runtime_signal = generate_entry_signal(prepared, params, index=-1)
             backtest_signal = strategy_engine.generate_entry_signal(prepared, params, index=len(prepared) - 1)

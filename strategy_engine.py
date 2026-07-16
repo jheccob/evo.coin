@@ -395,6 +395,10 @@ def _detect_momentum_breakout_long(df: pd.DataFrame, params: StrategyParams, ind
     min_rsi = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_RSI", 62.0) or 62.0)
     max_rsi = float(getattr(config, "MOMENTUM_BREAKOUT_MAX_RSI", 88.0) or 88.0)
     min_adx = float(getattr(config, "MOMENTUM_BREAKOUT_MIN_ADX", 18.0) or 18.0)
+    max_adx = float(getattr(config, "MOMENTUM_BREAKOUT_MAX_ADX", 0.0) or 0.0)
+    max_trend_strength_pct = float(
+        getattr(config, "MOMENTUM_BREAKOUT_MAX_TREND_STRENGTH_PCT", 0.0) or 0.0
+    )
     require_macd_improving = bool(getattr(config, "MOMENTUM_BREAKOUT_REQUIRE_MACD_IMPROVING", True))
     min_score = int(getattr(config, "MOMENTUM_BREAKOUT_MIN_SCORE", 6) or 6)
     min_trend_strength_pct = float(
@@ -424,6 +428,8 @@ def _detect_momentum_breakout_long(df: pd.DataFrame, params: StrategyParams, ind
         return None
     if trend_strength_pct < min_trend_strength_pct:
         return None
+    if max_trend_strength_pct > 0 and trend_strength_pct > max_trend_strength_pct:
+        return None
     if context_gap_pct < min_context_gap_pct:
         return None
 
@@ -439,6 +445,8 @@ def _detect_momentum_breakout_long(df: pd.DataFrame, params: StrategyParams, ind
 
     adx_value = float(row.get("adx", 0.0) or 0.0)
     prev_adx = float(prev.get("adx", adx_value) or adx_value)
+    if max_adx > 0 and adx_value > max_adx:
+        return None
     macd_hist = float(row.get("macd_hist", 0.0) or 0.0)
     prev_macd_hist = float(prev.get("macd_hist", macd_hist) or macd_hist)
     macd_improving = bool(macd_hist > prev_macd_hist)
@@ -1183,6 +1191,11 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
                 }
             min_context_gap = float(getattr(config, "TREND_RESUME_SHORT_MIN_CONTEXT_GAP_PCT", 0.0) or 0.0)
             min_adx = float(getattr(config, "TREND_RESUME_SHORT_MIN_ADX", 0.0) or 0.0)
+            max_context_gap = float(getattr(config, "TREND_RESUME_SHORT_MAX_CONTEXT_GAP_PCT", 0.0) or 0.0)
+            max_adx = float(getattr(config, "TREND_RESUME_SHORT_MAX_ADX", 0.0) or 0.0)
+            max_trend_strength = float(
+                getattr(config, "TREND_RESUME_SHORT_MAX_TREND_STRENGTH_PCT", 0.0) or 0.0
+            )
             require_breakdown_confirmation = bool(
                 getattr(config, "TREND_RESUME_SHORT_REQUIRE_BREAKDOWN_CONFIRMATION", False)
             )
@@ -1194,10 +1207,28 @@ def generate_entry_signal(df: pd.DataFrame, params: StrategyParams, index: int =
                     "reason": f"trend_resume_short_contexto_fraco={trend_context_pct:.2f}",
                     "setup": setup,
                 }
+            if max_context_gap > 0 and trend_context_pct > max_context_gap:
+                return {
+                    "signal": "hold",
+                    "reason": f"trend_resume_short_contexto_quente={trend_context_pct:.2f}",
+                    "setup": setup,
+                }
             if float(row["adx"]) < min_adx:
                 return {
                     "signal": "hold",
                     "reason": f"trend_resume_short_adx_fraco={float(row['adx']):.2f}",
+                    "setup": setup,
+                }
+            if max_adx > 0 and float(row["adx"]) > max_adx:
+                return {
+                    "signal": "hold",
+                    "reason": f"trend_resume_short_adx_estendido={float(row['adx']):.2f}",
+                    "setup": setup,
+                }
+            if max_trend_strength > 0 and trend_strength_pct > max_trend_strength:
+                return {
+                    "signal": "hold",
+                    "reason": f"trend_resume_short_tendencia_estendida={trend_strength_pct:.2f}",
                     "setup": setup,
                 }
             if require_breakdown_confirmation and float(row["close"]) >= breakdown_trigger:
