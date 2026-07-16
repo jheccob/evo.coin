@@ -40,11 +40,17 @@ def assess_symbol(symbol: str, bankroll: float, entry_price: float, stop_loss_pc
     if resolved_entry_price <= 0:
         ticker = public_exchange.fetch_ticker(resolved_symbol) or {}
         resolved_entry_price = float(ticker.get("last") or ticker.get("close") or 0.0)
+    leverage = float(getattr(config, "LEVERAGE", 1) or 1)
+    sizing_mode = str(getattr(config, "POSITION_SIZING_MODE", "risk") or "risk").strip().lower()
+    margin_allocation_pct = float(getattr(config, "POSITION_MARGIN_ALLOCATION_PCT", 0.0) or 0.0)
     sizing = risk_service.calculate_position_size(
         account_balance=bankroll,
         entry_price=resolved_entry_price,
         stop_loss_pct=stop_loss_pct,
         risk_pct=risk_pct,
+        leverage=leverage,
+        sizing_mode=sizing_mode,
+        margin_allocation_pct=margin_allocation_pct,
     )
     operability = risk_service.evaluate_symbol_operability(
         entry_price=resolved_entry_price,
@@ -53,6 +59,11 @@ def assess_symbol(symbol: str, bankroll: float, entry_price: float, stop_loss_pc
         quantity=float(sizing.get("quantity", 0.0) or 0.0),
         position_notional=float(sizing.get("position_notional", 0.0) or 0.0),
         trading_rules=trading_rules,
+        leverage=leverage,
+        sizing_mode=sizing_mode,
+        margin_allocation_pct=margin_allocation_pct,
+        account_balance=bankroll,
+        available_balance=bankroll,
     )
     return {
         "symbol": symbol,
@@ -60,6 +71,9 @@ def assess_symbol(symbol: str, bankroll: float, entry_price: float, stop_loss_pc
         "entry_price": round(float(resolved_entry_price), 6),
         "stop_loss_pct": round(float(stop_loss_pct), 4),
         "risk_per_trade_pct": round(float(risk_pct), 4),
+        "leverage": round(leverage, 4),
+        "position_sizing_mode": sizing_mode,
+        "position_margin_allocation_pct": round(margin_allocation_pct, 4),
         "sizing": sizing,
         "trading_rules": trading_rules,
         "operable": bool(operability.get("allowed", False)),

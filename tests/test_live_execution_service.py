@@ -487,6 +487,25 @@ class LiveExecutionServiceTests(unittest.TestCase):
         self.assertAlmostEqual(result["required_notional"], 62.5, places=4)
         self.assertGreater(result["required_risk_pct"], 2.0)
 
+    def test_risk_operability_accepts_sub_one_percent_stop_values(self):
+        risk_service = RiskManagementService(database=mock.Mock())
+        result = risk_service.evaluate_symbol_operability(
+            entry_price=62500.0,
+            stop_loss_pct=0.8,
+            risk_pct=2.0,
+            quantity=0.001,
+            position_notional=62.5,
+            trading_rules={"min_qty": 0.001, "min_notional": 50.0, "qty_step": 0.001},
+            leverage=10,
+            sizing_mode="hybrid",
+            account_balance=25.0,
+            available_balance=25.0,
+        )
+
+        self.assertTrue(result["allowed"])
+        self.assertAlmostEqual(result["min_required_balance"], 25.0, places=4)
+        self.assertAlmostEqual(result["required_risk_pct"], 2.0, places=4)
+
     def test_risk_operability_adjusts_btc_micro_size_when_risk_allows(self):
         risk_service = RiskManagementService(database=mock.Mock())
         result = risk_service.evaluate_symbol_operability(

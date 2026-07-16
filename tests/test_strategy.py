@@ -2745,6 +2745,25 @@ class StrategyTests(unittest.TestCase):
         self.assertAlmostEqual(sizing["risk_amount"], 0.45, places=2)
         self.assertAlmostEqual(sizing["effective_risk_pct"], 3.0, places=4)
 
+    def test_calculate_position_size_supports_sub_one_percent_stop_values(self):
+        service = RiskManagementService()
+
+        sizing = service.calculate_position_size(
+            account_balance=25.0,
+            entry_price=62500.0,
+            stop_loss_pct=0.8,
+            risk_pct=2.0,
+            leverage=10,
+            sizing_mode="hybrid",
+            margin_allocation_pct=100.0,
+        )
+
+        self.assertEqual(sizing["sizing_mode"], "hybrid")
+        self.assertAlmostEqual(sizing["position_notional"], 62.5, places=2)
+        self.assertAlmostEqual(sizing["risk_amount"], 0.5, places=2)
+        self.assertAlmostEqual(sizing["effective_risk_pct"], 2.0, places=4)
+        self.assertAlmostEqual(sizing["quantity"], 0.001, places=6)
+
     def test_live_trade_plan_caps_configured_allocation_by_risk_for_small_btc_account(self):
         database = mock.Mock()
         database.get_user_live_portfolio_risk_summary.return_value = {
@@ -2787,6 +2806,49 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(plan["allowed"])
         self.assertEqual(plan["sizing_mode"], "hybrid")
         self.assertAlmostEqual(plan["position_notional"], 33.33, places=2)
+        self.assertAlmostEqual(plan["risk_amount"], 0.5, places=2)
+        self.assertAlmostEqual(plan["effective_risk_pct"], 2.0, places=4)
+
+    def test_live_trade_plan_handles_sub_one_percent_stop_values(self):
+        database = mock.Mock()
+        database.get_user_live_portfolio_risk_summary.return_value = {
+            "open_trades": 0,
+            "total_open_risk_pct": 0.0,
+        }
+        database.get_daily_live_guardrail_summary.return_value = {
+            "closed_trades": 0,
+            "realized_pnl_pct": 0.0,
+            "consecutive_losses": 0,
+        }
+        database.get_live_drawdown_summary.return_value = {
+            "current_drawdown_pct": 0.0,
+            "max_drawdown_pct": 0.0,
+        }
+        service = RiskManagementService(database=database)
+
+        with (
+            mock.patch.object(config, "LEVERAGE", 10),
+            mock.patch.object(config.ProductionConfig, "POSITION_SIZING_MODE", "hybrid"),
+            mock.patch.object(config.ProductionConfig, "POSITION_MARGIN_ALLOCATION_PCT", 100.0),
+        ):
+            plan = service.build_trade_plan(
+                entry_price=62500.0,
+                stop_loss_pct=0.8,
+                account_balance=25.0,
+                risk_per_trade_pct=2.0,
+                max_open_trades=1,
+                symbol="BTC/USDT",
+                timeframe="15m",
+                execution_scope="live",
+                live_context={
+                    "user_id": 0,
+                    "account_id": "env-primary",
+                    "exchange_name": "binanceusdm",
+                },
+            )
+
+        self.assertTrue(plan["allowed"])
+        self.assertAlmostEqual(plan["position_notional"], 62.5, places=2)
         self.assertAlmostEqual(plan["risk_amount"], 0.5, places=2)
         self.assertAlmostEqual(plan["effective_risk_pct"], 2.0, places=4)
 

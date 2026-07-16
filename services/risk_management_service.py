@@ -248,7 +248,7 @@ class RiskManagementService:
 
         exchange_minimum = self._resolve_exchange_minimum_order(
             entry_price=resolved_entry,
-            stop_loss_pct=normalized_stop_loss_pct,
+            stop_loss_pct=stop_loss_pct,
             risk_pct=resolved_risk_pct,
             trading_rules=rules,
             leverage=resolved_leverage,
@@ -753,7 +753,7 @@ class RiskManagementService:
         sizing = self.calculate_position_size(
             account_balance=resolved_account_balance,
             entry_price=entry_price,
-            stop_loss_pct=normalized_stop_loss_pct,
+            stop_loss_pct=stop_loss_pct,
             risk_pct=effective_risk_per_trade_pct,
             leverage=resolved_leverage,
             sizing_mode=resolved_position_sizing_mode,
@@ -1072,4 +1072,8 @@ class RiskManagementService:
 
     def _normalize_pct(self, value: Optional[float]) -> float:
         raw_value = float(value or 0.0)
-        return raw_value / 100 if raw_value > 1 else raw_value
+        if raw_value == 0.0:
+            return 0.0
+        # Runtime/config inputs are expressed in percentage points (0.8 => 0.8%),
+        # but some internal flows may already pass normalized decimals (0.008).
+        return raw_value / 100.0 if abs(raw_value) >= 0.1 else raw_value

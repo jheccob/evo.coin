@@ -673,7 +673,9 @@ class PaperTradeService:
 
     def _normalize_pct(self, value: float) -> float:
         raw_value = float(value or 0.0)
-        return raw_value / 100 if raw_value > 1 else raw_value
+        if raw_value == 0.0:
+            return 0.0
+        return raw_value / 100.0 if abs(raw_value) >= 0.1 else raw_value
 
     def _normalize_timestamp(self, value) -> str:
         if isinstance(value, str):
