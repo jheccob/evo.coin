@@ -5218,6 +5218,92 @@ def render_workspace_credentials_panel(
                 st.rerun()
 
 
+def _render_runtime_bankroll_allocation_controls(
+    *,
+    form_key_prefix: str,
+    scope_key: str,
+    current_allocation_pct: float,
+    capital_base=None,
+    leverage_cap=None,
+    allowed_position_count: int = 1,
+    heading: str = "#### Alocação por Ordem",
+):
+    normalized_allocation_pct = max(1.0, min(100.0, float(current_allocation_pct)))
+    preset_options = {
+        "100% da banca liberada": 100.0,
+        "50% da banca liberada": 50.0,
+        "25% da banca liberada": 25.0,
+    }
+    preset_labels = [*preset_options.keys(), "Personalizado"]
+    default_preset = "Personalizado"
+    for label, preset_value in preset_options.items():
+        if abs(normalized_allocation_pct - float(preset_value)) < 0.01:
+            default_preset = label
+            break
+
+    if heading:
+        st.markdown(heading)
+    allocation_preset = st.radio(
+        "Quanto da banca liberada usar em cada ordem?",
+        options=preset_labels,
+        index=preset_labels.index(default_preset),
+        horizontal=True,
+        key=f"{form_key_prefix}_runtime_allocation_preset_{scope_key}",
+        help="Esse percentual define a margem usada por ordem sobre o capital liberado da conta.",
+    )
+    custom_allocation_pct = st.number_input(
+        "Alocação personalizada por ordem (%)",
+        min_value=1.0,
+        max_value=100.0,
+        value=float(normalized_allocation_pct),
+        step=5.0,
+        key=f"{form_key_prefix}_runtime_allocation_custom_{scope_key}",
+        help="Só entra em vigor quando a opção Personalizado estiver selecionada.",
+    )
+    runtime_allocation_pct = (
+        float(custom_allocation_pct)
+        if allocation_preset == "Personalizado"
+        else float(preset_options[allocation_preset])
+    )
+
+    if capital_base is not None and float(capital_base) > 0:
+        resolved_capital_base = float(capital_base)
+        resolved_leverage = max(float(leverage_cap or 0.0), 0.0)
+        concurrent_slots = max(int(allowed_position_count or 0), 1)
+        runtime_margin_per_order = resolved_capital_base * runtime_allocation_pct / 100.0
+        runtime_notional_per_order = runtime_margin_per_order * resolved_leverage
+        runtime_total_margin = runtime_margin_per_order * concurrent_slots
+
+        alloc_col1, alloc_col2, alloc_col3 = st.columns(3)
+        with alloc_col1:
+            st.metric("Margem por ordem", f"{runtime_margin_per_order:.2f} USDT")
+        with alloc_col2:
+            st.metric("Notional estimado por ordem", f"{runtime_notional_per_order:.2f} USDT")
+        with alloc_col3:
+            if concurrent_slots > 1:
+                st.metric("Margem máx. simultânea", f"{runtime_total_margin:.2f} USDT")
+            else:
+                st.metric("Posições simultâneas", "1 ordem")
+
+        st.caption(
+            f"O runtime vai usar {runtime_allocation_pct:.0f}% do capital liberado em cada ordem "
+            f"com alavancagem até {resolved_leverage:.1f}x. O notional final pode variar por "
+            "arredondamento e regras mínimas da exchange."
+        )
+        if concurrent_slots > 1 and runtime_total_margin > resolved_capital_base:
+            st.warning(
+                "Com o limite atual de posições simultâneas, a soma potencial de margem pode "
+                "passar do capital liberado. Reduza a alocação por ordem ou o número de posições."
+            )
+    else:
+        st.caption(
+            f"A conta vai operar com {runtime_allocation_pct:.0f}% do capital liberado por ordem. "
+            "Salve um capital liberado para ver a prévia de margem e notional."
+        )
+
+    return "fixed_allocation", float(runtime_allocation_pct)
+
+
 def render_workspace_capital_risk_panel(
     *,
     user_id: int,
@@ -5243,6 +5329,11 @@ def render_workspace_capital_risk_panel(
         or ProductionConfig.RISK_PER_TRADE_PCT
     )
     current_daily_loss = float(risk_profile.get("max_daily_loss", 6.0) or 6.0)
+    runtime_allocation_raw = risk_profile.get("runtime_position_margin_allocation_pct")
+    if runtime_allocation_raw in (None, ""):
+        current_runtime_order_allocation_pct = float(ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT)
+    else:
+        current_runtime_order_allocation_pct = float(runtime_allocation_raw)
     current_open_risk = float(
         risk_profile.get(
             "max_portfolio_open_risk_pct",
@@ -5366,6 +5457,17 @@ def render_workspace_capital_risk_panel(
                 key=f"{form_key_prefix}_profile_mode_{selected_account_id}",
             )
 
+        runtime_position_sizing_mode, runtime_position_margin_allocation_pct = (
+            _render_runtime_bankroll_allocation_controls(
+                form_key_prefix=form_key_prefix,
+                scope_key=selected_account_id,
+                current_allocation_pct=current_runtime_order_allocation_pct,
+                capital_base=float(capital_base),
+                leverage_cap=float(leverage_cap),
+                allowed_position_count=int(allowed_position_count),
+            )
+        )
+
         preferred_symbols = st.text_input(
             "Símbolos preferidos",
             value=",".join(risk_profile.get("preferred_symbols", execution_context.get("allowed_symbols", []))),
@@ -5425,6 +5527,8 @@ def render_workspace_capital_risk_panel(
                     "preferred_symbols": [item.strip() for item in preferred_symbols.split(",") if item.strip()],
                     "leverage_cap": float(leverage_cap),
                     "risk_mode": risk_mode_profile,
+                    "runtime_position_sizing_mode": runtime_position_sizing_mode,
+                    "runtime_position_margin_allocation_pct": float(runtime_position_margin_allocation_pct),
                     "is_valid": bool(risk_is_valid),
                     "live_enabled": bool(risk_live_enabled),
                     "paper_enabled": bool(risk_paper_enabled),
@@ -12080,6 +12184,38 @@ def main():
                         allowed_position_count = st.number_input("Máx Posições", min_value=0, value=1, step=1, key="allowed_position_count")
                         leverage_cap = st.number_input("Leverage Cap", min_value=0.0, value=float(config.LEVERAGE), step=0.5, key="leverage_cap")
 
+                    resolved_risk_account_id = (
+                        str(risk_account_id).strip()
+                        or db.get_default_user_account_id(int(risk_user_id))
+                    )
+                    admin_preview_accounts = db.get_user_accounts(
+                        user_id=int(risk_user_id),
+                        account_id=resolved_risk_account_id,
+                        status=None,
+                    )
+                    admin_existing_risk_profile = (
+                        db.get_user_risk_profile(int(risk_user_id), resolved_risk_account_id) or {}
+                    )
+                    admin_preview_capital = float(
+                        (admin_preview_accounts[0].get("capital_base") if admin_preview_accounts else 0.0) or 0.0
+                    )
+                    runtime_position_sizing_mode, runtime_position_margin_allocation_pct = (
+                        _render_runtime_bankroll_allocation_controls(
+                            form_key_prefix="multiuser_risk_profile_form",
+                            scope_key=f"{risk_user_id}_{resolved_risk_account_id}",
+                            current_allocation_pct=float(
+                                admin_existing_risk_profile.get(
+                                    "runtime_position_margin_allocation_pct",
+                                    ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
+                                )
+                                or ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT
+                            ),
+                            capital_base=admin_preview_capital,
+                            leverage_cap=float(leverage_cap),
+                            allowed_position_count=int(allowed_position_count),
+                        )
+                    )
+
                     preferred_symbols = st.text_input(
                         "Símbolos Preferidos",
                         value="BTC/USDT,ETH/USDT",
@@ -12090,10 +12226,6 @@ def main():
                     risk_live_enabled = st.checkbox("Live liberado no risco", value=True, key="risk_live_enabled")
                     risk_paper_enabled = st.checkbox("Paper liberado no risco", value=True, key="risk_paper_enabled")
                     if st.form_submit_button("Salvar Perfil de Risco"):
-                        resolved_risk_account_id = (
-                            str(risk_account_id).strip()
-                            or db.get_default_user_account_id(int(risk_user_id))
-                        )
                         db.upsert_user_risk_profile(
                             {
                                 "user_id": int(risk_user_id),
@@ -12106,6 +12238,8 @@ def main():
                                 "preferred_symbols": [item.strip() for item in str(preferred_symbols).split(",") if item.strip()],
                                 "leverage_cap": float(leverage_cap),
                                 "risk_mode": risk_mode_profile,
+                                "runtime_position_sizing_mode": runtime_position_sizing_mode,
+                                "runtime_position_margin_allocation_pct": float(runtime_position_margin_allocation_pct),
                                 "is_valid": bool(risk_is_valid),
                                 "live_enabled": bool(risk_live_enabled),
                                 "paper_enabled": bool(risk_paper_enabled),

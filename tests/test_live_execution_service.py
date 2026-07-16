@@ -705,6 +705,64 @@ class MultiUserRuntimeExecutionTests(unittest.TestCase):
             1.8,
         )
 
+    def test_multiuser_runtime_uses_account_runtime_allocation_profile(self):
+        database = mock.Mock()
+        database.save_user_execution_event.return_value = 99
+        risk_service = mock.Mock()
+        risk_service.evaluate_risk_engine.return_value = {
+            "allowed": True,
+            "risk_mode": "normal",
+            "risk_amount": 0.3,
+            "position_notional": 20.0,
+            "quantity": 0.0002,
+        }
+        service = MultiUserRuntimeService(
+            database=database,
+            risk_management_service=risk_service,
+            live_execution_service=mock.Mock(),
+        )
+        context = {
+            "user_id": 1,
+            "account_id": "acct-1",
+            "account_alias": "main",
+            "exchange_name": "binanceusdm",
+            "live_enabled": True,
+            "token_status": "valid",
+            "permission_status": "valid",
+            "reconciliation_status": "ok",
+            "governance_mode": "normal",
+            "governance_blocked": False,
+            "risk_profile": {
+                "is_valid": True,
+                "leverage_cap": 10,
+                "runtime_position_sizing_mode": "fixed_allocation",
+                "runtime_position_margin_allocation_pct": 50.0,
+            },
+            "capital_base": 20.0,
+            "allowed_symbols": ["BTC/USDT"],
+            "allowed_timeframes": ["15m"],
+        }
+
+        with mock.patch.object(config.ProductionConfig, "ENABLE_MULTIUSER_AUTO_ORDER_EXECUTION", False):
+            service.run_account_cycle(
+                context=context,
+                symbol="BTC/USDT",
+                timeframe="15m",
+                strategy_version="test-v1",
+                entry_price=71000.0,
+                stop_loss_pct=1.8,
+                signal_side="sell",
+            )
+
+        self.assertEqual(
+            risk_service.evaluate_risk_engine.call_args.kwargs["position_sizing_mode"],
+            "fixed_allocation",
+        )
+        self.assertAlmostEqual(
+            risk_service.evaluate_risk_engine.call_args.kwargs["margin_allocation_pct"],
+            50.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

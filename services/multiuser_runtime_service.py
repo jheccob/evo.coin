@@ -129,6 +129,19 @@ class MultiUserRuntimeService:
             stop_loss_pct=stop_loss_pct,
         )
         resolved_leverage = float(risk_profile.get("leverage_cap") or config.LEVERAGE or 1)
+        resolved_runtime_sizing_mode = (
+            str(
+                risk_profile.get("runtime_position_sizing_mode")
+                or ProductionConfig.RUNTIME_POSITION_SIZING_MODE
+                or "fixed_allocation"
+            ).strip().lower()
+            or "fixed_allocation"
+        )
+        resolved_runtime_allocation_raw = risk_profile.get("runtime_position_margin_allocation_pct")
+        if resolved_runtime_allocation_raw in (None, ""):
+            resolved_runtime_allocation_pct = float(ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT)
+        else:
+            resolved_runtime_allocation_pct = float(resolved_runtime_allocation_raw)
         risk_plan = self.risk_management_service.evaluate_risk_engine(
             entry_price=resolved_entry,
             stop_loss_pct=resolved_stop_loss_pct,
@@ -146,8 +159,8 @@ class MultiUserRuntimeService:
             execution_scope="live",
             live_context=context,
             leverage=resolved_leverage,
-            position_sizing_mode=ProductionConfig.RUNTIME_POSITION_SIZING_MODE,
-            margin_allocation_pct=ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
+            position_sizing_mode=resolved_runtime_sizing_mode,
+            margin_allocation_pct=resolved_runtime_allocation_pct,
         )
 
         if not risk_plan.get("allowed", False):

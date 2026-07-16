@@ -864,6 +864,8 @@ class TradingDatabase:
                 allowed_position_count INTEGER DEFAULT 0,
                 preferred_symbols TEXT,
                 leverage_cap REAL DEFAULT 0.0,
+                runtime_position_sizing_mode TEXT DEFAULT 'fixed_allocation',
+                runtime_position_margin_allocation_pct REAL DEFAULT 100.0,
                 risk_mode TEXT DEFAULT 'normal',
                 live_enabled BOOLEAN DEFAULT FALSE,
                 paper_enabled BOOLEAN DEFAULT TRUE,
@@ -1145,6 +1147,8 @@ class TradingDatabase:
             '''
         )
 
+        self._ensure_column(cursor, 'user_risk_profiles', 'runtime_position_sizing_mode', "TEXT DEFAULT 'fixed_allocation'")
+        self._ensure_column(cursor, 'user_risk_profiles', 'runtime_position_margin_allocation_pct', 'REAL DEFAULT 100.0')
         self._ensure_column(cursor, 'trading_signals', 'context_timeframe', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'strategy_version', 'TEXT')
         self._ensure_column(cursor, 'trading_signals', 'regime', 'TEXT')
@@ -3240,6 +3244,21 @@ class TradingDatabase:
                 "allowed_position_count": int(existing_risk.get("allowed_position_count", 1) or 1),
                 "preferred_symbols": existing_risk.get("preferred_symbols") or ["BTC/USDT"],
                 "leverage_cap": float(existing_risk.get("leverage_cap", 10.0) or 10.0),
+                "runtime_position_sizing_mode": (
+                    str(
+                        existing_risk.get("runtime_position_sizing_mode")
+                        or ProductionConfig.RUNTIME_POSITION_SIZING_MODE
+                        or "fixed_allocation"
+                    ).strip().lower()
+                    or "fixed_allocation"
+                ),
+                "runtime_position_margin_allocation_pct": float(
+                    existing_risk.get(
+                        "runtime_position_margin_allocation_pct",
+                        ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
+                    )
+                    or ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT
+                ),
                 "risk_mode": existing_risk.get("risk_mode") or "normal",
                 "live_enabled": bool(live_enabled),
                 "paper_enabled": bool(paper_enabled),
@@ -3300,6 +3319,21 @@ class TradingDatabase:
                 "allowed_position_count": int(risk_profile.get("allowed_position_count", 1) or 1),
                 "preferred_symbols": risk_profile.get("preferred_symbols") or ["BTC/USDT"],
                 "leverage_cap": float(risk_profile.get("leverage_cap", 10.0) or 10.0),
+                "runtime_position_sizing_mode": (
+                    str(
+                        risk_profile.get("runtime_position_sizing_mode")
+                        or ProductionConfig.RUNTIME_POSITION_SIZING_MODE
+                        or "fixed_allocation"
+                    ).strip().lower()
+                    or "fixed_allocation"
+                ),
+                "runtime_position_margin_allocation_pct": float(
+                    risk_profile.get(
+                        "runtime_position_margin_allocation_pct",
+                        ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT,
+                    )
+                    or ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT
+                ),
                 "risk_mode": risk_profile.get("risk_mode") or "normal",
                 "live_enabled": bool(enabled),
                 "paper_enabled": not bool(enabled),
@@ -3708,14 +3742,28 @@ class TradingDatabase:
             user_id = int(profile_data["user_id"])
             account_id = str(profile_data["account_id"])
             preferred_symbols = self._to_json_text(profile_data.get("preferred_symbols"))
+            runtime_position_sizing_mode = (
+                str(
+                    profile_data.get("runtime_position_sizing_mode")
+                    or ProductionConfig.RUNTIME_POSITION_SIZING_MODE
+                    or "fixed_allocation"
+                ).strip().lower()
+                or "fixed_allocation"
+            )
+            runtime_position_margin_allocation_raw = profile_data.get("runtime_position_margin_allocation_pct")
+            if runtime_position_margin_allocation_raw in (None, ""):
+                runtime_position_margin_allocation_pct = float(ProductionConfig.RUNTIME_POSITION_MARGIN_ALLOCATION_PCT)
+            else:
+                runtime_position_margin_allocation_pct = float(runtime_position_margin_allocation_raw)
             cursor.execute(
                 '''
                 INSERT INTO user_risk_profiles (
                     user_id, account_id,
                     max_risk_per_trade, max_daily_loss, max_drawdown, max_portfolio_open_risk_pct,
-                    allowed_position_count, preferred_symbols, leverage_cap, risk_mode,
+                    allowed_position_count, preferred_symbols, leverage_cap,
+                    runtime_position_sizing_mode, runtime_position_margin_allocation_pct, risk_mode,
                     live_enabled, paper_enabled, is_valid, notes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(user_id, account_id) DO UPDATE SET
                     max_risk_per_trade = excluded.max_risk_per_trade,
                     max_daily_loss = excluded.max_daily_loss,
@@ -3724,6 +3772,8 @@ class TradingDatabase:
                     allowed_position_count = excluded.allowed_position_count,
                     preferred_symbols = excluded.preferred_symbols,
                     leverage_cap = excluded.leverage_cap,
+                    runtime_position_sizing_mode = excluded.runtime_position_sizing_mode,
+                    runtime_position_margin_allocation_pct = excluded.runtime_position_margin_allocation_pct,
                     risk_mode = excluded.risk_mode,
                     live_enabled = excluded.live_enabled,
                     paper_enabled = excluded.paper_enabled,
@@ -3741,6 +3791,8 @@ class TradingDatabase:
                     int(profile_data.get("allowed_position_count", 0) or 0),
                     preferred_symbols,
                     float(profile_data.get("leverage_cap", 0.0) or 0.0),
+                    runtime_position_sizing_mode,
+                    runtime_position_margin_allocation_pct,
                     profile_data.get("risk_mode", "normal"),
                     int(bool(profile_data.get("live_enabled", False))),
                     int(bool(profile_data.get("paper_enabled", True))),
